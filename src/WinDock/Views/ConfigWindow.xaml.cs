@@ -10,6 +10,7 @@ namespace WinDock.Views;
 public partial class ConfigWindow : Window
 {
     const int ToggleId = 1;
+    const int SearchId = 2;
     const int PresetBaseId = 10;
 
     readonly MainViewModel vm;
@@ -20,6 +21,7 @@ public partial class ConfigWindow : Window
     public ConfigWindow(MainViewModel vm)
     {
         this.vm = vm;
+        DesktopHub.Configure(vm.Settings);
         InitializeComponent();
         DataContext = vm;
         MaxHeight = SystemParameters.WorkArea.Height;
@@ -30,6 +32,9 @@ public partial class ConfigWindow : Window
         const uint mods = Native.MOD_CONTROL | Native.MOD_ALT | Native.MOD_NOREPEAT;
         Native.RegisterHotKey(handle, ToggleId, mods, 0x57);
         for (var i = 0; i < 9; i++) Native.RegisterHotKey(handle, PresetBaseId + i, mods, (uint)(0x31 + i));
+        RegisterSearchHotkey();
+        DesktopHub.ShortcutChanged += RegisterSearchHotkey;
+        vm.Dock.Changed += OnDesktopOption;
 
         KeyDown += (_, e) => { if (e.Key == Key.Escape) Hide(); };
         usageTimer.Tick += (_, _) => ShowUsage();
@@ -134,6 +139,10 @@ public partial class ConfigWindow : Window
 
     public void Release()
     {
+        DesktopHub.ShortcutChanged -= RegisterSearchHotkey;
+        vm.Dock.Changed -= OnDesktopOption;
+        Native.UnregisterHotKey(source.Handle, SearchId);
+        DesktopHub.Close();
         Native.UnregisterHotKey(source.Handle, ToggleId);
         for (var i = 0; i < 9; i++) Native.UnregisterHotKey(source.Handle, PresetBaseId + i);
     }
@@ -167,6 +176,7 @@ public partial class ConfigWindow : Window
         EnChip.IsChecked = Loc.Instance.Language == Loc.English;
         PtChip.IsChecked = Loc.Instance.Language == Loc.Portuguese;
         ZhChip.IsChecked = Loc.Instance.Language == Loc.Chinese;
+        RegisterSearchHotkey();
     }
 
     void ShowUsage()
@@ -190,9 +200,22 @@ public partial class ConfigWindow : Window
         handled = true;
         var id = (int)wParam;
         if (id == ToggleId) Toggle();
+        else if (id == SearchId) DesktopHub.ToggleSearch();
         else _ = vm.ApplyIndexAsync(id - PresetBaseId);
         return 0;
     }
 
     void OnUpdateClick(object sender, RoutedEventArgs e) => Launcher.OpenFile(Updates.Page);
+
+    void RegisterSearchHotkey()
+    {
+        Native.UnregisterHotKey(source.Handle, SearchId);
+        if (!vm.Dock.SearchEnabled) { vm.Dock.SearchShortcutStatus = Loc.T("searchDisabled"); return; }
+        var shortcut = DesktopHub.Shortcut(vm.Settings.Desktop.SearchHotkey);
+        vm.Dock.SearchShortcutStatus = Native.RegisterHotKey(source.Handle, SearchId, shortcut.Modifiers, shortcut.Key)
+            ? Loc.F("searchShortcutReady", vm.Settings.Desktop.SearchHotkey) : Loc.T("searchShortcutBusy");
+    }
+    void OnDesktopOption(string name) { if (name == nameof(DockOptions.SearchEnabled)) RegisterSearchHotkey(); }
+    void OnOpenSearch(object sender, RoutedEventArgs e) => DesktopHub.OpenSearch();
+    void OnOpenOrganizer(object sender, RoutedEventArgs e) => DesktopHub.OpenOrganizer();
 }

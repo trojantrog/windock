@@ -12,7 +12,7 @@ namespace WinDock.Views;
 
 public sealed class PreviewWindow : Window
 {
-    const double BoxWidth = 216, BoxHeight = 128;
+    double boxWidth = 320, boxHeight = 200;
     const int DwmCorner = 33, DwmRound = 2;
     const uint ThumbDestination = 0x1, ThumbVisible = 0x8, ThumbOpacity = 0x4, ThumbClientOnly = 0x10;
 
@@ -20,6 +20,7 @@ public sealed class PreviewWindow : Window
     readonly List<(nint Thumb, Border Box)> thumbs = [];
     nint hwnd;
     bool dark = true;
+    (double Center, double Top, Forms.Screen Screen)? anchor;
 
     public PreviewWindow()
     {
@@ -30,7 +31,10 @@ public sealed class PreviewWindow : Window
         Topmost = true;
         SizeToContent = SizeToContent.WidthAndHeight;
         UseLayoutRounding = true;
-        FontFamily = (FontFamily)Application.Current.FindResource("Mono");
+        FontFamily = new FontFamily("Microsoft YaHei UI, Segoe UI");
+        SnapsToDevicePixels = true;
+        TextOptions.SetTextFormattingMode(this, TextFormattingMode.Display);
+        TextOptions.SetTextRenderingMode(this, TextRenderingMode.ClearType);
         Content = new Border { Padding = new Thickness(6), Child = cards };
 
         SourceInitialized += (_, _) =>
@@ -47,6 +51,7 @@ public sealed class PreviewWindow : Window
         };
         MouseEnter += (_, _) => PointerEntered?.Invoke();
         MouseLeave += (_, _) => PointerLeft?.Invoke();
+        DpiChanged += (_, _) => Dispatcher.BeginInvoke(() => { UpdateLayout(); Position(); Reposition(); }, DispatcherPriority.Loaded);
     }
 
     public AppTile? Tile { get; private set; }
@@ -64,6 +69,12 @@ public sealed class PreviewWindow : Window
         Release();
         Background = new SolidColorBrush(dark ? Color.FromRgb(0x1C, 0x1E, 0x26) : Color.FromRgb(0xF6, 0xF6, 0xF8));
         cards.Children.Clear();
+        anchor = (centerX, top, screen);
+        var monitor = Native.MonitorFromPoint(new Native.Point { X = (int)centerX, Y = (int)top }, 2);
+        var dpiScale = Native.GetDpiForMonitor(monitor, 0, out var dpi, out _) == 0 ? dpi / 96.0 : 1;
+        var count = Math.Min(6, tile.Windows.Count);
+        boxWidth = Math.Clamp((screen.Bounds.Width / dpiScale - 32) / Math.Max(1, count) - 16, 160, 320);
+        boxHeight = Math.Round(boxWidth * 0.625);
         foreach (var window in tile.Windows.Take(6)) cards.Children.Add(Card(tile, window));
         if (cards.Children.Count == 0)
         {
@@ -73,6 +84,14 @@ public sealed class PreviewWindow : Window
 
         if (!IsVisible) Show();
         UpdateLayout();
+        Position();
+        Dispatcher.BeginInvoke(Register, DispatcherPriority.Loaded);
+    }
+
+    void Position()
+    {
+        if (anchor is not { } location || hwnd == 0) return;
+        var (centerX, top, screen) = location;
         var scale = VisualTreeHelper.GetDpi(this).DpiScaleX;
         var w = (int)Math.Round(ActualWidth * scale);
         var h = (int)Math.Round(ActualHeight * scale);
@@ -80,7 +99,6 @@ public sealed class PreviewWindow : Window
         var x =(int)Math.Clamp(centerX - w / 2.0, bounds.Left + 8, Math.Max(bounds.Left + 8, bounds.Right - w - 8));
         var y = (int)Math.Max(bounds.Top + 8, top - h - 10 * scale);
         Native.SetWindowPos(hwnd, Native.HWND_TOPMOST, x, y, 0, 0, Native.SWP_NOSIZE | Native.SWP_NOACTIVATE);
-        Dispatcher.BeginInvoke(Register, DispatcherPriority.Loaded);
     }
 
     Border Card(AppTile tile, AppWindow window)
@@ -88,7 +106,7 @@ public sealed class PreviewWindow : Window
         var title = new TextBlock
         {
             Text = Native.TitleOf(window.Handle) is { Length: > 0 } live ? live : window.Title,
-            FontSize = 11,
+            FontSize = 12,
             Foreground = Ink,
             TextTrimming = TextTrimming.CharacterEllipsis,
             VerticalAlignment = VerticalAlignment.Center
@@ -113,12 +131,13 @@ public sealed class PreviewWindow : Window
         close.MouseEnter += (_, _) => close.Background = new SolidColorBrush(Color.FromRgb(0xE8, 0x11, 0x23));
         close.MouseLeave += (_, _) => close.Background = Brushes.Transparent;
 
-        var header = new DockPanel { Margin = new Thickness(2, 0, 0, 6), Width = BoxWidth };
+        var header = new DockPanel { Margin = new Thickness(2, 0, 0, 6), Width = boxWidth };
         DockPanel.SetDock(close, Dock.Right);
         header.Children.Add(close);
         if (tile.Icon is { } icon)
         {
             var small = new Image { Source = icon, Width = 16, Height = 16, Margin = new Thickness(0, 0, 7, 0) };
+            RenderOptions.SetBitmapScalingMode(small, BitmapScalingMode.HighQuality);
             DockPanel.SetDock(small, Dock.Left);
             header.Children.Add(small);
         }
@@ -126,8 +145,8 @@ public sealed class PreviewWindow : Window
 
         var box = new Border
         {
-            Width = BoxWidth,
-            Height = BoxHeight,
+            Width = boxWidth,
+            Height = boxHeight,
             CornerRadius = new CornerRadius(6),
             Background = new SolidColorBrush(dark ? Color.FromArgb(0x14, 0xFF, 0xFF, 0xFF) : Color.FromArgb(0x0F, 0, 0, 0)),
             Tag = window.Handle,
@@ -165,6 +184,7 @@ public sealed class PreviewWindow : Window
     void Register()
     {
         if (!IsVisible || hwnd == 0) return;
+        Release();
         foreach (var card in cards.Children.OfType<Border>())
         {
             if (card.Child is not StackPanel { Children.Count: 2 } stackPanel || stackPanel.Children[1] is not Border box || box.Tag is not nint source) continue;
@@ -176,15 +196,16 @@ public sealed class PreviewWindow : Window
 
     void Reposition()
     {
-        var scale = VisualTreeHelper.GetDpi(this).DpiScaleX;
+        var client = PointToScreen(new Point());
         foreach (var (thumb, box) in thumbs)
         {
             if (!box.IsLoaded) continue;
-            var origin = box.TransformToAncestor(this).Transform(new Point(0, 0));
-            var left = origin.X * scale;
-            var topPx = origin.Y * scale;
-            var width = box.ActualWidth * scale;
-            var height = box.ActualHeight * scale;
+            var origin = box.PointToScreen(new Point());
+            var end = box.PointToScreen(new Point(box.ActualWidth, box.ActualHeight));
+            var left = origin.X - client.X;
+            var topPx = origin.Y - client.Y;
+            var width = end.X - origin.X;
+            var height = end.Y - origin.Y;
             Native.DwmQueryThumbnailSourceSize(thumb, out var source);
             if (source.Width > 0 && source.Height > 0)
             {
@@ -199,7 +220,7 @@ public sealed class PreviewWindow : Window
             var props = new Native.ThumbnailProperties
             {
                 Flags = ThumbDestination | ThumbVisible | ThumbOpacity | ThumbClientOnly,
-                Destination = new Native.Rect { Left = (int)left, Top = (int)topPx, Right = (int)(left + width), Bottom = (int)(topPx + height) },
+                Destination = new Native.Rect { Left = (int)Math.Round(left), Top = (int)Math.Round(topPx), Right = (int)Math.Round(left + width), Bottom = (int)Math.Round(topPx + height) },
                 Opacity = 255,
                 Visible = 1,
                 SourceClientAreaOnly = 0

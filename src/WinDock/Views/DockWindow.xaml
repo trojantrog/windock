@@ -255,6 +255,13 @@
             </Grid>
         </DataTemplate>
 
+        <DataTemplate DataType="{x:Type vm:UtilityTile}">
+            <Grid Style="{StaticResource TileRoot}" Width="{DynamicResource IconSize}" ToolTip="{Binding Tip}" AutomationProperties.Name="{Binding Tip}">
+                <Border CornerRadius="13" Background="{DynamicResource TileFace}"/>
+                <TextBlock Text="{Binding Glyph}" FontFamily="{StaticResource Glyphs}" FontSize="23" Foreground="{DynamicResource DockInk}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Grid>
+        </DataTemplate>
+
         <DataTemplate DataType="{x:Type vm:SystemTile}">
             <StackPanel Orientation="Horizontal" Height="{DynamicResource IconSize}">
                 <Border Background="Transparent" Padding="6,0" Cursor="Hand" ToolTip="{Binding TrayTip}" MouseLeftButtonUp="OnTrayClick">

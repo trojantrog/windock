@@ -27,6 +27,7 @@ public sealed partial class DockViewModel : ObservableObject, IDisposable
     readonly DispatcherTimer musicGrace = new() { Interval = TimeSpan.FromSeconds(3) };
     readonly HashSet<PresetViewModel> dirty = [];
     readonly StartTile start = new();
+    readonly UtilityTile search = new("search"), organizer = new("organizer");
     readonly SystemTile system = new();
     List<AppMatch> always = [];
     string? activeId;
@@ -150,7 +151,7 @@ public sealed partial class DockViewModel : ObservableObject, IDisposable
             tracker.ShowAll();
             shell.SetHiddenWindows([]);
         }
-        if (name == nameof(DockOptions.ReplaceTaskbar)) Rebuild();
+        if (name is nameof(DockOptions.ReplaceTaskbar) or nameof(DockOptions.SearchEnabled) or nameof(DockOptions.OrganizerEnabled)) Rebuild();
     }
 
     void OnActiveChanged()
@@ -233,6 +234,8 @@ public sealed partial class DockViewModel : ObservableObject, IDisposable
     {
         var desired = new List<DockTile>();
         if (SystemVisible) desired.Add(start);
+        if (Options.SearchEnabled) desired.Add(search);
+        if (Options.OrganizerEnabled) desired.Add(organizer);
 
         var pinned = new List<AppTile>();
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);

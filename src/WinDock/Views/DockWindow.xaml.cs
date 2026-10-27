@@ -503,6 +503,7 @@ public partial class DockWindow : Window
         {
             AppTile app => app.Name,
             StartTile s => s.Tip,
+            UtilityTile utility => utility.Tip,
             _ => null
         };
         if (preview is { IsVisible: true } p)
@@ -580,6 +581,13 @@ public partial class DockWindow : Window
                 if (e.ChangedButton == MouseButton.Left) ShellGuard.Start();
                 else if (e.ChangedButton == MouseButton.Right) ShellGuard.PowerMenu();
                 break;
+            case UtilityTile utility:
+                if (e.ChangedButton == MouseButton.Left)
+                {
+                    if (utility.Kind == "search") DesktopHub.OpenSearch();
+                    else DesktopHub.OpenOrganizer();
+                }
+                break;
             case WidgetTile widget:
                 if (e.ChangedButton == MouseButton.Left && widget.HasPanel) OpenPanel(widget, element);
                 else if (e.ChangedButton == MouseButton.Left)
@@ -654,10 +662,11 @@ public partial class DockWindow : Window
 
     void Bounce(FrameworkElement element)
     {
+        if (!vm.Options.IconAnimation || !SystemParameters.ClientAreaAnimation) return;
         var bounce = new DoubleAnimationUsingKeyFrames { Duration = TimeSpan.FromMilliseconds(760), FillBehavior = FillBehavior.Stop };
         var up = new QuadraticEase { EasingMode = EasingMode.EaseOut };
         var down = new QuadraticEase { EasingMode = EasingMode.EaseIn };
-        var lift = -IconSize * 0.32;
+        var lift = -IconSize * vm.Options.AnimationStrength;
         bounce.KeyFrames.Add(new EasingDoubleKeyFrame(lift, KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(170)), up));
         bounce.KeyFrames.Add(new EasingDoubleKeyFrame(0, KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(340)), down));
         bounce.KeyFrames.Add(new EasingDoubleKeyFrame(lift * 0.45, KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(480)), up));
@@ -965,6 +974,8 @@ public partial class DockWindow : Window
             menu.Items.Add(Item(Loc.T("perScreen"), () => vm.Options.PerScreen = !vm.Options.PerScreen, vm.Options.PerScreen));
         menu.Items.Add(new Separator());
         menu.Items.Add(Item(Loc.T("dockSettings"), openSettings));
+        menu.Items.Add(Item(Loc.T("searchTitle"), DesktopHub.OpenSearch));
+        menu.Items.Add(Item(Loc.T("organizerTitle"), DesktopHub.OpenOrganizer));
         menu.Items.Add(Item(Loc.T("trayExit"), () => Application.Current.Shutdown()));
         Open(menu);
     }

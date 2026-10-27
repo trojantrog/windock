@@ -15,6 +15,7 @@ public sealed class Settings
     public bool CheckUpdates { get; set; } = true;
     public string? UpdateSeen { get; set; }
     public bool TourSeen { get; set; }
+    public DesktopSettings Desktop { get; set; } = new();
 
     public static string Dir { get; } = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "WinDock");
@@ -35,6 +36,7 @@ public sealed class Settings
         {
             var settings = JsonSerializer.Deserialize<Settings>(json, Json.Options) ?? new();
             settings.Dock ??= new();
+            settings.Desktop ??= new();
             settings.Dock.Clamp();
             return settings;
         }
@@ -71,15 +73,27 @@ public sealed class DockSettings
     public bool PerScreen { get; set; }
     public Dictionary<string, string> ScreenEnvironments { get; set; } = [];
     public string? Screen { get; set; }
+    public bool IconAnimation { get; set; }
+    public double AnimationStrength { get; set; } = 0.32;
+    public bool SearchEnabled { get; set; } = true;
+    public bool OrganizerEnabled { get; set; } = true;
 
     public void Clamp()
     {
         Magnification = Math.Clamp(Magnification, 1.1, 2.4);
         LensWidth = Math.Clamp(LensWidth, 1, 4.5);
         IconSize = Math.Clamp(IconSize, 32, 72);
+        AnimationStrength = Math.Clamp(AnimationStrength, 0.2, 1.3);
         if (Lens is not (LensNone or LensScale or LensMagnify)) Lens = LensMagnify;
         if (DockTheme.All.All(t => t.Id != Theme)) Theme = ThemeDark;
     }
+}
+
+public sealed class DesktopSettings
+{
+    public string? PecoFencePath { get; set; }
+    public string SearchHotkey { get; set; } = "Alt+Space";
+    public string EverythingInstance { get; set; } = "";
 }
 
 public static class Json

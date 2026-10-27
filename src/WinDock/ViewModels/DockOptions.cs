@@ -41,8 +41,14 @@ public sealed class DockOptions : ObservableObject
     public bool CompactWidgets { get => D.CompactWidgets; set => Set(() => D.CompactWidgets = value); }
     public bool PerScreen { get => D.PerScreen; set => Set(() => D.PerScreen = value); }
     public bool CheckUpdates { get => settings.CheckUpdates; set => Set(() => settings.CheckUpdates = value); }
+    public bool IconAnimation { get => D.IconAnimation; set => Set(() => D.IconAnimation = value); }
+    public double AnimationStrength { get => D.AnimationStrength; set => Set(() => D.AnimationStrength = Math.Round(value, 2)); }
+    public bool SearchEnabled { get => D.SearchEnabled; set => Set(() => D.SearchEnabled = value); }
+    public bool OrganizerEnabled { get => D.OrganizerEnabled; set => Set(() => D.OrganizerEnabled = value); }
 
     string? newVersion;
+    string searchShortcutStatus = "";
+    public string SearchShortcutStatus { get => searchShortcutStatus; set { searchShortcutStatus = value; OnPropertyChanged(); } }
 
     public string? NewVersion
     {

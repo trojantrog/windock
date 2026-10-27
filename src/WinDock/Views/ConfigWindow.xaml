@@ -112,6 +112,33 @@
 
                         <Border Margin="0,0,0,12" Padding="18,16" CornerRadius="20" Background="{StaticResource Plate}" BorderBrush="{StaticResource Hairline}" BorderThickness="1">
                             <StackPanel>
+                                <TextBlock Text="{Binding [desktopTools], Source={x:Static svc:Loc.Instance}, Mode=OneWay}" FontSize="14" Foreground="{StaticResource Ink}" Margin="0,0,0,16"/>
+                                <ToggleButton Content="{Binding [searchEnabled], Source={x:Static svc:Loc.Instance}, Mode=OneWay}" Style="{StaticResource SwitchToggle}" IsChecked="{Binding SearchEnabled, Mode=TwoWay}"/>
+                                <TextBlock Text="{Binding SearchShortcutStatus}" Style="{StaticResource Note}"/>
+                                <ToggleButton Content="{Binding [organizerEnabled], Source={x:Static svc:Loc.Instance}, Mode=OneWay}" Style="{StaticResource SwitchToggle}" IsChecked="{Binding OrganizerEnabled, Mode=TwoWay}" Margin="0,0,0,12"/>
+                                <WrapPanel>
+                                    <Button Content="{Binding [searchTitle], Source={x:Static svc:Loc.Instance}, Mode=OneWay}" Style="{StaticResource GhostButton}" Click="OnOpenSearch" Margin="0,0,12,0"/>
+                                    <Button Content="{Binding [organizerTitle], Source={x:Static svc:Loc.Instance}, Mode=OneWay}" Style="{StaticResource GhostButton}" Click="OnOpenOrganizer"/>
+                                </WrapPanel>
+                            </StackPanel>
+                        </Border>
+
+                        <Border Margin="0,0,0,12" Padding="18,16" CornerRadius="20" Background="{StaticResource Plate}" BorderBrush="{StaticResource Hairline}" BorderThickness="1">
+                            <StackPanel>
+                                <TextBlock Text="{Binding [animationTitle], Source={x:Static svc:Loc.Instance}, Mode=OneWay}" FontSize="14" Foreground="{StaticResource Ink}" Margin="0,0,0,16"/>
+                                <ToggleButton Content="{Binding [iconAnimation], Source={x:Static svc:Loc.Instance}, Mode=OneWay}" Style="{StaticResource SwitchToggle}" IsChecked="{Binding IconAnimation, Mode=TwoWay}" Margin="0,0,0,14"/>
+                                <Grid Margin="0,0,0,10">
+                                    <Grid.ColumnDefinitions><ColumnDefinition Width="190"/><ColumnDefinition/><ColumnDefinition Width="70"/></Grid.ColumnDefinitions>
+                                    <TextBlock Text="{Binding [animationStrength], Source={x:Static svc:Loc.Instance}, Mode=OneWay}" Foreground="{StaticResource Ink}" VerticalAlignment="Center"/>
+                                    <Slider Grid.Column="1" Style="{StaticResource FlatSlider}" Minimum="0.2" Maximum="1.3" Value="{Binding AnimationStrength, Mode=TwoWay}"/>
+                                    <TextBlock Grid.Column="2" Text="{Binding AnimationStrength, StringFormat={}{0:0.00}x}" Foreground="{StaticResource Muted}" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                                </Grid>
+
+                            </StackPanel>
+                        </Border>
+
+                        <Border Margin="0,0,0,12" Padding="18,16" CornerRadius="20" Background="{StaticResource Plate}" BorderBrush="{StaticResource Hairline}" BorderThickness="1">
+                            <StackPanel>
                                 <TextBlock Text="{Binding [appearance], Source={x:Static svc:Loc.Instance}, Mode=OneWay}" FontFamily="{StaticResource Display}" FontSize="12.5" Foreground="{StaticResource Ink}" Margin="0,0,0,16"/>
 
                                 <TextBlock Text="{Binding [lens], Source={x:Static svc:Loc.Instance}, Mode=OneWay}" FontFamily="{StaticResource Mono}" FontSize="11" Foreground="{StaticResource Muted}" Margin="0,0,0,8"/>

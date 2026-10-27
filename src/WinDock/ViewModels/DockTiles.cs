@@ -25,6 +25,15 @@ public sealed class StartTile : DockTile
     public string Tip => Loc.T("start");
 }
 
+public sealed class UtilityTile(string kind) : DockTile
+{
+    public string Kind { get; } = kind;
+    public override string Key => "utility:" + Kind;
+    public override bool Lens => true;
+    public string Glyph => Kind == "search" ? "\uE721" : "\uE8F1";
+    public string Tip => Loc.T(Kind == "search" ? "searchTitle" : "organizerTitle");
+}
+
 public sealed partial class AppTile : DockTile, IDisposable
 {
     readonly AppMatch match;

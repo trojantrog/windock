@@ -11,11 +11,15 @@ public sealed class Loc : INotifyPropertyChanged
     public const string Chinese = "zh-CN";
 
     static readonly IReadOnlyDictionary<string, string> ChineseTable = LoadChinese();
+    static readonly IReadOnlyDictionary<string, string> ToolTable = LoadResource("en-tools.json");
 
     static IReadOnlyDictionary<string, string> LoadChinese()
+        => LoadResource("zh-CN.json");
+
+    static IReadOnlyDictionary<string, string> LoadResource(string name)
     {
-        using var stream = typeof(Loc).Assembly.GetManifestResourceStream("WinDock.Localization.zh-CN.json")
-            ?? throw new InvalidOperationException("Missing Simplified Chinese translations.");
+        using var stream = typeof(Loc).Assembly.GetManifestResourceStream("WinDock.Localization." + name)
+            ?? throw new InvalidOperationException("Missing translations: " + name);
         return JsonSerializer.Deserialize<Dictionary<string, string>>(stream) ?? [];
     }
 
@@ -329,7 +333,8 @@ public sealed class Loc : INotifyPropertyChanged
     public CultureInfo Culture => CultureInfo.GetCultureInfo(language switch { Portuguese => "pt-BR", Chinese => Chinese, _ => "en-US" });
 
     public string this[string key] => language == Chinese && ChineseTable.TryGetValue(key, out var translated)
-        ? translated : Table.TryGetValue(key, out var pair) ? (language == Portuguese ? pair.Pt : pair.En) : key;
+        ? translated : Table.TryGetValue(key, out var pair) ? (language == Portuguese ? pair.Pt : pair.En)
+        : ToolTable.TryGetValue(key, out var tool) ? tool : key;
 
     public static string T(string key) => Instance[key];
 
@@ -343,5 +348,5 @@ public sealed class Loc : INotifyPropertyChanged
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(null));
     }
 
-    public static IReadOnlyCollection<string> Keys => Table.Keys;
+    public static IReadOnlyCollection<string> Keys => Table.Keys.Concat(ToolTable.Keys).Distinct().ToArray();
 }

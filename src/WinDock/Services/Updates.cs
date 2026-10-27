@@ -6,8 +6,8 @@ namespace WinDock.Services;
 
 public static class Updates
 {
-    public const string Page = "https://github.com/obrenoalvim/windock/releases/latest";
-    const string Api = "https://api.github.com/repos/obrenoalvim/windock/releases/latest";
+    public const string Page = "https://github.com/trojantrog/windock/releases";
+    const string Api = "https://api.github.com/repos/trojantrog/windock/releases/latest";
 
     static readonly HttpClient Http = CreateClient();
 

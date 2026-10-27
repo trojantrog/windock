@@ -43,6 +43,8 @@ public sealed class TrayService : IDisposable
             menu.Add(new Forms.ToolStripSeparator());
         }
         menu.Add(Loc.T("trayOpen"), null, (_, _) => window.Open());
+        if (vm.Dock.SearchEnabled) menu.Add(Loc.T("searchTitle"), null, (_, _) => DesktopHub.OpenSearch());
+        if (vm.Dock.OrganizerEnabled) menu.Add(Loc.T("organizerTitle"), null, (_, _) => DesktopHub.OpenOrganizer());
         menu.Add(new Forms.ToolStripSeparator());
 
         foreach (var p in vm.Presets)

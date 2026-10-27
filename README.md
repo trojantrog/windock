@@ -7,18 +7,20 @@
 **One Windows PC. A dock for every moment.**<br>
 A glass dock for Windows with environments, live widgets and a Mac-style magnifying lens. Work apps from 9 to 6, games after hours, each with its own dock. It can even replace the taskbar.
 
-[![Download WinDock.exe](https://img.shields.io/badge/Download-WinDock.exe-FFB547?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/obrenoalvim/windock/releases/latest/download/WinDock.exe)
+[![WinDock releases](https://img.shields.io/badge/WinDock-Releases-FFB547?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/trojantrog/windock/releases)
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-FFB547)](LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/obrenoalvim/windock?style=flat&logo=github&color=3b9eff)](https://github.com/obrenoalvim/windock/stargazers)
 [![.NET 10](https://img.shields.io/badge/.NET-10-512BD4?logo=dotnet&logoColor=white)](src/WinDock/WinDock.csproj)
 [![Windows 10 | 11](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D6?logo=windows&logoColor=white)](#faq)
 
-**English** · [Português](README.pt-BR.md)
+**English** · [Português](README.pt-BR.md) · [简体中文](README.zh-CN.md)
 
 [Install](#install) · [Quick start](#quick-start) · [The dock](#the-dock) · [Widgets](#widgets) · [Shortcuts](#shortcuts) · [Environments](#environments) · [FAQ](#faq) · [Build](#build)
 
 </div>
+
+This fork adds Simplified Chinese, local Everything search, and PecoFence management. See the [Chinese guide](README.zh-CN.md) for setup and compatibility limits. It retains the upstream taskbar handling and Windows window transitions.
 
 ---
 
