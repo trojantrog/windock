@@ -30,7 +30,9 @@ public sealed class UtilityTile(string kind) : DockTile
     public string Kind { get; } = kind;
     public override string Key => "utility:" + Kind;
     public override bool Lens => true;
-    public string Glyph => Kind == "search" ? "\uE721" : "\uE8F1";
+    public string IconPath => Kind == "search"
+        ? "M16.5,10 A6.5,6.5 0 1 1 3.5,10 A6.5,6.5 0 1 1 16.5,10 M15,15 L21,21"
+        : "M3,8 L6,3.5 H18 L21,8 V20.5 H3 Z M3,8 H21 M3,13 H8 L10,16 H14 L16,13 H21";
     public string Tip => Loc.T(Kind == "search" ? "searchTitle" : "organizerTitle");
 }
 

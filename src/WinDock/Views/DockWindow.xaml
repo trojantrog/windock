@@ -258,7 +258,12 @@
         <DataTemplate DataType="{x:Type vm:UtilityTile}">
             <Grid Style="{StaticResource TileRoot}" Width="{DynamicResource IconSize}" ToolTip="{Binding Tip}" AutomationProperties.Name="{Binding Tip}">
                 <Border CornerRadius="13" Background="{DynamicResource TileFace}"/>
-                <TextBlock Text="{Binding Glyph}" FontFamily="{StaticResource Glyphs}" FontSize="23" Foreground="{DynamicResource DockInk}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                <Viewbox Width="23" Height="23" HorizontalAlignment="Center" VerticalAlignment="Center">
+                    <Canvas Width="24" Height="24">
+                        <Path Data="{Binding IconPath}" Stroke="{DynamicResource DockInk}" StrokeThickness="1.6"
+                              StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"/>
+                    </Canvas>
+                </Viewbox>
             </Grid>
         </DataTemplate>
 
