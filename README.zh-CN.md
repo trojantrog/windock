@@ -1,6 +1,6 @@
 # WinDock 中文版
 
-基于 [Breno Alvim 的 WinDock 0.5.0](https://github.com/obrenoalvim/windock) 维护的分支，增加简体中文、Everything 搜索和 PecoFence 收纳管理。当前版本为 `0.6.0-preview.4`。
+基于 [Breno Alvim 的 WinDock 0.5.0](https://github.com/obrenoalvim/windock) 维护的分支，增加简体中文、Everything 搜索和 PecoFence 收纳管理。当前版本为 `0.6.0-preview.5`。
 
 ## 使用
 
@@ -32,6 +32,8 @@
 
 搜索和收纳共用简约浮窗、轻量边框和圆角控件。Windows 11 22H2 及以上使用系统 Desktop Acrylic 背景。系统关闭透明效果、高对比度模式或窗口未激活时，Windows 可能使用实色背景；旧版系统保留可读的深色背景。
 
+开始、搜索和收纳入口使用矢量图形。网络、音量、麦克风和电池按钮随 Dock 图标尺寸放大，缩减上下留白。WinDock 自身的菜单使用圆角边框、矢量标记和像素对齐；其他应用弹出的菜单由该应用绘制。
+
 可单独运行 `WinDock.exe --preview-search` 或 `WinDock.exe --preview-organizer` 查看新界面，这两个入口不启动 Dock、登录项或任务栏接管。收纳入口连接实际 PecoFence，执行归类和布局操作会作用于当前分区。
 
 ### 预览与动画
@@ -40,18 +42,28 @@
 
 启动图标动效改为 360 毫秒的短抬升和轻微回落，默认保留关闭状态；可在设置中启用。浮窗内容用 160 毫秒进入，Dock 图标分批出现总长不超过 260 毫秒。悬停位置通过按实际帧间隔计算的临界阻尼弹簧平滑跟随，稳定后停止逐帧更新。系统关闭动画时跳过这些动效。
 
-系统窗口动画继续生效。此版本不包含自定义整窗吸入和原生托盘常驻功能。预览尺寸与 DPI 调整仍需在不同屏幕上检查画质，不代表已经解决所有缩略图锯齿问题。
+新增从 Dock 最小化和恢复窗口的整窗变形动画，默认时长 320 毫秒，可在设置中关闭或调整至 240–440 毫秒。动画将窗口快照收向对应图标，恢复时反向展开；连续点击可反向过渡。快照只保留在内存中，最多 4 份、96 MiB，3 分钟后过期。独立恢复进程负责在动画中断或 Dock 异常退出时恢复窗口可见性。
+
+自定义动画只覆盖通过 Dock 最小化的受支持窗口及其缓存内恢复。首次打开应用、系统最小化按钮和快捷键、没有可用快照的恢复仍使用系统行为。全屏、受保护、透明或无法获取有效快照的窗口会退回系统行为。此版本尚未完成运行验证；预览画质、跨屏行为和窗口兼容性仍需确认。
+
+### 独立托盘
+
+在 Dock 设置中开启“启用独立托盘（预览）”后，可显示后台应用提供给 Windows 的托盘图标、悬停说明及托盘提示。点击和菜单操作交还原应用处理。可选择在主屏左下角常驻；空间不足时收起，避免挤动主 Dock。点击 Dock 的托盘入口不再临时唤出整条 Windows 任务栏。
+
+此功能默认关闭。开启后会把随程序提供的本机组件加载到 Explorer 的托盘线程，关闭功能或退出 WinDock 会断开连接。组件在本机从源码编译，目前没有数字签名；遇到 Windows 或安全软件阻止时，不应绕过检查。该功能与隐藏 Windows 任务栏的设置相互独立。
+
+图标蓝点表示本次连接收到了应用的托盘提示，不代表未读消息数。最近 50 条提示仅保存在内存中；现代 Windows 通知中心仍由系统提供。部分应用需要重新打开才会重新登记图标；部分原生菜单仍可能出现在 Windows 原任务栏附近。当前只支持 x64，Windows 更新可能影响兼容性。完整行为与限制见 [独立托盘说明](docs/system-tray.md)。
 
 ## 构建与检查
 
-需要 Windows 和 .NET 10 SDK。
+需要 Windows 和 .NET 10 SDK。要包含独立托盘组件，还需先使用 Zig 编译本机 DLL；未构建该组件时，其他功能仍可使用。
 
 ```powershell
-dotnet test -c Release
+& .\native\WinDock.TrayHook\build.ps1 -Zig 'C:\path\to\zig.exe'
 dotnet publish src/WinDock -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish
 ```
 
-运行 `publish/WinDock.exe`。`--tray` 参数用于登录启动。默认配置位于 `%APPDATA%\WinDock`，固定应用和环境配置可沿用上游版本。
+运行 `publish/WinDock.exe`，保留同目录的 `WinDock.TrayHook.x64.dll`、`.sha256` 文件和 `licenses` 目录。`--tray` 参数用于登录启动。默认配置位于 `%APPDATA%\WinDock`，固定应用和环境配置可沿用上游版本。编译成功不代表已经验证桌面交互和视觉效果。
 
 ## 恢复上游版本
 
@@ -62,3 +74,5 @@ dotnet publish src/WinDock -c Release -r win-x64 --self-contained true -p:Publis
 沿用 [MIT 许可](LICENSE)。原 WinDock 作者为 Breno Alvim。Everything 与 PecoFence 是独立软件，本项目通过它们公开的本机接口连接，未打包这两个软件。
 
 背景实现参考 [WPF UI](https://github.com/lepoco/wpfui/blob/main/src/Wpf.Ui/Controls/Window/WindowBackdrop.cs) 的系统背景设置方式；动效设计参考 [Motion Primitives](https://github.com/ibelick/motion-primitives/blob/main/components/core/dock.tsx) 的弹簧跟随思路。相应许可记录见 `THIRD_PARTY_NOTICES.txt`。
+
+整窗动画的源码对照与适用边界见 [窗口动画参考记录](docs/window-motion-references.txt)。托盘实现对照了 ManagedShell、Cairo、YASB 和 Seelen，出处与许可见 [独立托盘说明](docs/system-tray.md)；YASB 的 MIT 许可随程序提供。
