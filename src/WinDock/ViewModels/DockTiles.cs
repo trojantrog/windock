@@ -293,8 +293,8 @@ public sealed partial class SystemTile : DockTile
         var culture = Loc.Instance.Culture;
         var pt = Loc.Instance.Language == Loc.Portuguese;
         Time = now.ToString("t", culture);
-        Date = now.ToString(pt ? "dd/MM/yyyy" : "M/d/yyyy", culture);
-        ClockTip = $"{now.ToString(pt ? "dddd, d 'de' MMMM 'de' yyyy" : "dddd, MMMM d, yyyy", culture)} · {Loc.T("calendar")}";
+        Date = now.ToString(Loc.Instance.Language == Loc.Chinese ? "yyyy/M/d" : pt ? "dd/MM/yyyy" : "M/d/yyyy", culture);
+        ClockTip = $"{now.ToString("D", culture)} · {Loc.T("calendar")}";
 
         if (!volumeRead)
         {

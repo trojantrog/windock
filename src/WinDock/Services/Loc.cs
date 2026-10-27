@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Globalization;
+using System.Text.Json;
 
 namespace WinDock.Services;
 
@@ -7,6 +8,18 @@ public sealed class Loc : INotifyPropertyChanged
 {
     public const string English = "en";
     public const string Portuguese = "pt";
+    public const string Chinese = "zh-CN";
+
+    static readonly IReadOnlyDictionary<string, string> ChineseTable = LoadChinese();
+
+    static IReadOnlyDictionary<string, string> LoadChinese()
+    {
+        using var stream = typeof(Loc).Assembly.GetManifestResourceStream("WinDock.Localization.zh-CN.json")
+            ?? throw new InvalidOperationException("Missing Simplified Chinese translations.");
+        return JsonSerializer.Deserialize<Dictionary<string, string>>(stream) ?? [];
+    }
+
+    public static bool HasChineseTranslation(string key) => ChineseTable.ContainsKey(key);
 
     static readonly Dictionary<string, (string En, string Pt)> Table = new()
     {
@@ -313,10 +326,10 @@ public sealed class Loc : INotifyPropertyChanged
 
     public string Language => language;
 
-    public CultureInfo Culture => CultureInfo.GetCultureInfo(language == Portuguese ? "pt-BR" : "en-US");
+    public CultureInfo Culture => CultureInfo.GetCultureInfo(language switch { Portuguese => "pt-BR", Chinese => Chinese, _ => "en-US" });
 
-    public string this[string key] =>
-        Table.TryGetValue(key, out var pair) ? (language == Portuguese ? pair.Pt : pair.En) : key;
+    public string this[string key] => language == Chinese && ChineseTable.TryGetValue(key, out var translated)
+        ? translated : Table.TryGetValue(key, out var pair) ? (language == Portuguese ? pair.Pt : pair.En) : key;
 
     public static string T(string key) => Instance[key];
 
@@ -324,7 +337,7 @@ public sealed class Loc : INotifyPropertyChanged
 
     public void Set(string code)
     {
-        var next = code == Portuguese ? Portuguese : English;
+        var next = code switch { Portuguese => Portuguese, "zh" or "zh-Hans" or Chinese => Chinese, _ => English };
         if (next == language) return;
         language = next;
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(null));

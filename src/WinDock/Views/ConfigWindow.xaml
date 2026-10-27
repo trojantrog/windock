@@ -81,6 +81,7 @@
                     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Top">
                         <ToggleButton x:Name="EnChip" Content="EN" Style="{StaticResource ChipToggle}" Click="OnEnglish" ToolTip="English" Margin="0,0,0,0"/>
                         <ToggleButton x:Name="PtChip" Content="PT" Style="{StaticResource ChipToggle}" Click="OnPortuguese" ToolTip="Português" Margin="0,0,6,0"/>
+                        <ToggleButton x:Name="ZhChip" Content="中文" Style="{StaticResource ChipToggle}" Click="OnChinese" ToolTip="简体中文" Margin="0,0,6,0"/>
                         <Button Content="✕" Style="{StaticResource GhostButton}" Click="OnClose" Padding="0" AutomationProperties.Name="{Binding [closeName], Source={x:Static svc:Loc.Instance}, Mode=OneWay}" ToolTip="{Binding [close], Source={x:Static svc:Loc.Instance}, Mode=OneWay}"/>
                     </StackPanel>
                 </Grid>

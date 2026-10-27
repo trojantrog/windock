@@ -166,6 +166,7 @@ public partial class ConfigWindow : Window
         FillThemes();
         EnChip.IsChecked = Loc.Instance.Language == Loc.English;
         PtChip.IsChecked = Loc.Instance.Language == Loc.Portuguese;
+        ZhChip.IsChecked = Loc.Instance.Language == Loc.Chinese;
     }
 
     void ShowUsage()
@@ -178,6 +179,8 @@ public partial class ConfigWindow : Window
     void OnEnglish(object sender, RoutedEventArgs e) => vm.SetLanguage(Loc.English);
 
     void OnPortuguese(object sender, RoutedEventArgs e) => vm.SetLanguage(Loc.Portuguese);
+
+    void OnChinese(object sender, RoutedEventArgs e) => vm.SetLanguage(Loc.Chinese);
 
     void OnClose(object sender, RoutedEventArgs e) => Hide();
 

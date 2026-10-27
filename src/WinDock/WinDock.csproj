@@ -38,6 +38,7 @@
     <Resource Include="Assets\Fonts\*.ttf" />
     <Resource Include="Assets\app.ico" />
     <EmbeddedResource Include="Presets\*.json" LogicalName="Presets/%(Filename)%(Extension)" />
+    <EmbeddedResource Include="Localization\zh-CN.json" LogicalName="WinDock.Localization.zh-CN.json" />
   </ItemGroup>
 
 </Project>

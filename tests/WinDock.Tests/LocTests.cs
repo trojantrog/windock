@@ -60,4 +60,25 @@ public class LocTests
 
     static string Placeholders(string text) =>
         string.Join(',', Regex.Matches(text, @"\{\d+\}").Select(m => m.Value).Order());
+
+    [Fact]
+    public void Chinese_covers_every_message_and_preserves_format_arguments()
+    {
+        try
+        {
+            foreach (var key in Loc.Keys)
+            {
+                Loc.Instance.Set(Loc.English);
+                var english = Loc.T(key);
+                Assert.True(Loc.HasChineseTranslation(key), key);
+                Loc.Instance.Set(Loc.Chinese);
+                var chinese = Loc.T(key);
+                Assert.False(string.IsNullOrWhiteSpace(chinese), key);
+                Assert.Equal(Placeholders(english), Placeholders(chinese));
+            }
+            Assert.Equal("zh-CN", Loc.Instance.Culture.Name);
+            Assert.Equal("应用", Loc.T("apply"));
+        }
+        finally { Loc.Instance.Set(Loc.English); }
+    }
 }

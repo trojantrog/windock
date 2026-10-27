@@ -6,7 +6,7 @@ public sealed class Settings
 {
     public bool AutoSwitch { get; set; } = true;
     public bool Notify { get; set; } = true;
-    public string Language { get; set; } = "en";
+    public string Language { get; set; } = System.Globalization.CultureInfo.CurrentUICulture.Name.StartsWith("zh", StringComparison.OrdinalIgnoreCase) ? "zh-CN" : "en";
     public string? ActiveId { get; set; }
     public List<PinItem> AlwaysPinned { get; set; } = [];
     public DockSettings Dock { get; set; } = new();

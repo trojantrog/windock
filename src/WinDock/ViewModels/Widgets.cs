@@ -130,8 +130,8 @@ public sealed partial class ClockWidget(string key, WidgetSpec spec) : WidgetTil
     {
         var culture = Loc.Instance.Culture;
         var pt = Loc.Instance.Language == Loc.Portuguese;
-        Time = now.ToString(pt ? "HH:mm" : "h:mm", culture);
-        Date = now.ToString(pt ? "ddd, d MMM" : "ddd, MMM d", culture).Replace(".", "");
+        Time = now.ToString(pt || Loc.Instance.Language == Loc.Chinese ? "HH:mm" : "h:mm", culture);
+        Date = now.ToString(Loc.Instance.Language == Loc.Chinese ? "M月d日 ddd" : pt ? "ddd, d MMM" : "ddd, MMM d", culture).Replace(".", "");
     }
 
     public override void Click(DateTime now) => ShellGuard.Notifications();

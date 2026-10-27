@@ -74,6 +74,7 @@ public sealed class TrayService : IDisposable
         var language = new Forms.ToolStripMenuItem(Loc.T("trayLanguage"));
         language.DropDownItems.Add(new Forms.ToolStripMenuItem("English", null, (_, _) => vm.SetLanguage(Loc.English)) { Checked = Loc.Instance.Language == Loc.English });
         language.DropDownItems.Add(new Forms.ToolStripMenuItem("Português", null, (_, _) => vm.SetLanguage(Loc.Portuguese)) { Checked = Loc.Instance.Language == Loc.Portuguese });
+        language.DropDownItems.Add(new Forms.ToolStripMenuItem("简体中文", null, (_, _) => vm.SetLanguage(Loc.Chinese)) { Checked = Loc.Instance.Language == Loc.Chinese });
         menu.Add(language);
         menu.Add(new Forms.ToolStripSeparator());
         menu.Add(Loc.T("trayExit"), null, (_, _) => Application.Current.Shutdown());
