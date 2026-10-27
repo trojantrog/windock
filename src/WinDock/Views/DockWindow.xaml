@@ -180,9 +180,9 @@
         </DataTemplate>
 
         <Style x:Key="ClusterSpot" TargetType="Border" BasedOn="{StaticResource SystemSpot}">
-            <Setter Property="Padding" Value="6,0"/>
+            <Setter Property="Padding" Value="0"/>
             <Setter Property="CornerRadius" Value="8"/>
-            <Setter Property="Margin" Value="0,3"/>
+            <Setter Property="Margin" Value="0"/>
         </Style>
 
         <Style x:Key="Caption" TargetType="TextBlock">
@@ -242,14 +242,10 @@
         </DataTemplate>
 
         <DataTemplate DataType="{x:Type vm:StartTile}">
-            <Grid Style="{StaticResource TileRoot}" Width="{DynamicResource IconSize}">
-                <Border CornerRadius="13" Background="{DynamicResource TileFace}"/>
-                <Viewbox Margin="12">
-                    <Canvas Width="20" Height="20">
-                        <Rectangle Width="9.4" Height="9.4" RadiusX="1" RadiusY="1" Fill="{StaticResource WindowsBlue}"/>
-                        <Rectangle Canvas.Left="10.6" Width="9.4" Height="9.4" RadiusX="1" RadiusY="1" Fill="{StaticResource WindowsBlue}"/>
-                        <Rectangle Canvas.Top="10.6" Width="9.4" Height="9.4" RadiusX="1" RadiusY="1" Fill="{StaticResource WindowsBlue}"/>
-                        <Rectangle Canvas.Left="10.6" Canvas.Top="10.6" Width="9.4" Height="9.4" RadiusX="1" RadiusY="1" Fill="{StaticResource WindowsBlue}"/>
+            <Grid Style="{StaticResource TileRoot}" Width="{DynamicResource IconSize}" ToolTip="{Binding Tip}" AutomationProperties.Name="{Binding Tip}">
+                <Viewbox Margin="4">
+                    <Canvas Width="24" Height="24">
+                        <Path Fill="#168BEB" Data="M1,1 H11 V11 H1 Z M13,1 H23 V11 H13 Z M1,13 H11 V23 H1 Z M13,13 H23 V23 H13 Z"/>
                     </Canvas>
                 </Viewbox>
             </Grid>
@@ -257,8 +253,7 @@
 
         <DataTemplate DataType="{x:Type vm:UtilityTile}">
             <Grid Style="{StaticResource TileRoot}" Width="{DynamicResource IconSize}" ToolTip="{Binding Tip}" AutomationProperties.Name="{Binding Tip}">
-                <Border CornerRadius="13" Background="{DynamicResource TileFace}"/>
-                <Viewbox Width="23" Height="23" HorizontalAlignment="Center" VerticalAlignment="Center">
+                <Viewbox Margin="4">
                     <Canvas Width="24" Height="24">
                         <Path Data="{Binding IconPath}" Stroke="{DynamicResource DockInk}" StrokeThickness="1.6"
                               StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"/>
@@ -269,24 +264,24 @@
 
         <DataTemplate DataType="{x:Type vm:SystemTile}">
             <StackPanel Orientation="Horizontal" Height="{DynamicResource IconSize}">
-                <Border Background="Transparent" Padding="6,0" Cursor="Hand" ToolTip="{Binding TrayTip}" MouseLeftButtonUp="OnTrayClick">
-                    <TextBlock Text="&#xE70E;" FontFamily="{StaticResource Glyphs}" FontSize="12" Foreground="{DynamicResource DockInk}" VerticalAlignment="Center"/>
+                <Border Background="Transparent" Width="{DynamicResource IconSize}" Cursor="Hand" ToolTip="{Binding TrayTip}" MouseLeftButtonUp="OnTrayClick">
+                    <TextBlock Text="&#xE70E;" FontFamily="{StaticResource Glyphs}" FontSize="17" Foreground="{DynamicResource DockInk}" VerticalAlignment="Center" HorizontalAlignment="Center"/>
                 </Border>
-                <Border CornerRadius="11" Margin="2,8,2,8" Padding="3,0" Background="{DynamicResource TileFace}">
+                <Border CornerRadius="9" Margin="2,1,2,1" Padding="0" Background="{DynamicResource TileFace}">
                     <StackPanel Orientation="Horizontal">
-                        <Border Style="{StaticResource ClusterSpot}" ToolTip="{Binding NetworkTip}" MouseLeftButtonUp="OnStatusClick">
-                            <TextBlock Text="{Binding NetworkGlyph}" FontFamily="{StaticResource Glyphs}" FontSize="14" Foreground="{DynamicResource DockInk}" VerticalAlignment="Center"/>
+                        <Border Style="{StaticResource ClusterSpot}" Width="{DynamicResource IconSize}" ToolTip="{Binding NetworkTip}" MouseLeftButtonUp="OnStatusClick">
+                            <Viewbox Margin="4"><TextBlock Text="{Binding NetworkGlyph}" FontFamily="{StaticResource Glyphs}" FontSize="24" Foreground="{DynamicResource DockInk}"/></Viewbox>
                         </Border>
-                        <Border Style="{StaticResource ClusterSpot}" ToolTip="{Binding VolumeTip}" MouseUp="OnVolumeClick" MouseWheel="OnVolumeWheel">
-                            <TextBlock Text="{Binding VolumeGlyph}" FontFamily="{StaticResource Glyphs}" FontSize="14" Foreground="{DynamicResource DockInk}" VerticalAlignment="Center"/>
+                        <Border Style="{StaticResource ClusterSpot}" Width="{DynamicResource IconSize}" ToolTip="{Binding VolumeTip}" MouseUp="OnVolumeClick" MouseWheel="OnVolumeWheel">
+                            <Viewbox Margin="4"><TextBlock Text="{Binding VolumeGlyph}" FontFamily="{StaticResource Glyphs}" FontSize="24" Foreground="{DynamicResource DockInk}"/></Viewbox>
                         </Border>
-                        <Border Style="{StaticResource ClusterSpot}" ToolTip="{Binding MicTip}" MouseLeftButtonUp="OnMicClick"
+                        <Border Style="{StaticResource ClusterSpot}" Width="{DynamicResource IconSize}" ToolTip="{Binding MicTip}" MouseLeftButtonUp="OnMicClick"
                                 Visibility="{Binding HasMic, Converter={StaticResource Show}}">
-                            <TextBlock x:Name="MicIcon" Text="{Binding MicGlyph}" FontFamily="{StaticResource Glyphs}" FontSize="14" Foreground="{DynamicResource DockInk}" VerticalAlignment="Center"/>
+                            <Viewbox Margin="4"><TextBlock x:Name="MicIcon" Text="{Binding MicGlyph}" FontFamily="{StaticResource Glyphs}" FontSize="24" Foreground="{DynamicResource DockInk}"/></Viewbox>
                         </Border>
-                        <Border Style="{StaticResource ClusterSpot}" ToolTip="{Binding BatteryTip}" MouseLeftButtonUp="OnStatusClick"
+                        <Border Style="{StaticResource ClusterSpot}" Width="{DynamicResource IconSize}" ToolTip="{Binding BatteryTip}" MouseLeftButtonUp="OnStatusClick"
                                 Visibility="{Binding HasBattery, Converter={StaticResource Show}}">
-                            <TextBlock Text="{Binding BatteryGlyph}" FontFamily="{StaticResource Glyphs}" FontSize="14" Foreground="{DynamicResource DockInk}" VerticalAlignment="Center"/>
+                            <Viewbox Margin="4"><TextBlock Text="{Binding BatteryGlyph}" FontFamily="{StaticResource Glyphs}" FontSize="24" Foreground="{DynamicResource DockInk}"/></Viewbox>
                         </Border>
                     </StackPanel>
                 </Border>
