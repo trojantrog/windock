@@ -116,6 +116,9 @@
                                 <ToggleButton Content="{Binding [searchEnabled], Source={x:Static svc:Loc.Instance}, Mode=OneWay}" Style="{StaticResource SwitchToggle}" IsChecked="{Binding SearchEnabled, Mode=TwoWay}"/>
                                 <TextBlock Text="{Binding SearchShortcutStatus}" Style="{StaticResource Note}"/>
                                 <ToggleButton Content="{Binding [organizerEnabled], Source={x:Static svc:Loc.Instance}, Mode=OneWay}" Style="{StaticResource SwitchToggle}" IsChecked="{Binding OrganizerEnabled, Mode=TwoWay}" Margin="0,0,0,12"/>
+                                <ToggleButton Content="{Binding [systemTrayEnable], Source={x:Static svc:Loc.Instance}, Mode=OneWay}" Style="{StaticResource SwitchToggle}" IsChecked="{Binding SystemTrayEnabled, Mode=TwoWay}"/>
+                                <TextBlock Text="{Binding [systemTrayConsent], Source={x:Static svc:Loc.Instance}, Mode=OneWay}" Style="{StaticResource Note}"/>
+                                <ToggleButton Content="{Binding [systemTrayPin], Source={x:Static svc:Loc.Instance}, Mode=OneWay}" Style="{StaticResource SwitchToggle}" IsChecked="{Binding TrayPinned, Mode=TwoWay}" IsEnabled="{Binding SystemTrayEnabled}" Margin="0,0,0,12"/>
                                 <WrapPanel>
                                     <Button Content="{Binding [searchTitle], Source={x:Static svc:Loc.Instance}, Mode=OneWay}" Style="{StaticResource GhostButton}" Click="OnOpenSearch" Margin="0,0,12,0"/>
                                     <Button Content="{Binding [organizerTitle], Source={x:Static svc:Loc.Instance}, Mode=OneWay}" Style="{StaticResource GhostButton}" Click="OnOpenOrganizer"/>

@@ -16,6 +16,7 @@ public partial class App : System.Windows.Application
     EventWaitHandle? showEvent;
     EventWaitHandle? exitEvent;
     TrayService? tray;
+    SystemTrayHub? systemTray;
     ConfigWindow? window;
     ShellGuard? shell;
     DockViewModel? dock;
@@ -56,6 +57,7 @@ public partial class App : System.Windows.Application
         shell = new ShellGuard();
         dock = new DockViewModel(main, shell);
         docks = new DockHost(dock, () => window.Open());
+        systemTray = new SystemTrayHub(main.Dock);
         WinKeys.Pressed = (n, fresh) => docks.OpenNth(n, fresh);
         main.Dock.Changed += _ => SyncKeys();
         SyncKeys();
@@ -92,6 +94,7 @@ public partial class App : System.Windows.Application
         WinKeys.Enable(false);
         WindowTransitions.Shared.Dispose();
         main?.Dock.Flush();
+        systemTray?.Dispose();
         docks?.Dispose();
         dock?.Dispose();
         shell?.Dispose();

@@ -824,8 +824,7 @@ public partial class DockWindow : Window
     void OnTrayClick(object sender, MouseButtonEventArgs e)
     {
         e.Handled = true;
-        if (vm.Shell.Peeking) PeekTaskbar();
-        else ShowFlyout(new TrayPanel(Dark, PeekTaskbar), (FrameworkElement)sender);
+        ShowFlyout(new TrayPanel(Dark), (FrameworkElement)sender);
     }
 
     void PeekTaskbar()

@@ -120,13 +120,6 @@
         <Setter Property="Padding" Value="10,8"/>
         <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ComboBoxItem"><Border x:Name="Plate" Background="Transparent" CornerRadius="5" Padding="{TemplateBinding Padding}"><ContentPresenter/></Border><ControlTemplate.Triggers><Trigger Property="IsHighlighted" Value="True"><Setter TargetName="Plate" Property="Background" Value="{DynamicResource GlassHover}"/></Trigger><Trigger Property="IsSelected" Value="True"><Setter TargetName="Plate" Property="Background" Value="{DynamicResource GlassSelected}"/></Trigger></ControlTemplate.Triggers></ControlTemplate></Setter.Value></Setter>
     </Style>
-    <Style TargetType="ContextMenu">
-        <Setter Property="Foreground" Value="{DynamicResource GlassInk}"/>
-        <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ContextMenu"><Border Background="#F2242B36" BorderBrush="{DynamicResource GlassLine}" BorderThickness="1" CornerRadius="9" Padding="5"><StackPanel IsItemsHost="True"/></Border></ControlTemplate></Setter.Value></Setter>
-    </Style>
-    <Style TargetType="MenuItem">
-        <Setter Property="Foreground" Value="{DynamicResource GlassInk}"/>
-        <Setter Property="Padding" Value="12,9"/>
-        <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="MenuItem"><Border x:Name="Plate" Background="Transparent" CornerRadius="5" Padding="{TemplateBinding Padding}"><ContentPresenter ContentSource="Header"/></Border><ControlTemplate.Triggers><Trigger Property="IsHighlighted" Value="True"><Setter TargetName="Plate" Property="Background" Value="{DynamicResource GlassHover}"/></Trigger><Trigger Property="IsEnabled" Value="False"><Setter TargetName="Plate" Property="Opacity" Value="0.4"/></Trigger></ControlTemplate.Triggers></ControlTemplate></Setter.Value></Setter>
-    </Style>
+    <Style TargetType="ContextMenu" BasedOn="{StaticResource WinDockSmoothContextMenu}"/>
+    <Style TargetType="MenuItem" BasedOn="{StaticResource WinDockSmoothMenuItem}"/>
 </ResourceDictionary>

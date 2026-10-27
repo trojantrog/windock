@@ -1,5 +1,8 @@
 using System.Drawing;
 using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
+using System.Windows.Interop;
 using WinDock.ViewModels;
 using WinDock.Views;
 using Forms = System.Windows.Forms;
@@ -12,6 +15,7 @@ public sealed class TrayService : IDisposable
     readonly ConfigWindow window;
     readonly DockViewModel dock;
     readonly Forms.NotifyIcon icon;
+    ContextMenu? contextMenu;
 
     public TrayService(MainViewModel vm, ConfigWindow window, DockViewModel dock)
     {
@@ -24,66 +28,71 @@ public sealed class TrayService : IDisposable
         {
             Icon = new Icon(stream),
             Text = "WinDock",
-            Visible = true,
-            ContextMenuStrip = new Forms.ContextMenuStrip()
+            Visible = true
         };
         icon.MouseClick += (_, e) => { if (e.Button == Forms.MouseButtons.Left) window.Toggle(); };
-        icon.ContextMenuStrip.Opening += (_, _) => Rebuild();
+        icon.MouseUp += (_, e) => { if (e.Button == Forms.MouseButtons.Right) OpenMenu(); };
 
         vm.Notice += text => icon.ShowBalloonTip(2500, "WinDock", text, Forms.ToolTipIcon.None);
     }
 
-    void Rebuild()
+    void OpenMenu()
     {
-        var menu = icon.ContextMenuStrip!.Items;
-        menu.Clear();
+        if (contextMenu is not null) contextMenu.IsOpen = false;
+        contextMenu = new ContextMenu { Placement = PlacementMode.MousePoint, UseLayoutRounding = true, SnapsToDevicePixels = true };
+        var menu = contextMenu.Items;
         if (vm.Dock.NewVersion is { } version)
         {
-            menu.Add(Loc.F("updateDownload", version), null, (_, _) => Launcher.OpenFile(Updates.Page));
-            menu.Add(new Forms.ToolStripSeparator());
+            menu.Add(Item(Loc.F("updateDownload", version), () => Launcher.OpenFile(Updates.Page)));
+            menu.Add(new Separator());
         }
-        menu.Add(Loc.T("trayOpen"), null, (_, _) => window.Open());
-        if (vm.Dock.SearchEnabled) menu.Add(Loc.T("searchTitle"), null, (_, _) => DesktopHub.OpenSearch());
-        if (vm.Dock.OrganizerEnabled) menu.Add(Loc.T("organizerTitle"), null, (_, _) => DesktopHub.OpenOrganizer());
-        menu.Add(new Forms.ToolStripSeparator());
+        menu.Add(Item(Loc.T("trayOpen"), window.Open));
+        if (vm.Dock.SearchEnabled) menu.Add(Item(Loc.T("searchTitle"), DesktopHub.OpenSearch));
+        if (vm.Dock.OrganizerEnabled) menu.Add(Item(Loc.T("organizerTitle"), DesktopHub.OpenOrganizer));
+        menu.Add(new Separator());
 
         foreach (var p in vm.Presets)
         {
             var preset = p;
-            menu.Add(new Forms.ToolStripMenuItem($"{p.Glyph}  {p.Model.Name}", null, async (_, _) => await vm.ApplyAsync(preset, auto: false))
-            {
-                Checked = p.IsActive
-            });
+            menu.Add(Item($"{p.Glyph}  {p.Model.Name}", async () => await vm.ApplyAsync(preset, auto: false), p.IsActive));
         }
 
-        menu.Add(new Forms.ToolStripSeparator());
-        menu.Add(new Forms.ToolStripMenuItem(Loc.T("showDock"), null, (_, _) => vm.Dock.Enabled = !vm.Dock.Enabled) { Checked = vm.Dock.Enabled });
-        menu.Add(new Forms.ToolStripMenuItem(Loc.T("replaceTaskbar"), null, (_, _) => vm.Dock.ReplaceTaskbar = !vm.Dock.ReplaceTaskbar)
-        {
-            Checked = vm.Dock.ReplaceTaskbar,
-            Enabled = vm.Dock.Enabled
-        });
+        menu.Add(new Separator());
+        menu.Add(Item(Loc.T("showDock"), () => vm.Dock.Enabled = !vm.Dock.Enabled, vm.Dock.Enabled));
+        menu.Add(Item(Loc.T("replaceTaskbar"), () => vm.Dock.ReplaceTaskbar = !vm.Dock.ReplaceTaskbar, vm.Dock.ReplaceTaskbar, vm.Dock.Enabled));
         if (dock.Tracker.HiddenHandles.Any())
-            menu.Add(Loc.T("showAllWindows"), null, (_, _) =>
+            menu.Add(Item(Loc.T("showAllWindows"), () =>
             {
                 dock.Tracker.ShowAll();
                 dock.Shell.SetHiddenWindows([]);
-            });
-        menu.Add(new Forms.ToolStripSeparator());
-        menu.Add(new Forms.ToolStripMenuItem(Loc.T("trayAuto"), null, (_, _) => vm.AutoSwitch = !vm.AutoSwitch) { Checked = vm.AutoSwitch });
-        menu.Add(new Forms.ToolStripMenuItem(Loc.T("trayNotify"), null, (_, _) => vm.NotifySwitch = !vm.NotifySwitch) { Checked = vm.NotifySwitch });
-        menu.Add(new Forms.ToolStripMenuItem(Loc.T("trayStartup"), null, (_, _) => vm.Dock.StartWithWindows = !vm.Dock.StartWithWindows) { Checked = vm.Dock.StartWithWindows });
-        var language = new Forms.ToolStripMenuItem(Loc.T("trayLanguage"));
-        language.DropDownItems.Add(new Forms.ToolStripMenuItem("English", null, (_, _) => vm.SetLanguage(Loc.English)) { Checked = Loc.Instance.Language == Loc.English });
-        language.DropDownItems.Add(new Forms.ToolStripMenuItem("Português", null, (_, _) => vm.SetLanguage(Loc.Portuguese)) { Checked = Loc.Instance.Language == Loc.Portuguese });
-        language.DropDownItems.Add(new Forms.ToolStripMenuItem("简体中文", null, (_, _) => vm.SetLanguage(Loc.Chinese)) { Checked = Loc.Instance.Language == Loc.Chinese });
+            }));
+        menu.Add(new Separator());
+        menu.Add(Item(Loc.T("trayAuto"), () => vm.AutoSwitch = !vm.AutoSwitch, vm.AutoSwitch));
+        menu.Add(Item(Loc.T("trayNotify"), () => vm.NotifySwitch = !vm.NotifySwitch, vm.NotifySwitch));
+        menu.Add(Item(Loc.T("trayStartup"), () => vm.Dock.StartWithWindows = !vm.Dock.StartWithWindows, vm.Dock.StartWithWindows));
+        var language = new MenuItem { Header = Loc.T("trayLanguage") };
+        language.Items.Add(Item("English", () => vm.SetLanguage(Loc.English), Loc.Instance.Language == Loc.English));
+        language.Items.Add(Item("Português", () => vm.SetLanguage(Loc.Portuguese), Loc.Instance.Language == Loc.Portuguese));
+        language.Items.Add(Item("简体中文", () => vm.SetLanguage(Loc.Chinese), Loc.Instance.Language == Loc.Chinese));
         menu.Add(language);
-        menu.Add(new Forms.ToolStripSeparator());
-        menu.Add(Loc.T("trayExit"), null, (_, _) => Application.Current.Shutdown());
+        menu.Add(new Separator());
+        menu.Add(Item(Loc.T("trayExit"), () => Application.Current.Shutdown()));
+        contextMenu.Opened += (_, _) =>
+        {
+            if (PresentationSource.FromVisual(contextMenu) is HwndSource source) Native.SetForegroundWindow(source.Handle);
+        };
+        contextMenu.IsOpen = true;
+    }
+
+    static MenuItem Item(string label, Action click, bool check = false, bool enabled = true)
+    {
+        var item = new MenuItem { Header = label, IsChecked = check, IsEnabled = enabled };
+        item.Click += (_, _) => click(); return item;
     }
 
     public void Dispose()
     {
+        if (contextMenu is not null) contextMenu.IsOpen = false;
         icon.Visible = false;
         icon.Dispose();
     }

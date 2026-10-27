@@ -47,6 +47,8 @@ public sealed class DockOptions : ObservableObject
     public int WindowMotionDuration { get => D.WindowMotionDuration; set => Set(() => D.WindowMotionDuration = value); }
     public bool SearchEnabled { get => D.SearchEnabled; set => Set(() => D.SearchEnabled = value); }
     public bool OrganizerEnabled { get => D.OrganizerEnabled; set => Set(() => D.OrganizerEnabled = value); }
+    public bool SystemTrayEnabled { get => D.SystemTrayEnabled; set => Set(() => D.SystemTrayEnabled = value); }
+    public bool TrayPinned { get => D.TrayPinned; set => Set(() => D.TrayPinned = value); }
 
     string? newVersion;
     string searchShortcutStatus = "";

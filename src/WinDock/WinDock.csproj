@@ -42,4 +42,10 @@
     <EmbeddedResource Include="Localization\en-tools.json" LogicalName="WinDock.Localization.en-tools.json" />
   </ItemGroup>
 
+  <ItemGroup Condition="Exists('..\..\native\WinDock.TrayHook\bin\win-x64\WinDock.TrayHook.x64.dll')">
+    <Content Include="..\..\native\WinDock.TrayHook\bin\win-x64\WinDock.TrayHook.x64.dll" Link="WinDock.TrayHook.x64.dll" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
+    <Content Include="..\..\native\WinDock.TrayHook\bin\win-x64\WinDock.TrayHook.x64.dll.sha256" Link="WinDock.TrayHook.x64.dll.sha256" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
+    <Content Include="..\..\third_party\YASB-LICENSE.txt" Link="licenses\YASB-LICENSE.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
+  </ItemGroup>
+
 </Project>

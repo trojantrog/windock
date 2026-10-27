@@ -79,6 +79,8 @@ public sealed class DockSettings
     public int WindowMotionDuration { get; set; } = 320;
     public bool SearchEnabled { get; set; } = true;
     public bool OrganizerEnabled { get; set; } = true;
+    public bool SystemTrayEnabled { get; set; }
+    public bool TrayPinned { get; set; } = true;
 
     public void Clamp()
     {
