@@ -10,7 +10,8 @@ public sealed class LensPanel : Panel
 {
     const double ScaleCap = 0.3;
 
-    public static readonly DependencyProperty PointerProperty = Value(nameof(Pointer), double.NaN, FrameworkPropertyMetadataOptions.AffectsArrange);
+    public static readonly DependencyProperty PointerProperty = DependencyProperty.Register(nameof(Pointer), typeof(double), typeof(LensPanel),
+        new FrameworkPropertyMetadata(double.NaN, FrameworkPropertyMetadataOptions.AffectsArrange, (d, _) => ((LensPanel)d).TrackPointer()));
     public static readonly DependencyProperty AmplitudeProperty = Value(nameof(Amplitude), 0.0, FrameworkPropertyMetadataOptions.AffectsArrange);
     public static readonly DependencyProperty MagnificationProperty = Value(nameof(Magnification), 1.75, FrameworkPropertyMetadataOptions.AffectsArrange);
     public static readonly DependencyProperty RadiusProperty = Value(nameof(Radius), 130.0, FrameworkPropertyMetadataOptions.AffectsArrange);
@@ -41,6 +42,35 @@ public sealed class LensPanel : Panel
 
     readonly Dictionary<UIElement, ScaleTransform> transforms = [];
     readonly List<(Point Center, int Kind)> indicators = [];
+    PointerSpring pointerMotion = new(double.NaN);
+    TimeSpan? lastFrame;
+    bool tracking;
+
+    public LensPanel() => Unloaded += (_, _) => StopTracking();
+
+    void TrackPointer()
+    {
+        if (!double.IsFinite(Pointer) || !SystemParameters.ClientAreaAnimation || Amplitude < 0.001 || !double.IsFinite(pointerMotion.Position))
+        { pointerMotion = new(Pointer); StopTracking(); return; }
+        if (tracking) return;
+        tracking = true; lastFrame = null; CompositionTarget.Rendering += StepPointer;
+    }
+
+    void StepPointer(object? sender, EventArgs e)
+    {
+        if (e is not RenderingEventArgs frame) return;
+        var seconds = lastFrame is { } previous ? (frame.RenderingTime - previous).TotalSeconds : 0;
+        lastFrame = frame.RenderingTime;
+        pointerMotion = pointerMotion.Step(Pointer, seconds);
+        if (pointerMotion.Settled(Pointer)) { pointerMotion = new(Pointer); StopTracking(); }
+        InvalidateArrange();
+    }
+
+    void StopTracking()
+    {
+        if (tracking) CompositionTarget.Rendering -= StepPointer;
+        tracking = false; lastFrame = null;
+    }
 
     public double Pointer { get => (double)GetValue(PointerProperty); set => SetValue(PointerProperty, value); }
     public double Amplitude { get => (double)GetValue(AmplitudeProperty); set => SetValue(AmplitudeProperty, value); }
@@ -104,7 +134,7 @@ public sealed class LensPanel : Panel
         var x0 = Math.Round((final.Width - baseTotal) / 2);
         var bottom = final.Height - inset.Bottom;
         var amplitude = Mode == LensMode.None ? 0 : Amplitude;
-        var pointer = Pointer - x0;
+        var pointer = pointerMotion.Position - x0;
 
         var layout = LensMath.Layout(widths, lens, Gap, pointer, Mode == LensMode.Magnify ? amplitude : 0, Magnification, Radius);
         var hovered = -1;

@@ -13,22 +13,24 @@ public sealed class DesktopSearch
     readonly Lazy<Task<List<CatalogEntry>>> applications = new(() => Task.Run(Catalog.Load));
     public Task WarmAsync() => applications.Value;
 
-    public async Task<SearchBatch> SearchAsync(string query, string? instance, CancellationToken cancellation)
+    public async Task<SearchBatch> SearchAsync(string query, string? instance, CancellationToken cancellation, SearchFilter? filter = null)
     {
         query = query.Trim().Replace("\0", "");
         if (query.Length == 0) return new SearchBatch([], true, false);
         if (query.Length > 512) query = query[..512];
-        var catalog = await applications.Value.WaitAsync(cancellation);
+        filter ??= new SearchFilter();
+        var catalog = filter.IncludeApplications ? await applications.Value.WaitAsync(cancellation) : [];
         var apps = await Task.Run(() => catalog.Where(a => MatchScore(query, a.Name) > 0)
             .OrderByDescending(a => MatchScore(query, a.Name)).Take(30)
             .Select(a => new SearchHit(a.Name, a.Category, "app", a.IconSource ?? "", a.Make())).ToList(), cancellation);
+        if (filter.Category == SearchCategory.Applications) return new SearchBatch(apps, false, apps.Count >= 30);
         EverythingBatch indexed;
         string? error = null;
-        try { indexed = await EverythingSearch.QueryAsync(query, instance, cancellation); }
+        try { indexed = await EverythingSearch.QueryAsync(filter.Query(query), instance, cancellation); }
         catch (OperationCanceledException) { throw; }
         catch (Exception e) { indexed = new EverythingBatch([], 0); error = e.Message; }
         cancellation.ThrowIfCancellationRequested();
-        var all = apps.Concat(indexed.Hits)
+        var all = apps.Concat(indexed.Hits).Where(filter.Accepts)
             .DistinctBy(h => h.Kind == "app" ? $"app:{h.Application?.AppId ?? h.Application?.Target}|{h.Application?.Args}" : h.Path, StringComparer.OrdinalIgnoreCase)
             .OrderByDescending(h => MatchScore(query, h.Name) + (h.Kind == "app" ? 200 : 0))
             .ThenBy(h => h.Name, StringComparer.CurrentCultureIgnoreCase).Take(100).ToList();

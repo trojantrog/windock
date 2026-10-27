@@ -440,12 +440,18 @@ public partial class DockWindow : Window
     {
         if (panel is null) return;
         panel.Pointer = e.GetPosition(panel).X;
+        if (!SystemParameters.ClientAreaAnimation) { panel.BeginAnimation(LensPanel.AmplitudeProperty, null); panel.Amplitude = 1; return; }
         panel.BeginAnimation(LensPanel.AmplitudeProperty,
             new DoubleAnimation(1, TimeSpan.FromMilliseconds(140)) { EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseOut } });
     }
 
     void OnPanelLeave(object sender, MouseEventArgs e)
     {
+        if (!SystemParameters.ClientAreaAnimation)
+        {
+            if (panel is not null) { panel.BeginAnimation(LensPanel.AmplitudeProperty, null); panel.Amplitude = 0; }
+            HideName(); return;
+        }
         panel?.BeginAnimation(LensPanel.AmplitudeProperty,
             new DoubleAnimation(0, TimeSpan.FromMilliseconds(220)) { EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseInOut } });
         HideName();
@@ -470,16 +476,17 @@ public partial class DockWindow : Window
     void OnTileLoaded(object sender, RoutedEventArgs e)
     {
         var element = (FrameworkElement)sender;
+        if (!SystemParameters.ClientAreaAnimation) return;
         var now = DateTime.Now;
         if (now - revealBurst > TimeSpan.FromMilliseconds(500))
         {
             revealBurst = now;
             revealOrder = 0;
         }
-        var delay = TimeSpan.FromMilliseconds(Math.Min(revealOrder++, 14) * 26);
+        var delay = TimeSpan.FromMilliseconds(Math.Min(revealOrder++, 8) * 10);
         var shift = Shift(element);
-        element.BeginAnimation(OpacityProperty, new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(260)) { BeginTime = delay, FillBehavior = FillBehavior.Stop });
-        shift.BeginAnimation(TranslateTransform.YProperty, new DoubleAnimation(14, 0, TimeSpan.FromMilliseconds(380))
+        element.BeginAnimation(OpacityProperty, new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(160)) { BeginTime = delay, FillBehavior = FillBehavior.Stop });
+        shift.BeginAnimation(TranslateTransform.YProperty, new DoubleAnimation(6, 0, TimeSpan.FromMilliseconds(180))
         {
             BeginTime = delay,
             FillBehavior = FillBehavior.Stop,
@@ -663,15 +670,7 @@ public partial class DockWindow : Window
     void Bounce(FrameworkElement element)
     {
         if (!vm.Options.IconAnimation || !SystemParameters.ClientAreaAnimation) return;
-        var bounce = new DoubleAnimationUsingKeyFrames { Duration = TimeSpan.FromMilliseconds(760), FillBehavior = FillBehavior.Stop };
-        var up = new QuadraticEase { EasingMode = EasingMode.EaseOut };
-        var down = new QuadraticEase { EasingMode = EasingMode.EaseIn };
-        var lift = -IconSize * vm.Options.AnimationStrength;
-        bounce.KeyFrames.Add(new EasingDoubleKeyFrame(lift, KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(170)), up));
-        bounce.KeyFrames.Add(new EasingDoubleKeyFrame(0, KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(340)), down));
-        bounce.KeyFrames.Add(new EasingDoubleKeyFrame(lift * 0.45, KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(480)), up));
-        bounce.KeyFrames.Add(new EasingDoubleKeyFrame(0, KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(620)), down));
-        Shift(element).BeginAnimation(TranslateTransform.YProperty, bounce);
+        DesktopMotion.Launch(Shift(element), IconSize, vm.Options.AnimationStrength);
     }
 
     void ShowPreview(AppTile app, FrameworkElement element)
