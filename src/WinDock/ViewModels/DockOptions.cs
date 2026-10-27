@@ -43,6 +43,8 @@ public sealed class DockOptions : ObservableObject
     public bool CheckUpdates { get => settings.CheckUpdates; set => Set(() => settings.CheckUpdates = value); }
     public bool IconAnimation { get => D.IconAnimation; set => Set(() => D.IconAnimation = value); }
     public double AnimationStrength { get => D.AnimationStrength; set => Set(() => D.AnimationStrength = Math.Round(value, 2)); }
+    public bool WindowMotion { get => D.WindowMotion; set => Set(() => D.WindowMotion = value); }
+    public int WindowMotionDuration { get => D.WindowMotionDuration; set => Set(() => D.WindowMotionDuration = value); }
     public bool SearchEnabled { get => D.SearchEnabled; set => Set(() => D.SearchEnabled = value); }
     public bool OrganizerEnabled { get => D.OrganizerEnabled; set => Set(() => D.OrganizerEnabled = value); }
 

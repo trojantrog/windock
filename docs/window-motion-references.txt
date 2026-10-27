@@ -1,0 +1,143 @@
+Window animation implementation notes — 2026-10-28
+
+Source comparison
+
+1. robmikh/Win32CaptureSample — MIT, Copyright 2019 Robert Mikhayelyan
+   Source: https://github.com/robmikh/Win32CaptureSample/blob/main/Win32CaptureSample/CaptureSnapshot.cpp
+   License: https://github.com/robmikh/Win32CaptureSample/blob/main/LICENSE
+   Read the free-threaded frame pool, first-frame signal, surface copy and explicit
+   capture/session disposal. This is a suitable GPU capture architecture, but WGC
+   capture borders need a separate, consent-based decision. This version does not
+   request borderless capture or start a continuous capture session.
+
+2. Microsoft Windows.UI.Composition-Win32-Samples — MIT
+   Source: https://github.com/microsoft/Windows.UI.Composition-Win32-Samples/blob/master/dotnet/WPF/ScreenCapture/Composition.WindowsRuntimeHelpers/CaptureHelper.cs
+   Source: https://github.com/microsoft/Windows.UI.Composition-Win32-Samples/blob/master/dotnet/WPF/ScreenCapture/Composition.WindowsRuntimeHelpers/Direct3D11Helper.cs
+   Read the HWND capture-item activation and DXGI-to-WinRT device bridge. The
+   individual helpers carry Microsoft's MIT notice; the ScreenCapture directory
+   also contains Robert Mikhayelyan's MIT license. No helper code or SharpDX
+   dependency was imported. A DirectComposition visual is not by itself a way
+   to deform a foreign application's window.
+
+3. KDE KWin magiclamp — GPL-2.0-or-later (source SPDX)
+   Source: https://github.com/KDE/kwin/blob/master/src/plugins/magiclamp/magiclamp.cpp
+   Source: https://github.com/KDE/kwin/blob/master/src/plugins/magiclamp/magiclamp.h
+   Read the subdivided window quads, source/icon geometry, visibility reference,
+   timeline reversal, window-deletion cleanup and fullscreen-effect exclusion.
+   KWin owns the compositor texture and visibility lifetime. A regular Windows
+   application does not have those privileges. This comparison informed the
+   requirements for a deformable surface and reversible state transitions;
+   none of the GPL implementation, formulas or source text was copied.
+
+4. zzag/kwin-effects-yet-another-magic-lamp — GPL-2.0-or-later
+   Source: https://github.com/zzag/kwin-effects-yet-another-magic-lamp/blob/master/src/Model.cc
+   License: https://github.com/zzag/kwin-effects-yet-another-magic-lamp/blob/master/LICENSE
+   Read the multi-stage model, direction selection across screens and reversal
+   of an in-flight timeline. Its bump/stretch/squash stages are not implemented
+   here. WinDock's row-weighted pinch/transport mapping and Hermite retargeting
+   were written independently. No source or formula was copied.
+
+5. kua8/Nectar — GPL-3.0
+   Source: https://github.com/kua8/Nectar/blob/main/src/Dock.tsx
+   Source: https://github.com/kua8/Nectar/blob/main/src-tauri/src/commands.rs
+   License: https://github.com/kua8/Nectar/blob/main/LICENSE
+   Read the dock's Motion-based UI and focus_window command. The command still
+   delegates minimization/restoration to ShowWindow; it does not supply an
+   external-window mesh transition. No code or assets were imported.
+
+6. izantech/winspaces — GPL-3.0
+   Source: https://github.com/izantech/winspaces/blob/49636d72a1c97307c6b85a60b0b2b12de8b88987/crates/winspaces-core/src/spaces/visibility.rs
+   Source: https://github.com/izantech/winspaces/blob/49636d72a1c97307c6b85a60b0b2b12de8b88987/crates/winspaces-core/src/spaces/state.rs
+   License: https://github.com/izantech/winspaces/blob/main/LICENSE
+   Read visibility recovery and the process-external window-property identity.
+   Cloaking can outlive its owner, and clearing ownership before visibility is
+   restored strands windows. This version uses neither its implementation nor
+   its private shell-cloak interfaces. The independently implemented helper
+   owns a short alpha lease and keeps its recovery marker until restoration.
+
+7. ibelick/motion-primitives — MIT
+   Source: https://github.com/ibelick/motion-primitives/blob/main/components/core/dock.tsx
+   License: https://github.com/ibelick/motion-primitives/blob/main/LICENCE.md
+   The dock's pointer-distance transforms and springs concern icon interaction.
+   They do not implement application-window opening or minimization. Existing
+   WinDock icon motion remains a separate setting and implementation.
+
+8. Xiayang-Peter/Dockable-ARM
+   Repository: https://github.com/Xiayang-Peter/Dockable-ARM
+   A WPF3D Genie implementation was identified, but the repository did not expose
+   a clear reuse license at review time. No source, geometry formula or asset
+   was imported. Repository visibility alone was not treated as permission.
+
+Windows API constraints checked against the vendor documentation
+
+PrintWindow is synchronous and may wait on the target application's paint
+handler. It runs only on one bounded background capture slot here; UI waiting
+ends after 180 ms. A late capture is discarded, and another worker is not queued
+behind a stuck one. Unsupported uniform/black captures fall back to the native
+operation. This can also exclude valid windows with a completely plain center.
+https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-printwindow
+
+DWMWA_TRANSITIONS_FORCEDISABLED is documented as set-only. Its prior value cannot
+be reliably read and restored, so this implementation never writes it. It also
+never changes the global SPI_SETANIMATION setting and never uses DWM cloaking.
+https://learn.microsoft.com/en-us/windows/win32/api/dwmapi/ne-dwmapi-dwmwindowattribute
+
+Borderless WGC capture requires consent and the relevant capability. The capture
+indicator is not suppressed by silently requesting or bypassing that permission.
+https://learn.microsoft.com/en-us/uwp/api/windows.graphics.capture.graphicscapturesession.isborderrequired
+
+Only originally non-layered windows are eligible. A separate WinDock helper
+temporarily adds WS_EX_LAYERED and alpha zero, then removes its added style bit
+and requests repaint. Existing layered/per-pixel alpha and color-key windows are
+excluded, so their original alpha semantics are not overwritten.
+https://learn.microsoft.com/en-us/windows/win32/winmsg/using-windows#using-layered-windows
+
+Implemented paths and handoff
+
+- Clicking the active single-window Dock item minimizes through the mesh.
+- Clicking that item again, or picking it in the Dock preview, unfolds a recent
+  snapshot made by the preceding Dock minimize. Snapshot ownership is verified
+  with an HWND property, so a reused handle does not receive another window's
+  image. No desktop-wide screenshots or persisted image files are used.
+- The memory cache is limited to four windows, 96 MiB and three minutes. Restores
+  without a valid snapshot use the native operation.
+- Repeated clicks retarget the current surface from its present position and
+  velocity. Exceptions, cancellation, display/DPI changes, leaving the relevant
+  Dock, Windows reduced-motion settings and application exit release ownership.
+- The helper is the same executable in a dedicated mode. A current-user-only
+  named pipe verifies both process IDs before accepting a request. Each window
+  is checked by PID, process start time and operation/lease properties. No
+  transparency mutation happens before that handshake. Pipe loss, parent exit
+  and the fixed 1400 ms lease trigger restoration. Cleanup never reapplies an
+  old minimize/restore command over a later user action.
+- Source frame and icon coordinates use physical pixels. Program startup opts
+  into PerMonitorV2 before creating windows. Only the overlay host size is
+  converted to WPF units. Changed restore bounds fall back to native behavior;
+  source placement and maximized restore state are not rewritten.
+- Rendering uses a 64-row, 4-column textured WPF3D mesh, full-resolution source
+  pixels, high-quality filtering and non-activating click-through overlays.
+  The independently derived mapping narrows rows toward the icon before moving
+  the sheet into it. Default duration is 320 ms; the setting spans 240–440 ms.
+
+Limits
+
+This does not intercept a new process's first visible frame, title-bar minimize,
+Win+D, Win+M or Alt+Tab. First launches retain native opening behavior; optional
+icon lift is not described as a whole-window launch animation. Protected,
+fullscreen, elevated/denied, hung, topmost, existing layered, UWP frame-host and
+unsupported capture windows use native behavior. Very large capture/overlay
+areas are excluded. Live video is a frozen frame during the short transition.
+
+The helper cannot override a target application's refusal to process a native
+style change; it retains recovery ownership and retries rather than abandoning
+an invisible window. Compatibility with GPU applications, HDR, compositor timing
+and individual display arrangements still requires actual use. The code has
+been compiled, not run against desktop windows during this development pass.
+
+Control and rollback
+
+Settings > Animation > Fold windows into the dock toggles the feature. Turning
+it off cancels the current operation, releases the helper and drops snapshots.
+The JSON fields are dock.windowMotion and dock.windowMotionDuration. Setting
+windowMotion to false retains native window behavior. No Windows animation
+preference, taskbar preference or source application's placement is persisted.

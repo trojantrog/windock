@@ -1,6 +1,9 @@
 {
   "desktopTools": "DESKTOP TOOLS",
-  "animationTitle": "LAUNCH MOTION",
+  "animationTitle": "ANIMATION",
+  "windowMotion": "Fold windows into the dock",
+  "windowMotionDuration": "Window animation duration",
+  "windowMotionHint": "Minimize from the dock, then click to unfold. A recent window image is kept in memory for up to 3 minutes. First launch, unsupported windows and Windows shortcuts use system animations. Follows the Windows animation setting.",
   "iconAnimation": "Lift the icon when launching an app",
   "animationStrength": "Icon bounce height",
   "searchTitle": "Search",

@@ -44,6 +44,7 @@ public partial class DockWindow : Window
     DateTime revealBurst, lastWheel;
     FrameworkElement? hovered;
     PreviewWindow? preview;
+    Rect previewAnchor = Rect.Empty;
     Flyout? flyout;
     (object Item, Type Kind)? flyoutKey, closedKey;
     DateTime closedAt, menuClosedAt;
@@ -76,6 +77,7 @@ public partial class DockWindow : Window
         vm.Switched += OnSwitched;
         vm.Options.Changed += OnOption;
         vm.Tracker.Changed += CheckFullscreen;
+        vm.Tracker.Changed += WindowTransitions.Shared.ObserveWindows;
         vm.Tracker.Reshaped += CheckFullscreen;
         SystemParameters.StaticPropertyChanged += OnSystemParameter;
         poll.Tick += (_, _) => Poll();
@@ -100,8 +102,13 @@ public partial class DockWindow : Window
             pressed = null;
         };
         toastTimer.Tick += (_, _) => HideToast();
-        DpiChanged += (_, _) => Dispatcher.BeginInvoke(Resize, DispatcherPriority.Loaded);
+        DpiChanged += (_, _) =>
+        {
+            WindowTransitions.Shared.Cancel(this, clearCache: true);
+            Dispatcher.BeginInvoke(Resize, DispatcherPriority.Loaded);
+        };
         ApplyAccent(false);
+        WindowTransitions.Shared.Prepare(vm.Options.WindowMotion);
         poll.Start();
     }
 
@@ -110,6 +117,9 @@ public partial class DockWindow : Window
     void OnSystemParameter(object? sender, PropertyChangedEventArgs e)
     {
         if (e.PropertyName == nameof(SystemParameters.WorkArea)) Dispatcher.BeginInvoke(Place, DispatcherPriority.Background);
+        if (e.PropertyName is nameof(SystemParameters.ClientAreaAnimation) or nameof(SystemParameters.MinimizeAnimation)
+            && !WindowTransitions.WindowsAnimations)
+            WindowTransitions.Shared.Cancel(clearCache: true);
     }
 
     double IconSize => Math.Round(vm.Options.IconSize * fit);
@@ -212,6 +222,11 @@ public partial class DockWindow : Window
 
     void OnOption(string name)
     {
+        if (name is nameof(DockOptions.WindowMotion) or nameof(DockOptions.WindowMotionDuration))
+        {
+            WindowTransitions.Shared.Prepare(vm.Options.WindowMotion);
+            return;
+        }
         if (name == nameof(DockOptions.CompactWidgets))
         {
             var faces = (FaceSelector)Resources["Faces"];
@@ -319,7 +334,11 @@ public partial class DockWindow : Window
             SetBarPos(force: true);
             Place();
         }
-        else if (msg == WmDisplayChange) Dispatcher.BeginInvoke(Resize, DispatcherPriority.Background);
+        else if (msg == WmDisplayChange)
+        {
+            WindowTransitions.Shared.Cancel(clearCache: true);
+            Dispatcher.BeginInvoke(Resize, DispatcherPriority.Background);
+        }
         return 0;
     }
 
@@ -644,15 +663,16 @@ public partial class DockWindow : Window
         if (windows.Count == 1)
         {
             var w = windows[0];
-            if (w.Handle == foreground && !Native.IsIconic(w.Handle)) WindowTracker.Minimize(w.Handle);
-            else WindowTracker.Activate(w.Handle);
+            if (WindowTransitions.Shared.IsAnimating(w.Handle)) WindowTransitions.Shared.Reverse(w.Handle);
+            else if (w.Handle == foreground && !Native.IsIconic(w.Handle)) TransitionWindow(w.Handle, IconAnchor(element), true);
+            else ActivateWindow(w.Handle, IconAnchor(element));
             preview?.Hide();
             return;
         }
         if (windows.Any(w => w.Handle == foreground)) ShowPreview(app, element);
         else
         {
-            WindowTracker.Activate(windows[0].Handle);
+            ActivateWindow(windows[0].Handle, IconAnchor(element));
             preview?.Hide();
         }
     }
@@ -665,6 +685,24 @@ public partial class DockWindow : Window
             return;
         }
         Bounce(element);
+    }
+
+    Rect IconAnchor(FrameworkElement element)
+    {
+        if (!element.IsVisible || element.ActualWidth <= 0 || element.ActualHeight <= 0 || element == Root) return Rect.Empty;
+        var topLeft = element.PointToScreen(new Point(0, 0));
+        var bottomRight = element.PointToScreen(new Point(element.ActualWidth, element.ActualHeight));
+        var size = Math.Min(Math.Abs(bottomRight.X - topLeft.X), Math.Abs(bottomRight.Y - topLeft.Y));
+        return new Rect((topLeft.X + bottomRight.X - size) / 2, (topLeft.Y + bottomRight.Y - size) / 2, size, size);
+    }
+
+    void TransitionWindow(nint window, Rect anchor, bool minimized) => WindowTransitions.Shared.Request(
+        window, anchor, minimized, vm.Options.WindowMotion, vm.Options.WindowMotionDuration, this);
+
+    void ActivateWindow(nint window, Rect anchor)
+    {
+        if (Native.IsIconic(window) || WindowTransitions.Shared.IsAnimating(window)) TransitionWindow(window, anchor, false);
+        else WindowTracker.Activate(window);
     }
 
     void Bounce(FrameworkElement element)
@@ -685,7 +723,7 @@ public partial class DockWindow : Window
             preview.PointerLeft += () => closePreview.Start();
             preview.Picked += h =>
             {
-                WindowTracker.Activate(h);
+                ActivateWindow(h, previewAnchor);
                 preview.Hide();
             };
         }
@@ -693,6 +731,7 @@ public partial class DockWindow : Window
         var bottomRight = element.PointToScreen(new Point(element.ActualWidth, element.ActualHeight));
         var anchorTop = Math.Min(topLeft.Y, bottomRight.Y);
         var barTop = panel is null ? anchorTop : panel.PointToScreen(new Point(0, panel.Bar.Top)).Y;
+        previewAnchor = IconAnchor(element);
         preview.ShowFor(app, (topLeft.X + bottomRight.X) / 2, Math.Min(anchorTop, barTop), TargetScreen(), Dark);
     }
 
@@ -845,6 +884,7 @@ public partial class DockWindow : Window
 
     void OnSwitched()
     {
+        WindowTransitions.Shared.Cancel(this);
         ApplyAccent(true);
         flyout?.Close();
         preview?.Hide();
@@ -924,6 +964,7 @@ public partial class DockWindow : Window
         if (!vm.Options.Enabled) return;
         if (fullscreen)
         {
+            WindowTransitions.Shared.Cancel(this);
             preview?.Hide();
             Hide();
         }
@@ -1126,6 +1167,7 @@ public partial class DockWindow : Window
 
     protected override void OnClosing(CancelEventArgs e)
     {
+        WindowTransitions.Shared.Cancel(this);
         Reserve(false);
         poll.Stop();
         hover.Stop();
@@ -1137,6 +1179,7 @@ public partial class DockWindow : Window
         vm.Switched -= OnSwitched;
         vm.Options.Changed -= OnOption;
         vm.Tracker.Changed -= CheckFullscreen;
+        vm.Tracker.Changed -= WindowTransitions.Shared.ObserveWindows;
         vm.Tracker.Reshaped -= CheckFullscreen;
         SystemParameters.StaticPropertyChanged -= OnSystemParameter;
         base.OnClosing(e);

@@ -126,6 +126,14 @@
                         <Border Margin="0,0,0,12" Padding="18,16" CornerRadius="20" Background="{StaticResource Plate}" BorderBrush="{StaticResource Hairline}" BorderThickness="1">
                             <StackPanel>
                                 <TextBlock Text="{Binding [animationTitle], Source={x:Static svc:Loc.Instance}, Mode=OneWay}" FontSize="14" Foreground="{StaticResource Ink}" Margin="0,0,0,16"/>
+                                <ToggleButton Content="{Binding [windowMotion], Source={x:Static svc:Loc.Instance}, Mode=OneWay}" Style="{StaticResource SwitchToggle}" IsChecked="{Binding WindowMotion, Mode=TwoWay}" Margin="0,0,0,10"/>
+                                <TextBlock Text="{Binding [windowMotionHint], Source={x:Static svc:Loc.Instance}, Mode=OneWay}" Style="{StaticResource Note}" TextWrapping="Wrap" Margin="0,0,0,12"/>
+                                <Grid Margin="0,0,0,20" IsEnabled="{Binding WindowMotion}">
+                                    <Grid.ColumnDefinitions><ColumnDefinition Width="190"/><ColumnDefinition/><ColumnDefinition Width="70"/></Grid.ColumnDefinitions>
+                                    <TextBlock Text="{Binding [windowMotionDuration], Source={x:Static svc:Loc.Instance}, Mode=OneWay}" Foreground="{StaticResource Ink}" VerticalAlignment="Center"/>
+                                    <Slider Grid.Column="1" Style="{StaticResource FlatSlider}" Minimum="240" Maximum="440" TickFrequency="20" IsSnapToTickEnabled="True" Value="{Binding WindowMotionDuration, Mode=TwoWay}"/>
+                                    <TextBlock Grid.Column="2" Text="{Binding WindowMotionDuration, StringFormat={}{0} ms}" Foreground="{StaticResource Muted}" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                                </Grid>
                                 <ToggleButton Content="{Binding [iconAnimation], Source={x:Static svc:Loc.Instance}, Mode=OneWay}" Style="{StaticResource SwitchToggle}" IsChecked="{Binding IconAnimation, Mode=TwoWay}" Margin="0,0,0,14"/>
                                 <Grid Margin="0,0,0,10">
                                     <Grid.ColumnDefinitions><ColumnDefinition Width="190"/><ColumnDefinition/><ColumnDefinition Width="70"/></Grid.ColumnDefinitions>

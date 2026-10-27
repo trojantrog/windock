@@ -7,9 +7,15 @@ public static class Program
     [STAThread]
     public static void Main(string[] args)
     {
+        System.Windows.Forms.Application.SetHighDpiMode(System.Windows.Forms.HighDpiMode.PerMonitorV2);
+        if (args is ["--window-motion-guard", var owner, var started, var pipe]
+            && int.TryParse(owner, out var ownerPid) && long.TryParse(started, out var ownerStarted))
+        {
+            WindowMotionGuard.Run(ownerPid, ownerStarted, pipe).GetAwaiter().GetResult();
+            return;
+        }
         if (args is ["--preview-search"] or ["--preview-organizer"])
         {
-            System.Windows.Forms.Application.SetHighDpiMode(System.Windows.Forms.HighDpiMode.PerMonitorV2);
             var settings = Models.Settings.Load();
             Loc.Instance.Set(settings.Language);
             var preview = new System.Windows.Application { ShutdownMode = System.Windows.ShutdownMode.OnLastWindowClose };

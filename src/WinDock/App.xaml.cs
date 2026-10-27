@@ -77,6 +77,7 @@ public partial class App : System.Windows.Application
 
     void OnCrash(object sender, DispatcherUnhandledExceptionEventArgs e)
     {
+        WindowTransitions.Shared.Cancel();
         try
         {
             Directory.CreateDirectory(Settings.Dir);
@@ -89,6 +90,7 @@ public partial class App : System.Windows.Application
     protected override void OnExit(ExitEventArgs e)
     {
         WinKeys.Enable(false);
+        WindowTransitions.Shared.Dispose();
         main?.Dock.Flush();
         docks?.Dispose();
         dock?.Dispose();

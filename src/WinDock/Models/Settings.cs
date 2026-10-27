@@ -75,6 +75,8 @@ public sealed class DockSettings
     public string? Screen { get; set; }
     public bool IconAnimation { get; set; }
     public double AnimationStrength { get; set; } = 0.32;
+    public bool WindowMotion { get; set; } = true;
+    public int WindowMotionDuration { get; set; } = 320;
     public bool SearchEnabled { get; set; } = true;
     public bool OrganizerEnabled { get; set; } = true;
 
@@ -84,6 +86,7 @@ public sealed class DockSettings
         LensWidth = Math.Clamp(LensWidth, 1, 4.5);
         IconSize = Math.Clamp(IconSize, 32, 72);
         AnimationStrength = Math.Clamp(AnimationStrength, 0.2, 1.3);
+        WindowMotionDuration = Math.Clamp(WindowMotionDuration, 240, 440);
         if (Lens is not (LensNone or LensScale or LensMagnify)) Lens = LensMagnify;
         if (DockTheme.All.All(t => t.Id != Theme)) Theme = ThemeDark;
     }
