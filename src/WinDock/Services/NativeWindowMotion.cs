@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Security.Principal;
@@ -238,30 +239,30 @@ sealed class NativeWindowMotion : IDisposable
     static bool SameCompositor(int pid, int session, DateTimeOffset observed)
     {
         var objects = new List<object>();
-        dynamic Keep(object value) { objects.Add(value); return value; }
+        object Keep(object value) { objects.Add(value); return value; }
+        static object Read(object target, string name, BindingFlags flags, params object[] args) =>
+            target.GetType().InvokeMember(name, flags, null, target, args)!;
         try
         {
-            var type = Type.GetTypeFromProgID("WbemScripting.SWbemLocator");
-            if (type is null) return false;
-            dynamic locator = Keep(Activator.CreateInstance(type)!);
-            dynamic services = Keep((object)locator.ConnectServer(".", "root\\cimv2"));
-            dynamic results = Keep((object)services.ExecQuery(
-                $"SELECT ProcessId, SessionId, Name, CreationDate FROM Win32_Process WHERE ProcessId={pid}", "WQL", 0x30));
-            foreach (var item in (System.Collections.IEnumerable)results)
+            var process = Keep(Marshal.BindToMoniker(
+                @"winmgmts:{impersonationLevel=impersonate}!\\.\root\cimv2:Win32_Process.Handle='" + pid + "'"));
+            var properties = Keep(Read(process, "Properties_", BindingFlags.GetProperty));
+            object Property(string name)
             {
-                dynamic process = Keep(item);
-                if ((int)process.ProcessId != pid || (int)process.SessionId != session
-                    || !string.Equals((string)process.Name, "dwm.exe", StringComparison.OrdinalIgnoreCase)) continue;
-                var value = (string)process.CreationDate;
-                if (value.Length != 25 || value[21] is not ('+' or '-')) return false;
-                var created = DateTime.ParseExact(value[..21], "yyyyMMddHHmmss.ffffff", CultureInfo.InvariantCulture);
-                var minutes = int.Parse(value[22..], CultureInfo.InvariantCulture) * (value[21] == '-' ? -1 : 1);
-                return new DateTimeOffset(created, TimeSpan.FromMinutes(minutes)) <= observed;
+                var property = Keep(Read(properties, "Item", BindingFlags.InvokeMethod, name, 0));
+                return Read(property, "Value", BindingFlags.GetProperty);
             }
-            return false;
+            if (Convert.ToInt32(Property("ProcessId"), CultureInfo.InvariantCulture) != pid
+                || Convert.ToInt32(Property("SessionId"), CultureInfo.InvariantCulture) != session
+                || !string.Equals(Convert.ToString(Property("Name"), CultureInfo.InvariantCulture), "dwm.exe", StringComparison.OrdinalIgnoreCase)) return false;
+            var value = Convert.ToString(Property("CreationDate"), CultureInfo.InvariantCulture);
+            if (value is not { Length: 25 } || value[21] is not ('+' or '-')) return false;
+            var created = DateTime.ParseExact(value[..21], "yyyyMMddHHmmss.ffffff", CultureInfo.InvariantCulture);
+            var minutes = int.Parse(value[22..], CultureInfo.InvariantCulture) * (value[21] == '-' ? -1 : 1);
+            return new DateTimeOffset(created, TimeSpan.FromMinutes(minutes)) <= observed;
         }
         catch (Exception e) when (e is COMException or InvalidOperationException or ArgumentException or FormatException
-            or OverflowException or Microsoft.CSharp.RuntimeBinder.RuntimeBinderException) { return false; }
+            or OverflowException or InvalidCastException or TargetInvocationException) { return false; }
         finally
         {
             for (var i = objects.Count - 1; i >= 0; --i)
