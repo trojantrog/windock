@@ -46,6 +46,7 @@ public sealed class DockOptions : ObservableObject
     public bool UseAccentIndicator { get => D.UseAccentIndicator; set => Set(() => D.UseAccentIndicator = value); }
     public bool ShowBadges { get => D.ShowBadges; set => Set(() => D.ShowBadges = value); }
     public bool ShowAppNames { get => D.ShowAppNames; set => Set(() => D.ShowAppNames = value); }
+    public bool ShowBackgroundApps { get => D.ShowBackgroundApps; set => Set(() => D.ShowBackgroundApps = value); }
     public string Lens { get => D.Lens; set => Set(() => D.Lens = value, nameof(LensNone), nameof(LensScale), nameof(LensMagnify)); }
     public string Theme { get => D.Theme; set => Set(() => D.Theme = value); }
     public string? Screen { get => D.Screen; set => Set(() => D.Screen = value); }

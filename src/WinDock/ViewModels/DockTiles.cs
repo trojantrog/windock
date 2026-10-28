@@ -58,7 +58,7 @@ public sealed partial class AppTile : DockTile, IDisposable
 
     public override string Key { get; }
     public override bool Lens => true;
-    public override int Indicator => IsFocused ? 2 : Windows.Count > 0 ? 1 : 0;
+    public override int Indicator => IsFocused ? 2 : IsRunning ? 1 : 0;
 
     public string Name { get; }
     public ImageSource? Icon { get; }
@@ -91,7 +91,13 @@ public sealed partial class AppTile : DockTile, IDisposable
     [NotifyPropertyChangedFor(nameof(HasBadge))]
     bool showBadge = true;
 
-    public bool IsRunning => Windows.Count > 0;
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsRunning), nameof(Indicator))]
+    TrayApp? backgroundApp;
+
+    public bool IsRunning => Windows.Count > 0 || BackgroundApp is not null;
+    public bool MatchesBackground(TrayApp app) => match.Exes.Contains(app.Exe) || (app.AppId is { } id && match.Ids.Contains(id));
+    public bool OpenBackground() => BackgroundApp is { } app && TrayApps.Open(app);
 
     public bool Matches(AppWindow w) => match.Matches(w);
 

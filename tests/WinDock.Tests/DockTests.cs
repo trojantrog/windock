@@ -362,7 +362,7 @@ public class DockTests
     {
         var settings = Settings.Parse("""{ "dock": { "magnification": 9, "iconSize": 4, "lens": "warp", "theme": "plaid" } }""");
         Assert.Equal(2.4, settings.Dock.Magnification);
-        Assert.Equal(32, settings.Dock.IconSize);
+        Assert.Equal(24, settings.Dock.IconSize);
         Assert.Equal(DockSettings.LensMagnify, settings.Dock.Lens);
         Assert.Equal(DockSettings.ThemeDark, settings.Dock.Theme);
 

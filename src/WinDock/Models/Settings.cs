@@ -79,6 +79,7 @@ public sealed class DockSettings
     public bool UseAccentIndicator { get; set; } = true;
     public bool ShowBadges { get; set; } = true;
     public bool ShowAppNames { get; set; } = true;
+    public bool ShowBackgroundApps { get; set; } = true;
     public string Theme { get; set; } = ThemeDark;
     public bool AllScreens { get; set; } = true;
     public bool CompactWidgets { get; set; } = true;

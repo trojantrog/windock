@@ -141,6 +141,7 @@
   "useAccentIndicator": "Accent the active app",
   "showBadges": "Show badges",
   "showAppNames": "Show app names on hover",
+  "showBackgroundApps": "Show background apps",
   "windowOpenAnimation": "App opening animation",
   "windowOpenDuration": "Opening duration",
   "hoverMotion": "Hover effect",

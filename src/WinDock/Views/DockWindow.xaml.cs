@@ -663,6 +663,11 @@ public partial class DockWindow : Window
         var windows = app.Windows;
         if (windows.Count == 0)
         {
+            if (app.BackgroundApp is not null)
+            {
+                if (!app.OpenBackground()) vm.Main.Notify(Loc.F("launchFailed", app.Name));
+                return;
+            }
             Launch(app, element);
             return;
         }
@@ -720,7 +725,7 @@ public partial class DockWindow : Window
 
     void ShowPreview(AppTile app, FrameworkElement element)
     {
-        if (!app.IsRunning) return;
+        if (app.Windows.Count == 0) return;
         HideName();
         closePreview.Stop();
         if (preview is null)

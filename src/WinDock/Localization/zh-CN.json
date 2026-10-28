@@ -422,6 +422,7 @@
   "useAccentIndicator": "突出当前应用",
   "showBadges": "显示消息角标",
   "showAppNames": "悬停显示应用名称",
+  "showBackgroundApps": "显示后台运行的应用",
   "windowOpenAnimation": "打开应用动画",
   "windowOpenDuration": "打开时长",
   "hoverMotion": "悬停效果",

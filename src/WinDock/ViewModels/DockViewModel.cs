@@ -52,6 +52,8 @@ public sealed partial class DockViewModel : ObservableObject, IDisposable
         activeId = Active?.Id;
         if (owner) tracker.ActiveEnvironment = activeId;
         tracker.Changed += Rebuild;
+        BackgroundApps.Shared.Changed += Rebuild;
+        BackgroundApps.Shared.Acquire();
         tracker.Reshaped += OnReshaped;
         main.PropertyChanged += OnMain;
         main.PresetChanged += OnPreset;
@@ -156,7 +158,8 @@ public sealed partial class DockViewModel : ObservableObject, IDisposable
             shell.SetHiddenWindows([]);
         }
         if (name is nameof(DockOptions.ReplaceTaskbar) or nameof(DockOptions.SearchEnabled) or nameof(DockOptions.OrganizerEnabled)
-            or nameof(DockOptions.RunningOrder) or nameof(DockOptions.RunningPosition) or nameof(DockOptions.ShowBadges)) Rebuild();
+            or nameof(DockOptions.RunningOrder) or nameof(DockOptions.RunningPosition) or nameof(DockOptions.ShowBadges)
+            or nameof(DockOptions.ShowBackgroundApps)) Rebuild();
     }
 
     void OnActiveChanged()
@@ -267,6 +270,21 @@ public sealed partial class DockViewModel : ObservableObject, IDisposable
         }
 
         StackAlike(loose);
+        var backgrounds = new Dictionary<string, TrayApp>(StringComparer.OrdinalIgnoreCase);
+        foreach (var tile in pinned) tile.BackgroundApp = null;
+        if (Options.ShowBackgroundApps)
+            foreach (var app in BackgroundApps.Shared.Apps)
+            {
+                if (pinned.FirstOrDefault(tile => tile.MatchesBackground(app)) is { } pin) { pin.BackgroundApp = app; continue; }
+                if (tracker.Windows.Any(window => string.Equals(window.Exe, app.Exe, StringComparison.OrdinalIgnoreCase)
+                    || (app.AppId is not null && window.AppId == app.AppId))) continue;
+                var key = "run:" + (app.AppId ?? app.Exe).ToLowerInvariant();
+                if (loose.Any(group => group.Key == key)) continue;
+                backgrounds[key] = app;
+                loose.Add((key, []));
+            }
+        AppTile TileFor((string Key, List<AppWindow> Windows) group) => (AppTile)Get(group.Key, () => backgrounds.TryGetValue(group.Key, out var app)
+            ? BackgroundTile(group.Key, app) : RunningTile(group.Key, group.Windows[0]));
         var liveKeys = loose.Select(group => group.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
         foreach (var key in runSequence.Keys.Where(key => !liveKeys.Contains(key)).ToArray()) { runSequence.Remove(key); runUsed.Remove(key); }
         foreach (var group in loose)
@@ -278,11 +296,12 @@ public sealed partial class DockViewModel : ObservableObject, IDisposable
         lastForeground = tracker.Foreground;
         loose = Options.RunningOrder switch
         {
-            "name" => loose.OrderBy(group => ((AppTile)Get(group.Key, () => RunningTile(group.Key, group.Windows[0]))).Name, StringComparer.CurrentCultureIgnoreCase).ToList(),
+            "name" => loose.OrderBy(group => TileFor(group).Name, StringComparer.CurrentCultureIgnoreCase).ToList(),
             "recent" => loose.OrderByDescending(group => runUsed.GetValueOrDefault(group.Key)).ThenBy(group => runSequence[group.Key]).ToList(),
             _ => loose.OrderBy(group => runSequence[group.Key]).ToList()
         };
-        var running = loose.Select(g => (AppTile)Get(g.Key, () => RunningTile(g.Key, g.Windows[0]))).ToList();
+        var running = loose.Select(TileFor).ToList();
+        foreach (var tile in running) tile.BackgroundApp = backgrounds.GetValueOrDefault(tile.Key);
         if (Options.RunningPosition == "before-pins")
         {
             desired.AddRange(running);
@@ -442,6 +461,13 @@ public sealed partial class DockViewModel : ObservableObject, IDisposable
         return new AppTile(key, pin.Name, ShellIcons.ForPin(pin, IconPixels), pin, AppMatch.For(pin), folder);
     }
 
+    static AppTile BackgroundTile(string key, TrayApp app)
+    {
+        var match = AppMatch.Empty(); match.Exes.Add(app.Exe);
+        if (app.AppId is { } id) match.Ids.Add(id);
+        return new AppTile(key, app.Name, ShellIcons.ForPath(app.Exe, IconPixels), null, match) { Exe = app.Exe, AppId = app.AppId };
+    }
+
     static AppTile RunningTile(string key, AppWindow w)
     {
         var packaged = w.AppId is { } id && id.Contains('!');
@@ -576,6 +602,8 @@ public sealed partial class DockViewModel : ObservableObject, IDisposable
         Badges.Changed -= Rebuild;
         tracker.Changed -= Rebuild;
         tracker.Reshaped -= OnReshaped;
+        BackgroundApps.Shared.Changed -= Rebuild;
+        BackgroundApps.Shared.Release();
         main.PropertyChanged -= OnMain;
         main.PresetChanged -= OnPreset;
         main.Presets.CollectionChanged -= OnPresets;

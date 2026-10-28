@@ -42,6 +42,7 @@ public sealed class DockPreferences : StackPanel
         Toggle(apps, "useAccentIndicator", nameof(DockOptions.UseAccentIndicator));
         Toggle(apps, "showBadges", nameof(DockOptions.ShowBadges));
         Toggle(apps, "showAppNames", nameof(DockOptions.ShowAppNames));
+        Toggle(apps, "showBackgroundApps", nameof(DockOptions.ShowBackgroundApps));
 
         var motion = Group("animationTitle");
         Toggle(motion, "windowOpenAnimation", nameof(DockOptions.WindowOpenAnimation));

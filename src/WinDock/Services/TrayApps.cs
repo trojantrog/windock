@@ -72,7 +72,7 @@ public static class TrayApps
         finally { Marshal.FreeCoTaskMem(ptr); }
     }
 
-    public static void Open(TrayApp app)
+    public static bool Open(TrayApp app)
     {
         nint found = 0;
         var pids = app.Pids.ToHashSet();
@@ -83,9 +83,9 @@ public static class TrayApps
             found = h;
             return false;
         }, 0);
-        if (found != 0) WindowTracker.Activate(found);
-        else if (app.AppId is { } id && Launcher.OpenAppId(id)) { }
-        else Launcher.OpenFile(app.Exe);
+        if (found != 0) { WindowTracker.Activate(found); return true; }
+        if (app.AppId is { } id && Launcher.OpenAppId(id)) return true;
+        return Launcher.OpenFile(app.Exe);
     }
 
     public static bool End(TrayApp app)
@@ -113,7 +113,7 @@ public static class TrayApps
             if (!string.IsNullOrWhiteSpace(info.FileDescription)) return info.FileDescription.Trim();
             if (!string.IsNullOrWhiteSpace(info.ProductName)) return info.ProductName.Trim();
         }
-        catch (FileNotFoundException) { }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or Win32Exception) { }
         return System.IO.Path.GetFileNameWithoutExtension(exe);
     }
 
