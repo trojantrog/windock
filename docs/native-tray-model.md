@@ -113,6 +113,10 @@ PDB 下载自[微软符号服务器的精确 GUID/age 路径](https://msdl.micro
 
 [`WaitForSingleObject`](https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-waitforsingleobject) 要求句柄具有 `SYNCHRONIZE` 权限；查询创建时间可使用 [`PROCESS_QUERY_LIMITED_INFORMATION`](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getprocesstimes)。[`GetExitCodeProcess`](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getexitcodeprocess) 返回的 259 也可能是应用实际退出码，不能据此替代存活证明。诊断将其保留为原始数值。
 
+preview.22 正常启动时，两项 NVIDIA 后台进程对上述两种访问均返回错误 5。后续可研究微软公开的 [`SystemBasicProcessInformation`](https://learn.microsoft.com/en-us/windows/win32/api/winternl/nf-winternl-ntquerysysteminformation)：Windows 11 build 26100.4770 起提供用于识别 PID 复用的 `SequenceNumber`，[固定 SDK 头文件](https://github.com/microsoft/win32metadata/blob/64ed9177fb76eb244fc9051c74b8a93fdfe20873/generation/WinSDK/RecompiledIdlHeaders/um/winternl.h#L270) 明确枚举值为 252。本机文件版本符合门槛，但尚未调用验证它是否返回这两个候选进程。
+
+该方案需要显式区分创建时间与进程序号，按候选 PID 保留最小信息并在读取前后核对；不能将序号填进 `ProcessStarted`，或让未知创建时间落入宽松的窗口存在判断。初期操作应通过同一 Explorer 会话中的真实托盘控件，继续核对控件唯一性、范围、登记代际及提交前身份；这只能覆盖控件实际支持的默认动作。原生图像消息也需同步增加明确的身份类型。上述路径尚未实现，不能据此声称右键、自定义悬停、关闭的溢出区或受限进程已兼容。
+
 ## 补充离线取证：当前图像
 
 `SetIcon`（`0x4CAE0`）通过 `NotifyIconUtilities::TryGetSoftwareBitmapFromHicon`（`0x4CDBC`）取得位图并更新图标实现 `+0xC8`。转换函数的本机符号和调用链明确使用 `ISoftwareBitmapNativeFactory` 与 `SoftwareBitmap`；当前代码检查/转换至 BGRA8、预乘 alpha。`get_Icon`（`0x1BEB0`）返回带 AddRef 的对象，其入口也调用 `FailFastIfNotUIThread`。
