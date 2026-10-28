@@ -485,7 +485,7 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
         async Task ReadSnapshot()
         {
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(run.Token);
-            timeout.CancelAfter(TimeSpan.FromSeconds(4));
+            timeout.CancelAfter(TimeSpan.FromSeconds(6));
             try
             {
                 // Let the application's initial re-registration packets settle.
@@ -586,6 +586,9 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
         confirmedCandidates,
         nativeSnapshotRecords,
         nativeSnapshotStatus = NativeTraySnapshot.Status,
+        nativeSnapshotCallbacks = NativeTraySnapshot.CallbackCount,
+        nativeSnapshotCopied = NativeTraySnapshot.CopiedCount,
+        nativeSnapshotValidated = NativeTraySnapshot.ValidatedCount,
         icons = Icons.Select(item => new
         {
             window = item.Window.ToInt64(),

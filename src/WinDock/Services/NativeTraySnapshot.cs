@@ -20,7 +20,13 @@ internal static class NativeTraySnapshot
     static readonly SemaphoreSlim Worker = new(1, 1);
     static volatile bool observerUnavailable;
     static volatile string status = "not_started";
+    static int callbackCount, copiedCount, validatedCount;
     internal static string Status => status;
+    internal static int CallbackCount => Volatile.Read(ref callbackCount);
+    internal static int CopiedCount => Volatile.Read(ref copiedCount);
+    internal static int ValidatedCount => Volatile.Read(ref validatedCount);
+    internal static void CallbackReceived() => Interlocked.Increment(ref callbackCount);
+    internal static void RecordCopied() => Interlocked.Increment(ref copiedCount);
 
     // Only the cookie-based Win8+ observer is used. The older interface has a
     // single callback slot and could replace another client's subscription.
@@ -44,6 +50,9 @@ internal static class NativeTraySnapshot
     {
         if (observerUnavailable) return [];
         await Worker.WaitAsync(cancellation).ConfigureAwait(false);
+        Interlocked.Exchange(ref callbackCount, 0);
+        Interlocked.Exchange(ref copiedCount, 0);
+        Interlocked.Exchange(ref validatedCount, 0);
         var result = new TaskCompletionSource<IReadOnlyList<NativeTrayRegistration>>(TaskCreationOptions.RunContinuationsAsynchronously);
         try
         {
@@ -54,7 +63,7 @@ internal static class NativeTraySnapshot
                 {
                     cancellation.ThrowIfCancellationRequested();
                     initialized = CoInitializeEx(0, 2) >= 0;
-                    if (!initialized) { result.TrySetResult([]); return; }
+                    if (!initialized) { status = "apartment_unavailable"; result.TrySetResult([]); return; }
                     result.TrySetResult(Read(explorerWindow, explorerProcess, cancellation));
                 }
                 catch (OperationCanceledException) { status = "cancelled"; result.TrySetCanceled(cancellation); }
@@ -96,7 +105,13 @@ internal static class NativeTraySnapshot
             subscribed = true;
             var registered = observer.RegisterCallback(sink, out cookie);
             if (registered >= 0)
-            { captured = sink.Finish(); succeeded = true; }
+            {
+                // Windows 11 may deliver the inventory after RegisterCallback
+                // returns. Keep this STA dispatching until the bounded stream
+                // settles, then seal and unsubscribe before any Shell queries.
+                WaitForCallbacks(sink, cancellation);
+                captured = sink.Finish(); succeeded = true;
+            }
             else status = $"subscription_failed:0x{registered:X8}";
         }
         finally
@@ -121,10 +136,11 @@ internal static class NativeTraySnapshot
             if (!succeeded || cancellation.IsCancellationRequested || !SameExplorer(explorerWindow, explorerProcess)) return [];
             var items = new Dictionary<string, NativeTrayRegistration>();
             var ambiguous = new HashSet<string>();
+            var knownFolders = new Dictionary<Guid, string?>();
             foreach (var record in captured)
             {
                 cancellation.ThrowIfCancellationRequested();
-                var item = Validate(record);
+                var item = Validate(record, knownFolders);
                 if (item is null) continue;
                 var key = item.Guid == Guid.Empty ? $"{item.Window:X}:{item.Id}:{item.ProcessId}" : item.Guid.ToString("D");
                 if (ambiguous.Contains(key)) continue;
@@ -134,13 +150,51 @@ internal static class NativeTraySnapshot
                 items[key] = item;
             }
             if (!SameExplorer(explorerWindow, explorerProcess)) { status = "explorer_changed"; return []; }
-            status = "available";
+            Interlocked.Exchange(ref validatedCount, items.Count);
+            status = items.Count > 0 ? "available" : CallbackCount == 0 ? "no_callbacks" : "filtered";
             return items.Values.ToArray();
         }
         finally { foreach (var record in captured) record.Dispose(); }
     }
 
-    static NativeTrayRegistration? Validate(NativeTraySnapshotRecord record)
+    static void WaitForCallbacks(NativeTraySnapshotCallback sink, CancellationToken cancellation)
+    {
+        const long firstArrivalLimit = 1000, quietLimit = 150, totalLimit = 3000;
+        var started = Environment.TickCount64;
+        var lastArrival = started;
+        var seen = sink.ReceivedCount;
+        using var cancelled = new EventWaitHandle(false, EventResetMode.ManualReset);
+        // Own this wait handle independently: the caller may dispose its CTS
+        // while the real COM worker is still unwinding after cancellation.
+        using var registration = cancellation.Register(() => cancelled.Set());
+        nint[] handles = [cancelled.SafeWaitHandle.DangerousGetHandle()];
+        while (true)
+        {
+            cancellation.ThrowIfCancellationRequested();
+            var now = Environment.TickCount64;
+            var arrived = sink.ReceivedCount;
+            if (arrived != seen) { seen = arrived; lastArrival = now; }
+            var remaining = Math.Min(totalLimit - (now - started),
+                (seen == 0 ? firstArrivalLimit : quietLimit) - (now - lastArrival));
+            if (remaining <= 0) return;
+            // QS_ALLINPUT / MWMO_INPUTAVAILABLE; only this worker's messages are
+            // dispatched, never the WPF UI thread's queue or global input.
+            var ready = MsgWaitForMultipleObjectsEx(1, handles, (uint)remaining, 0x4FF, 4);
+            if (ready == uint.MaxValue) throw new Win32Exception(Marshal.GetLastWin32Error());
+            cancellation.ThrowIfCancellationRequested();
+            if (ready != 1) continue;
+            while (PeekMessageW(out var message, 0, 0, 0, 1))
+            {
+                cancellation.ThrowIfCancellationRequested();
+                if (Environment.TickCount64 - started >= totalLimit) return;
+                if (message.Id == 0x12) throw new InvalidOperationException("Tray observer message loop closed.");
+                TranslateMessage(ref message);
+                DispatchMessageW(ref message);
+            }
+        }
+    }
+
+    static NativeTrayRegistration? Validate(NativeTraySnapshotRecord record, Dictionary<Guid, string?> knownFolders)
     {
         try
         {
@@ -154,7 +208,10 @@ internal static class NativeTraySnapshot
                 if (WaitForSingleObject(handle, 0) != 258 || !Native.QueryFullProcessImageName(handle, 0, text, ref length)
                     || !GetProcessTimes(handle, out var started, out _, out _, out _)) return null;
                 var executable = text.ToString();
-                if (!string.Equals(Normalize(executable), Normalize(record.Executable), StringComparison.OrdinalIgnoreCase)) return null;
+                var actualPath = Normalize(executable, knownFolders);
+                var registeredPath = Normalize(record.Executable, knownFolders);
+                if (actualPath is null || registeredPath is null
+                    || !string.Equals(actualPath, registeredPath, StringComparison.OrdinalIgnoreCase)) return null;
                 var identity = new Identifier { Size = Marshal.SizeOf<Identifier>(), Window = record.Window, Id = record.Id, Guid = record.Guid };
                 var rectangle = Shell_NotifyIconGetRect(ref identity, out _);
                 if (rectangle is not (0 or 1) || WaitForSingleObject(handle, 0) != 258
@@ -168,7 +225,33 @@ internal static class NativeTraySnapshot
             or UnauthorizedAccessException or COMException or NotSupportedException or System.Security.SecurityException) { return null; }
     }
 
-    static string Normalize(string path) => path.StartsWith(@"\\?\", StringComparison.Ordinal) ? path[4..] : path;
+    static string? Normalize(string path, Dictionary<Guid, string?> knownFolders)
+    {
+        if (path.Length is 0 or > 32768) return null;
+        if (path[0] == '{')
+        {
+            if (path.Length <= 38 || path[38] is not ('\\' or '/')
+                || !Guid.TryParseExact(path[..38], "B", out var folderId)) return null;
+            if (!knownFolders.TryGetValue(folderId, out var folder))
+            {
+                nint value = 0;
+                try
+                {
+                    // KF_FLAG_DONT_VERIFY only: resolve the current user's
+                    // known-folder prefix without visiting or creating it.
+                    folder = SHGetKnownFolderPath(in folderId, 0x4000, 0, out value) == 0 && value != 0
+                        ? Marshal.PtrToStringUni(value) : null;
+                    knownFolders[folderId] = folder;
+                }
+                finally { if (value != 0) Marshal.FreeCoTaskMem(value); }
+            }
+            if (string.IsNullOrEmpty(folder)) return null;
+            path = folder + path[38..];
+        }
+        if (path.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase)) path = @"\\" + path[8..];
+        else if (path.StartsWith(@"\\?\", StringComparison.Ordinal)) path = path[4..];
+        return path.Length <= 32768 && Path.IsPathFullyQualified(path) ? Path.GetFullPath(path) : null;
+    }
 
     [StructLayout(LayoutKind.Sequential)]
     struct Identifier { public int Size; public nint Window; public uint Id; public Guid Guid; }
@@ -177,6 +260,25 @@ internal static class NativeTraySnapshot
     [DllImport("kernel32.dll")] [return: MarshalAs(UnmanagedType.Bool)]
     static extern bool GetProcessTimes(nint process, out long created, out long exited, out long kernel, out long user);
     [DllImport("kernel32.dll")] static extern uint WaitForSingleObject(nint handle, uint milliseconds);
+    [DllImport("shell32.dll", ExactSpelling = true)]
+    static extern int SHGetKnownFolderPath(in Guid id, uint flags, nint token, out nint path);
+    [StructLayout(LayoutKind.Sequential)]
+    struct Message
+    {
+        public nint Window;
+        public uint Id;
+        public nuint WParam;
+        public nint LParam;
+        public uint Time;
+        public Native.Point Point;
+        public uint Private;
+    }
+    [DllImport("user32.dll", SetLastError = true)]
+    static extern uint MsgWaitForMultipleObjectsEx(uint count, nint[] handles, uint milliseconds, uint wakeMask, uint flags);
+    [DllImport("user32.dll", ExactSpelling = true)] [return: MarshalAs(UnmanagedType.Bool)]
+    static extern bool PeekMessageW(out Message message, nint window, uint first, uint last, uint remove);
+    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] static extern bool TranslateMessage(ref Message message);
+    [DllImport("user32.dll", ExactSpelling = true)] static extern nint DispatchMessageW(ref Message message);
 
     static bool ProviderRegistered()
     {
@@ -234,11 +336,15 @@ public sealed class NativeTraySnapshotCallback : ITraySnapshotCallback, IDisposa
     readonly List<NativeTraySnapshotRecord> items = [];
     readonly CancellationToken cancellation;
     bool closed;
+    int receivedCount;
+    internal int ReceivedCount => Volatile.Read(ref receivedCount);
 
     internal NativeTraySnapshotCallback(CancellationToken token) => cancellation = token;
 
     public int Notify(uint change, ref NativeTraySnapshotItem item)
     {
+        Interlocked.Increment(ref receivedCount);
+        NativeTraySnapshot.CallbackReceived();
         try
         {
             lock (gate)
@@ -252,6 +358,7 @@ public sealed class NativeTraySnapshotCallback : ITraySnapshotCallback, IDisposa
                 var tip = item.Tip ?? "";
                 items.Add(new(item.Window, (uint)pid, thread, item.Id, item.Guid, item.Executable, tip[..Math.Min(tip.Length, 4096)],
                     item.Icon == 0 ? 0 : CopyIcon(item.Icon), item.Preference));
+                NativeTraySnapshot.RecordCopied();
             }
         }
         catch (Exception e) when (e is Win32Exception or ArgumentException or InvalidOperationException or IOException
