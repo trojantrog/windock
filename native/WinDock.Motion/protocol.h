@@ -6,11 +6,21 @@
 namespace motion {
 constexpr uint32_t Magic = 0x4d444e57;
 constexpr uint32_t Protocol = 1;
-constexpr uint32_t Build = 7;
+constexpr uint32_t Build = 8;
 constexpr uint32_t Capacity = 256;
 constexpr uint32_t Enabled = 1, Opening = 2, Closing = 4, Minimizing = 8, Restoring = 16, Hiding = 32;
 constexpr wchar_t ConfigPrefix[] = L"Local\\WinDock.Motion.Config.v1.";
 constexpr wchar_t StatusPrefix[] = L"Local\\WinDock.Motion.Status.v1.";
+constexpr wchar_t ActivationPrefix[] = L"Local\\WinDock.Motion.Activation.v1.";
+
+struct ActivationReport {
+    uint32_t magic, version, bytes, helper;
+    volatile LONG stage, result;
+    uint32_t win32, remoteResult, compositor, build;
+    uint64_t started, finished;
+    uint32_t session, reserved;
+};
+static_assert(sizeof(ActivationReport) == 64);
 
 struct Rect { float x, y, width, height; };
 struct Anchor {

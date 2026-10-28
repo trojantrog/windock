@@ -34,12 +34,12 @@ try {
     $payloadHash = (Get-FileHash -LiteralPath $nativeDll -Algorithm SHA256).Hash.ToLowerInvariant()
     [IO.File]::WriteAllText((Join-Path $motionOutput 'payload_hash.h'), ('#define WIN_DOCK_MOTION_PAYLOAD_SHA256 "' + $payloadHash + '"' + [Environment]::NewLine), [Text.UTF8Encoding]::new($false))
     $hostExe = Join-Path $motionOutput 'WinDock.MotionHost.exe'
-    & $Zig c++ -target x86_64-windows-gnu -std=c++17 -O2 -Wall -Wextra -Werror -Wno-missing-field-initializers -DUNICODE -D_UNICODE -static -municode '-Wl,--subsystem,windows' -I $motionOutput (Join-Path $motionRoot 'host.cpp') -o $hostExe -luser32 -lkernel32 -ladvapi32 -lbcrypt
+    & $Zig c++ -target x86_64-windows-gnu -std=c++17 -O2 -Wall -Wextra -Werror -Wno-missing-field-initializers -DUNICODE -D_UNICODE -static -municode '-Wl,--subsystem,windows' -I $motionOutput (Join-Path $motionRoot 'host.cpp') -o $hostExe -luser32 -lkernel32 -ladvapi32 -lbcrypt -lshell32 -lole32 -luuid
     if ($LASTEXITCODE -ne 0) { throw 'Motion activation helper compilation failed.' }
     Assert-NativeImage $hostExe $false
     $manifest = [ordered]@{
         protocol = 1
-        build = 7
+        build = 8
         supportedImage = '10.0.26100.9949'
         supportedImageSha256 = 'de3a7bacdcbb49a98bfff41010e772d18a329b77d9bc6b2416e1bc9f5b415863'
         payload = [ordered]@{ name = [IO.Path]::GetFileName($nativeDll); sha256 = $payloadHash }

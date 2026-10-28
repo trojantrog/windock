@@ -13,7 +13,7 @@ namespace WinDock.Services;
 
 sealed class NativeWindowMotion : IDisposable
 {
-    const int ConfigBytes = 12384, StatusBytes = 96, Capacity = 256, Build = 7;
+    const int ConfigBytes = 12384, StatusBytes = 96, ActivationBytes = 64, Capacity = 256, Build = 8;
     const uint Magic = 0x4d444e57;
     const string SystemHash = "de3a7bacdcbb49a98bfff41010e772d18a329b77d9bc6b2416e1bc9f5b415863";
     public static NativeWindowMotion Shared { get; } = new();
@@ -32,6 +32,7 @@ sealed class NativeWindowMotion : IDisposable
     bool activating, disposed, suspended;
     int sequence;
     string? errorKey;
+    string? failureCode;
     long started;
 
     public void Initialize(DockOptions value)
@@ -66,6 +67,7 @@ sealed class NativeWindowMotion : IDisposable
         {
             suspended = false;
             errorKey = null;
+            failureCode = null;
         }
         Publish();
     }
@@ -101,7 +103,7 @@ sealed class NativeWindowMotion : IDisposable
         else requests.Remove(window);
         Publish();
         WindowMotionNative.SetState(window, minimized);
-        if (!minimized) WindowTracker.Activate(window);
+        if (!minimized) WindowTracker.Focus(window);
     }
 
     static bool Valid(Rect rect) => !rect.IsEmpty && double.IsFinite(rect.X) && double.IsFinite(rect.Y)
@@ -194,10 +196,10 @@ sealed class NativeWindowMotion : IDisposable
         {
             1 => "nativeMotionReady",
             2 => "nativeMotionUnsupported",
-            3 => "nativeMotionFailed",
+            3 => "nativeMotionInitializationFailed",
             _ => "nativeMotionActivating"
         };
-        options.WindowAnimationStatus = Loc.T(key);
+        options.WindowAnimationStatus = Loc.T(key) + (errorKey == key && failureCode is not null ? $" ({failureCode})" : "");
     }
 
     public async Task ActivateAsync()
@@ -210,41 +212,115 @@ sealed class NativeWindowMotion : IDisposable
         if (Connected)
         {
             errorKey = Marshal.ReadInt32(status.View, 24) != Build ? "nativeMotionSignOut" : null;
+            failureCode = null;
             UpdateStatus(); return;
         }
-        activating = true; errorKey = null; Publish();
+        activating = true; errorKey = null; failureCode = null; Publish();
+        SharedMap? report = null;
+        int? exitCode = null, helperPid = null, windowsError = null;
         try
         {
             var validation = await Task.Run(ValidatePackage);
             if (validation is not null) { errorKey = validation; return; }
-            if (!options.NativeWindowAnimations || disposed) return;
+            if (!options.NativeWindowAnimations || disposed) { errorKey = "nativeMotionCanceled"; return; }
             Publish();
+            var nonce = Guid.NewGuid().ToString("N");
+            using var current = Process.GetCurrentProcess();
+            report = new($"Local\\WinDock.Motion.Activation.v1.{current.SessionId}.{nonce}", ActivationBytes, null);
             using var process = await Task.Run(() => Process.Start(new ProcessStartInfo
             {
                 FileName = Path.Combine(AppContext.BaseDirectory, "WinDock.MotionHost.exe"),
                 WorkingDirectory = AppContext.BaseDirectory,
-                UseShellExecute = true, Verb = "runas", WindowStyle = ProcessWindowStyle.Hidden
+                UseShellExecute = true, Verb = "runas", WindowStyle = ProcessWindowStyle.Hidden,
+                ArgumentList = { nonce }
             }));
             if (process is null) { errorKey = "nativeMotionFailed"; return; }
+            helperPid = process.Id;
             await process.WaitForExitAsync();
-            errorKey = process.ExitCode switch
+            exitCode = process.ExitCode;
+            errorKey = exitCode switch
             {
                 0 => null,
+                10 or 11 => "nativeMotionMappingFailed",
+                13 => "nativeMotionMissing",
                 14 => "nativeMotionFilesChanged",
-                15 or 17 or 22 => "nativeMotionAccessDenied",
+                15 or 17 => "nativeMotionAccessDenied",
                 12 => "nativeMotionRequestExpired",
+                16 or 18 or 19 => "nativeMotionCompositorUnavailable",
+                20 or 21 or 22 or 24 => "nativeMotionLoadFailed",
+                23 => "nativeMotionActivationTimeout",
+                25 => "nativeMotionSignOut",
+                26 => "nativeMotionCacheFailed",
                 _ => "nativeMotionFailed"
             };
             if (errorKey is null)
             {
                 for (var i = 0; i < 20 && !Connected && !disposed; ++i) await Task.Delay(150);
-                if (!Connected) errorKey = "nativeMotionFailed";
+                if (!Connected) errorKey = "nativeMotionNoResponse";
+                else if (Marshal.ReadInt32(status.View, 24) != Build) errorKey = "nativeMotionSignOut";
+                else errorKey = Marshal.ReadInt32(status.View, 16) switch
+                {
+                    1 => null,
+                    2 => "nativeMotionUnsupported",
+                    3 => "nativeMotionInitializationFailed",
+                    _ => "nativeMotionNoResponse"
+                };
             }
         }
-        catch (Win32Exception e) { errorKey = e.NativeErrorCode == 1223 ? "nativeMotionCanceled" : "nativeMotionAccessDenied"; }
+        catch (Win32Exception e)
+        {
+            windowsError = e.NativeErrorCode;
+            errorKey = e.NativeErrorCode == 1223 ? "nativeMotionCanceled" : "nativeMotionAccessDenied";
+        }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException or CryptographicException or KeyNotFoundException or FormatException)
         { errorKey = "nativeMotionFilesChanged"; }
-        finally { activating = false; UpdateStatus(); }
+        finally
+        {
+            RecordActivation(exitCode, helperPid, windowsError, report);
+            report?.Dispose();
+            activating = false; UpdateStatus();
+        }
+    }
+
+    void RecordActivation(int? exitCode, int? helperPid, int? windowsError, SharedMap? report)
+    {
+        var view = report?.View ?? 0;
+        var hasReport = view != 0 && unchecked((uint)Marshal.ReadInt32(view)) == Magic
+            && Marshal.ReadInt32(view, 4) == 1 && Marshal.ReadInt32(view, 8) == ActivationBytes
+            && Marshal.ReadInt32(view, 12) == helperPid && Marshal.ReadInt32(view, 36) == Build;
+        var stage = hasReport ? Marshal.ReadInt32(view, 16) : (int?)null;
+        if (hasReport) windowsError = Marshal.ReadInt32(view, 24);
+        if (errorKey is not null && errorKey != "nativeMotionCanceled")
+        {
+            failureCode = exitCode is not null and not 0 ? exitCode.Value.ToString() : null;
+            if (windowsError is not null and not 0)
+                failureCode = failureCode is null ? windowsError.Value.ToString() : $"{failureCode}/{windowsError}";
+        }
+        var connected = Connected;
+        if (errorKey == "nativeMotionInitializationFailed" && connected)
+        {
+            failureCode = Marshal.ReadInt32(status!.View, 20).ToString();
+            var componentError = Marshal.ReadInt32(status.View, 28);
+            if (componentError != 0) failureCode += $"/{componentError}";
+        }
+        var entry = new
+        {
+            at = DateTimeOffset.Now, build = Build, outcome = errorKey ?? "nativeMotionReady", helperPid, exitCode, stage,
+            windowsError, helperReportedResult = hasReport ? Marshal.ReadInt32(view, 20) : (int?)null,
+            remoteThreadResult = hasReport ? unchecked((uint)Marshal.ReadInt32(view, 28)) : (uint?)null,
+            compositorPid = hasReport ? Marshal.ReadInt32(view, 32) : (int?)null,
+            componentState = connected ? Marshal.ReadInt32(status!.View, 16) : (int?)null,
+            componentError = connected ? Marshal.ReadInt32(status!.View, 20) : (int?)null,
+            componentWindowsError = connected ? Marshal.ReadInt32(status!.View, 28) : (int?)null,
+            componentBuild = connected ? Marshal.ReadInt32(status!.View, 24) : (int?)null
+        };
+        try
+        {
+            var directory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "WinDock");
+            Directory.CreateDirectory(directory);
+            File.WriteAllText(Path.Combine(directory, "motion-activation.json"), JsonSerializer.Serialize(entry, new JsonSerializerOptions { WriteIndented = true }));
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
     }
 
     static string? ValidatePackage()
@@ -287,12 +363,13 @@ sealed class NativeWindowMotion : IDisposable
         nint handle;
         public nint View { get; private set; }
 
-        public SharedMap(string name, int bytes, bool writableByCompositor)
+        public SharedMap(string name, int bytes, bool? writableByCompositor)
         {
             using var identity = WindowsIdentity.GetCurrent();
             var sid = identity.User?.Value ?? throw new UnauthorizedAccessException();
-            var access = writableByCompositor ? "0x0006" : "0x0004";
-            var sddl = $"D:P(A;;GA;;;{sid})(A;;GA;;;SY)(A;;GA;;;BA)(A;;{access};;;S-1-5-90-0)";
+            var access = writableByCompositor == true ? "0x0006" : "0x0004";
+            var sddl = $"D:P(A;;GA;;;{sid})(A;;GA;;;SY)(A;;GA;;;BA)"
+                + (writableByCompositor.HasValue ? $"(A;;{access};;;S-1-5-90-0)" : "");
             if (!ConvertStringSecurityDescriptorToSecurityDescriptor(sddl, 1, out var descriptor, out _)) throw new Win32Exception();
             try
             {

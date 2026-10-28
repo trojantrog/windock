@@ -76,6 +76,7 @@ public sealed class WindowTracker : IDisposable
     void OnEvent(nint hook, uint ev, nint hwnd, int idObject, int idChild, uint thread, uint time)
     {
         if (idObject != 0 || idChild != 0) return;
+        if (ev is 0x0016 or 0x0017) WindowMotionNative.ObserveState(hwnd, ev == 0x0016);
         if (ev == EventLocationChange)
         {
             if (hwnd == Native.GetForegroundWindow() && !reshape.IsEnabled) reshape.Start();
@@ -158,14 +159,20 @@ public sealed class WindowTracker : IDisposable
 
     public static void Activate(nint h)
     {
-        if (Native.IsIconic(h)) Native.ShowWindowAsync(h, Native.SW_RESTORE);
+        WindowMotionNative.SetState(h, false);
+        Focus(h);
+    }
+
+    public static void Focus(nint h)
+    {
+        if (!Native.IsWindow(h)) return;
         if (Native.SetForegroundWindow(h) && Native.GetForegroundWindow() == h) return;
         Native.keybd_event(Native.VK_MENU, 0, Native.KEYEVENTF_EXTENDEDKEY, 0);
         Native.keybd_event(Native.VK_MENU, 0, Native.KEYEVENTF_EXTENDEDKEY | Native.KEYEVENTF_KEYUP, 0);
-        if (!Native.SetForegroundWindow(h)) Native.SwitchToThisWindow(h, true);
+        Native.SetForegroundWindow(h);
     }
 
-    public static void Minimize(nint h) => Native.ShowWindowAsync(h, Native.SW_MINIMIZE);
+    public static void Minimize(nint h) => WindowMotionNative.SetState(h, true);
 
     public static void Close(nint h)
     {

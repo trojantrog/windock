@@ -1,6 +1,6 @@
 # Native whole-window transitions
 
-This preview adapts one exact x64 uDWM image. It has been compiled and statically reviewed, but has not been loaded into DWM or visually validated. User-facing operation and rollback are described in [the animation guide](../../docs/native-window-animation.md).
+This preview adapts one exact x64 uDWM image. It has been compiled and statically reviewed; successful activation and visual behavior have not been confirmed. User-facing operation and rollback are described in [the animation guide](../../docs/native-window-animation.md).
 
 ## Source and build
 
@@ -63,6 +63,14 @@ Status is 96 bytes. State 1 means hooks installed, 2 image/entry mismatch, 3 ini
 ## Activation and failure behavior
 
 The standard-user Dock launches the helper through normal Windows elevation only after an explicit click. The helper verifies the request, opens the hash-pinned DLL without write/delete sharing, enables the ordinary debug privilege in its elevated token, and targets only the current session's system DWM. If process access or loading is blocked, it reports failure. It does not change Defender, protected-process settings, code-integrity settings or security prompts.
+
+Build 8 stages the verified DLL under `FOLDERID_ProgramData\WinDock.NativeMotion\<payload SHA-256>`. New objects have a protected DACL, administrator ownership, SYSTEM/administrator write access and Windows Manager Group read/execute access. Existing objects must have trusted ownership, expected access entries, no reparse point, and a single link for the file. Parent directory handles deny deletion during preparation/loading. Existing ACLs are never repaired or broadened. Source and staged payload hashes must match the helper's embedded hash; the staged file stays open without write/delete sharing during loading. This avoids requiring the DWM account to read a DLL under a private user profile. It does not bypass image-load policy.
+
+Each activation receives a random 32-hex nonce and a 64-byte mapping named `Local\WinDock.Motion.Activation.v1.<session>.<nonce>`, accessible to the calling user, administrators and SYSTEM. It contains the helper PID, stage, result, Windows error, loader-thread result, compositor PID and build. The Dock checks the header and helper PID before saving `%APPDATA%\WinDock\motion-activation.json`. The loader-thread result contains the low 32 bits of its return value, not a remote `GetLastError`; a zero result does not identify the loader's precise failure reason.
+
+Helper exits 10–14 cover report/configuration/path/hash checks, 15–19 privileges and target process/module checks, 20–24 the load request, 25 an existing module without a current ready handshake, and 26 cache preparation. Stage 25 runs before cache preparation, followed by stages 26 and 19–24. Native status error 10 records an unavailable configuration mapping; byte 28 carries that Windows error. Status is initialized before opening configuration so this failure can be reported.
+
+Dock restoration calls `WindowMotionNative.SetState` once, then uses focus-only activation. Maximization comes from `IsZoomed` and `WINDOWPLACEMENT`; pending requests preserve intent during immediate reversal and suppress duplicate asynchronous commands until observed or expired. The focus-only path does not call `SwitchToThisWindow`. This addresses the former `ShowWindowAsync(SW_SHOWMAXIMIZED)` followed by a second queued `SW_RESTORE`, which could unmaximize the restored window. See Microsoft's [asynchronous show semantics](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-showwindowasync) and [window placement flags](https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-windowplacement). Runtime behavior has not been tested in this revision.
 
 The remote load wait is bounded. On a timeout the remote path allocation is retained because the loader thread may still reference it; it is reclaimed with that DWM process. No forced thread termination is used. The Dock waits for the module status before reporting a connection.
 

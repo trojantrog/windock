@@ -377,19 +377,24 @@ DWORD WINAPI Initialize(void*) {
     swprintf_s(expected, L"%ls\\dwm.exe", system);
     if (_wcsicmp(executable, expected) != 0) return 1;
     wchar_t name[128];
-    swprintf_s(name, L"%ls%lu", ConfigPrefix, session);
-    HANDLE configMap = OpenFileMappingW(FILE_MAP_READ, FALSE, name);
-    if (!configMap) return 2;
-    sharedConfig = static_cast<Config*>(MapViewOfFile(configMap, FILE_MAP_READ, 0, 0, sizeof(Config)));
     swprintf_s(name, L"%ls%lu", StatusPrefix, session);
     HANDLE statusMap = OpenFileMappingW(FILE_MAP_WRITE | FILE_MAP_READ, FALSE, name);
-    if (!statusMap || !sharedConfig) return 3;
+    if (!statusMap) return 3;
     status = static_cast<Status*>(MapViewOfFile(statusMap, FILE_MAP_WRITE | FILE_MAP_READ, 0, 0, sizeof(Status)));
+    CloseHandle(statusMap);
     if (!status) return 4;
     ZeroMemory(status, sizeof(*status));
     status->magic = Magic; status->version = Protocol; status->bytes = sizeof(Status);
     status->pid = GetCurrentProcessId(); status->build = Build;
-    if (Install()) InterlockedExchange(&status->state, 1);
+    swprintf_s(name, L"%ls%lu", ConfigPrefix, session);
+    HANDLE configMap = OpenFileMappingW(FILE_MAP_READ, FALSE, name);
+    if (configMap) {
+        sharedConfig = static_cast<Config*>(MapViewOfFile(configMap, FILE_MAP_READ, 0, 0, sizeof(Config)));
+        if (!sharedConfig) status->reserved = GetLastError();
+        CloseHandle(configMap);
+    } else status->reserved = GetLastError();
+    if (!sharedConfig) { status->error = 10; InterlockedExchange(&status->state, 3); }
+    else if (Install()) InterlockedExchange(&status->state, 1);
     else if (!status->state) { status->error = 4; InterlockedExchange(&status->state, 3); }
     for (;;) { InterlockedExchange64(&status->heartbeat, static_cast<LONG64>(GetTickCount64())); Sleep(250); }
 }

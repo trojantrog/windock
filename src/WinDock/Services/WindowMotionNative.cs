@@ -23,6 +23,10 @@ static class WindowMotionNative
     [DllImport("user32.dll")]
     static extern bool GetWindowPlacement(nint window, ref Placement placement);
 
+    sealed record StateRequest(int Pid, bool Minimized, bool Maximized, long Until);
+    static readonly object stateLock = new();
+    static readonly Dictionary<nint, StateRequest> stateRequests = [];
+
     [DllImport("user32.dll", SetLastError = true)]
     internal static extern bool GetWindowDisplayAffinity(nint window, out uint affinity);
     [DllImport("user32.dll")]
@@ -141,13 +145,36 @@ static class WindowMotionNative
 
     internal static void SetState(nint window, bool minimized)
     {
-        if (!Native.IsWindow(window)) return;
-        if (minimized) Native.ShowWindowAsync(window, Native.SW_MINIMIZE);
-        else if (Native.IsIconic(window))
+        lock (stateLock)
         {
+            if (!Native.IsWindow(window) || Native.GetWindowThreadProcessId(window, out var pid) == 0) return;
+            var now = Environment.TickCount64;
+            foreach (var key in stateRequests.Where(pair => pair.Value.Until < now).Select(pair => pair.Key).ToArray()) stateRequests.Remove(key);
+            stateRequests.TryGetValue(window, out var pending);
+            if (pending is not null && pending.Pid != pid) { stateRequests.Remove(window); pending = null; }
+            var iconic = Native.IsIconic(window);
+            if (pending is not null && iconic == pending.Minimized)
+            {
+                stateRequests.Remove(window);
+                pending = null;
+            }
+            if (pending?.Minimized == minimized) return;
+            if (pending is null && iconic == minimized) return;
             var placement = new Placement { Length = Marshal.SizeOf<Placement>() };
-            var maximize = GetWindowPlacement(window, ref placement) && (placement.Flags & 2 /* WPF_RESTORETOMAXIMIZED */) != 0;
-            Native.ShowWindowAsync(window, maximize ? 3 /* SW_SHOWMAXIMIZED */ : Native.SW_RESTORE);
+            var hasPlacement = GetWindowPlacement(window, ref placement);
+            var maximize = IsZoomed(window) || (hasPlacement && (placement.ShowCommand == 3 || (placement.Flags & 2) != 0))
+                || (pending is { Minimized: true, Maximized: true });
+            var command = minimized ? Native.SW_MINIMIZE : maximize ? 3 : Native.SW_RESTORE;
+            if (Native.ShowWindowAsync(window, command))
+                stateRequests[window] = new(pid, minimized, maximize, now + 1500);
         }
+    }
+
+    internal static void ObserveState(nint window, bool minimized)
+    {
+        lock (stateLock)
+            if (stateRequests.TryGetValue(window, out var request) && request.Minimized == minimized
+                && Native.IsIconic(window) == minimized)
+                stateRequests.Remove(window);
     }
 }
