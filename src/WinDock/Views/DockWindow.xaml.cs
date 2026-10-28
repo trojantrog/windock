@@ -84,7 +84,7 @@ public partial class DockWindow : Window
         hover.Tick += (_, _) =>
         {
             hover.Stop();
-            if (hovered is { DataContext: AppTile { IsRunning: true } app } element) ShowPreview(app, element);
+            if (hovered is { DataContext: AppTile { Windows.Count: > 0 } app } element) ShowPreview(app, element);
         };
         closePreview.Tick += (_, _) =>
         {
@@ -541,7 +541,7 @@ public partial class DockWindow : Window
         };
         if (preview is { IsVisible: true } p)
         {
-            if (element.DataContext is AppTile { IsRunning: true, IsFolder: false } app)
+            if (element.DataContext is AppTile { Windows.Count: > 0, IsFolder: false } app)
             {
                 closePreview.Stop();
                 if (p.Tile != app) ShowPreview(app, element);
@@ -551,7 +551,7 @@ public partial class DockWindow : Window
         }
         if (name is null) HideName();
         else ShowName(name);
-        if (element.DataContext is AppTile { IsRunning: true, IsFolder: false }) hover.Start();
+        if (element.DataContext is AppTile { Windows.Count: > 0, IsFolder: false }) hover.Start();
     }
 
     void OnTileLeave(object sender, MouseEventArgs e)
@@ -1038,6 +1038,8 @@ public partial class DockWindow : Window
         preview?.Hide();
         var menu = new ContextMenu();
         if (app.IsFolder) menu.Items.Add(Item(Loc.T("openFolder"), () => Launcher.OpenFile(app.Folder!.Path)));
+        else if (app.BackgroundApp is not null && app.Windows.Count == 0)
+            menu.Items.Add(Item(Loc.T("open"), () => { if (!app.OpenBackground()) vm.Main.Notify(Loc.F("launchFailed", app.Name)); }));
         else menu.Items.Add(Item(app.IsRunning ? Loc.T("newWindow") : Loc.T("open"), () => Launch(app, element)));
         menu.Items.Add(new Separator());
         if (app.IsPinned)
@@ -1051,7 +1053,7 @@ public partial class DockWindow : Window
             menu.Items.Add(Item(Loc.T("pinEverywhere"), () => vm.Pin(app, true)));
         }
         if (app.RevealPath is { } path) menu.Items.Add(Item(Loc.T("showInExplorer"), () => Launcher.Reveal(path)));
-        if (app.IsRunning)
+        if (app.Windows.Count > 0)
         {
             menu.Items.Add(new Separator());
             var windows = app.Windows.ToList();

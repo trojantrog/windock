@@ -75,7 +75,7 @@ public static class TrayApps
     public static bool Open(TrayApp app)
     {
         nint found = 0;
-        var pids = app.Pids.ToHashSet();
+        var pids = app.Pids.Where(pid => string.Equals(Path(pid), app.Exe, StringComparison.OrdinalIgnoreCase)).ToHashSet();
         Native.EnumWindows((h, _) =>
         {
             Native.GetWindowThreadProcessId(h, out var pid);
