@@ -142,32 +142,117 @@ function Save-SettingsWithNativeTaskbar([string]$Raw, [bool]$EnableNativeAnimati
         if ($replaced -and (Test-Path -LiteralPath $previous)) { Remove-Item -LiteralPath $previous }
     }
 }
-function Test-CurrentAnimationLogin([string]$UserSid) {
+function Read-StartupValue([Microsoft.Win32.RegistryKey]$Root, [string]$Path, [string]$Name) {
+    $key = $null
+    try {
+        $key = $Root.OpenSubKey($Path)
+        $value = $null
+        if ($key) { $value = $key.GetValue($Name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) }
+        return [pscustomobject]@{ readable = $true; present = $null -ne $value; value = $value }
+    }
+    catch { return [pscustomobject]@{ readable = $false; present = $null; value = $null } }
+    finally { if ($key) { $key.Dispose() } }
+}
+function Get-StartupPolicyState([Microsoft.Win32.RegistryKey]$Root, [string]$Name) {
+    $value = Read-StartupValue $Root 'Software\Microsoft\Windows\CurrentVersion\Policies\Explorer' $Name
+    if (-not $value.readable) { return 'unknown' }
+    if (-not $value.present) { return 'unconfigured' }
+    if ($value.value -is [int] -and $value.value -eq 0) { return 'allowed' }
+    if ($value.value -is [int] -and $value.value -eq 1) { return 'disabled' }
+    return 'unknown'
+}
+function Get-OrdinaryStartupState([string]$Executable) {
+    # Keep this read-only interpretation aligned with Services/Autostart.cs.
+    # Never remove an unknown record or clear a Windows/user/policy disable.
+    $run = Read-StartupValue ([Microsoft.Win32.Registry]::CurrentUser) 'Software\Microsoft\Windows\CurrentVersion\Run' 'WinDock'
+    $approval = Read-StartupValue ([Microsoft.Win32.Registry]::CurrentUser) 'Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run' 'WinDock'
+    $approvalState = 'unknown'
+    if ($approval.readable -and -not $approval.present) { $approvalState = 'unrecorded' }
+    elseif ($approval.readable -and $approval.value -is [byte[]] -and $approval.value.Length -eq 12) {
+        $code = [BitConverter]::ToUInt32($approval.value, 0)
+        if ($code -eq 3) { $approvalState = 'disabled' }
+        elseif (($code -eq 0 -or $code -eq 2) -and @($approval.value[4..11] | Where-Object { $_ -ne 0 }).Count -eq 0) {
+            $approvalState = 'enabled'
+        }
+    }
+    $policy = Get-StartupPolicyState ([Microsoft.Win32.Registry]::LocalMachine) 'DisableLocalMachineRun'
+    if ($policy -eq 'unconfigured') { $policy = Get-StartupPolicyState ([Microsoft.Win32.Registry]::CurrentUser) 'DisableCurrentUserRun' }
+    $allowed = if ($policy -eq 'disabled' -or $approvalState -eq 'disabled') { $false }
+        elseif ($policy -eq 'unknown' -or $approvalState -in @('unknown', 'unrecorded')) { $null } else { $true }
+    $command = if ($run.value -is [string]) { $run.value } else { $null }
+    $matches = $null -ne $command -and $command.Equals(('"' + $Executable + '" --tray'), [StringComparison]::OrdinalIgnoreCase)
+    return [pscustomobject]@{
+        registered = $run.present; matchesInstalledExecutable = $matches; command = $command
+        windowsApproval = $approvalState; runPolicy = $policy; windowsAllowsStartup = $allowed
+        ready = $run.readable -and $matches -and $allowed -eq $true
+    }
+}
+function Get-AnimationLoginState([string]$UserSid) {
+    $result = [ordered]@{ state = 'unavailable'; exists = $null; enabled = $null; triggerEnabled = $null; matchesCurrentComponent = $null
+        ready = $false; expectedExecutable = $null; registeredExecutable = $null }
     try {
         $motion = Get-Content -LiteralPath (Join-Path $destination 'WinDock.Motion.manifest.json') -Raw | ConvertFrom-Json
         if ($motion.payload.sha256 -notmatch '^[a-fA-F0-9]{64}$' -or
-            $motion.loginHost.sha256 -notmatch '^[a-fA-F0-9]{64}$') { return $false }
+            $motion.loginHost.sha256 -notmatch '^[a-fA-F0-9]{64}$') {
+            $result.state = 'invalidPackage'; return [pscustomobject]$result
+        }
         $protectedDirectory = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) ('WinDock.NativeMotion\' + $motion.payload.sha256)
         $protectedHost = Join-Path $protectedDirectory ('WinDock.MotionLogin.' + $motion.loginHost.sha256 + '.exe')
+        $result.expectedExecutable = $protectedHost
         # The cache intentionally denies file access to an ordinary Dock process.
         # Match the protected task's fixed action to the verified release instead;
         # its elevated helper checks cache ownership and embedded hashes when run.
-        $task = Get-ScheduledTask -TaskName ('WinDock.NativeMotion.' + $UserSid) -ErrorAction Stop
+        try {
+            $tasks = @(Get-ScheduledTask -TaskName ('WinDock.NativeMotion.' + $UserSid) -TaskPath '\' -ErrorAction Stop)
+        }
+        catch {
+            if ($_.CategoryInfo.Category -eq [Management.Automation.ErrorCategory]::ObjectNotFound) {
+                $result.state = 'absent'; $result.exists = $false
+            }
+            return [pscustomobject]$result
+        }
+        if ($tasks.Count -ne 1) { $result.state = 'invalidDefinition'; return [pscustomobject]$result }
+        $task = $tasks[0]
+        $result.exists = $true
+        if ($task.Settings.Enabled -is [bool]) { $result.enabled = $task.Settings.Enabled }
         $actions = @($task.Actions)
         $triggers = @($task.Triggers)
-        if (-not $task.Settings.Enabled -or $actions.Count -ne 1 -or $triggers.Count -ne 1 -or
-            [int]$task.Principal.RunLevel -ne 1 -or [int]$task.Principal.LogonType -ne 3) { return $false }
+        if ($actions.Count -eq 1) {
+            $result.registeredExecutable = $actions[0].Execute
+            # Action identity is independent of task/trigger enablement. A disabled
+            # current task is still current; an unreadable action stays unknown.
+            if ($actions[0].CimClass.CimClassName -eq 'MSFT_TaskExecAction' -and
+                $actions[0].Execute -is [string] -and $actions[0].WorkingDirectory -is [string] -and $actions[0].Arguments -is [string]) {
+                $result.matchesCurrentComponent = $actions[0].Execute -ieq $protectedHost -and
+                    $actions[0].WorkingDirectory -ieq $protectedDirectory -and $actions[0].Arguments -ceq ('--login ' + $UserSid)
+            }
+        }
+        if ($triggers.Count -eq 1 -and $triggers[0].Enabled -is [bool]) { $result.triggerEnabled = $triggers[0].Enabled }
+        if ($result.enabled -eq $false -or $result.triggerEnabled -eq $false) {
+            $result.state = 'disabled'; return [pscustomobject]$result
+        }
+        if ($actions.Count -ne 1 -or $triggers.Count -ne 1 -or $null -eq $result.enabled -or
+            $null -eq $result.triggerEnabled -or $null -eq $result.matchesCurrentComponent -or
+            [int]$task.Principal.RunLevel -ne 1 -or [int]$task.Principal.LogonType -ne 3) {
+            $result.state = 'invalidDefinition'; return [pscustomobject]$result
+        }
         function AccountSid([string]$Account) {
             if ($Account.StartsWith('S-1-', [StringComparison]::OrdinalIgnoreCase)) { return $Account }
             return ([Security.Principal.NTAccount]::new($Account)).Translate([Security.Principal.SecurityIdentifier]).Value
         }
-        return (AccountSid $task.Principal.UserId) -eq $UserSid -and
+        $validDefinition = (AccountSid $task.Principal.UserId) -eq $UserSid -and
             (AccountSid $triggers[0].UserId) -eq $UserSid -and $triggers[0].Enabled -and
-            $triggers[0].CimClass.CimClassName -eq 'MSFT_TaskLogonTrigger' -and
-            $actions[0].Execute -ieq $protectedHost -and $actions[0].WorkingDirectory -ieq $protectedDirectory -and
-            $actions[0].Arguments -ceq ('--login ' + $UserSid)
+            $triggers[0].CimClass.CimClassName -eq 'MSFT_TaskLogonTrigger' -and $actions[0].CimClass.CimClassName -eq 'MSFT_TaskExecAction'
+        if (-not $validDefinition) { $result.state = 'invalidDefinition'; return [pscustomobject]$result }
+        if (-not $task.Settings.AllowDemandStart -or -not $task.Settings.StartWhenAvailable -or
+            $task.Settings.DisallowStartIfOnBatteries -or $task.Settings.StopIfGoingOnBatteries) {
+            $result.state = 'restricted'; return [pscustomobject]$result
+        }
+        if (-not $result.matchesCurrentComponent) { $result.state = 'differentComponent'; return [pscustomobject]$result }
+        $result.state = 'ready'; $result.ready = $true
+        return [pscustomobject]$result
     }
-    catch { return $false }
+    catch { return [pscustomobject]$result }
 }
 try {
     if ($running.Count) {
@@ -222,24 +307,34 @@ try {
     # Finish normal installation before requesting Windows administrator consent.
     # The Dock remains available while consent is pending. No settings snapshots
     # are written after launch, so changes made during that wait stay intact.
-    $animationLogin = [ordered]@{ requested = [bool]$EnableAnimationStartup; registered = $false; reused = $false; exitCode = $null }
+    $animationLogin = [ordered]@{ requested = [bool]$EnableAnimationStartup; registered = $false; reused = $false
+        attempted = $false; result = 'notRequested'; exitCode = $null; before = $null; after = $null; differentComponentMayRun = $null }
     if ($EnableAnimationStartup) {
         # Windows presents its normal administrator consent prompt. This entry
         # only registers the protected login helper; it never starts an animation.
         $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
         try { $userSid = $identity.User.Value } finally { $identity.Dispose() }
-        if (Test-CurrentAnimationLogin $userSid) {
+        $animationLogin.before = Get-AnimationLoginState $userSid
+        if ($animationLogin.before.ready) {
             $animationLogin.registered = $true
             $animationLogin.reused = $true
+            $animationLogin.result = 'reused'
             $animationLogin.exitCode = 0
+        }
+        elseif ($animationLogin.before.state -in @('disabled', 'restricted', 'unavailable', 'invalidPackage')) {
+            # A disabled task or restrictive settings may be an explicit user or
+            # administrator choice. Keep them and report the incomplete setup.
+            $animationLogin.result = 'preserved-' + $animationLogin.before.state
         }
         else {
             try {
+                $animationLogin.attempted = $true
                 $registration = Start-Process -FilePath (Join-Path $destination 'WinDock.MotionHost.exe') -ArgumentList @('--register-login', $userSid) -Verb RunAs -WindowStyle Hidden -PassThru
                 try {
                     $registration.WaitForExit()
                     $animationLogin.exitCode = $registration.ExitCode
-                    $animationLogin.registered = $registration.ExitCode -eq 0 -and (Test-CurrentAnimationLogin $userSid)
+                    $animationLogin.result = if ($registration.ExitCode -eq 0) { 'registered' } else { 'registrationFailed' }
+                    $animationLogin.registered = $registration.ExitCode -eq 0
                 }
                 finally { $registration.Dispose() }
             }
@@ -247,20 +342,36 @@ try {
                 $registrationError = $_.Exception
                 if ($registrationError.InnerException -is [System.ComponentModel.Win32Exception]) { $registrationError = $registrationError.InnerException }
                 $animationLogin.exitCode = if ($registrationError -is [System.ComponentModel.Win32Exception]) { $registrationError.NativeErrorCode } else { $registrationError.HResult }
+                $animationLogin.result = if ($animationLogin.exitCode -eq 1223) { 'registrationCanceled' } else { 'registrationFailed' }
             }
         }
+        $animationLogin.after = Get-AnimationLoginState $userSid
+        if ($animationLogin.registered -and -not $animationLogin.after.ready) { $animationLogin.result = 'verificationFailed' }
+        $animationLogin.registered = $animationLogin.registered -and $animationLogin.after.ready
+        $animationLogin.differentComponentMayRun = if ($animationLogin.after.exists -eq $false -or $animationLogin.after.enabled -eq $false -or
+            $animationLogin.after.triggerEnabled -eq $false -or $animationLogin.after.matchesCurrentComponent -eq $true) { $false }
+            elseif ($animationLogin.after.enabled -eq $true -and $animationLogin.after.triggerEnabled -eq $true -and
+                $animationLogin.after.matchesCurrentComponent -eq $false -and $animationLogin.after.state -in @('differentComponent', 'restricted')) { $true }
+            else { $null }
     }
+    $ordinaryStartup = Get-OrdinaryStartupState $installedExe
+    $startupReady = $ordinaryStartup.ready -and (-not $EnableAnimationStartup -or $animationLogin.registered)
     $report = [ordered]@{
+        outcome = if ($startupReady) { 'installed' } else { 'installedStartupIncomplete' }
         installedAt = [DateTimeOffset]::Now.ToString('o'); version = $version
         installedExecutable = $installedExe; runningExecutable = [WinDockDeploymentProbe]::PathFor($launched.Id)
         processId = $launched.Id; startupCommand = $startupCommand; backup = $backup
-        animationLogin = $animationLogin
+        ordinaryStartup = $ordinaryStartup; animationLogin = $animationLogin; startupReady = $startupReady
         verifiedFiles = $entries.Count; pinsPreserved = $pinsPreserved; replaceTaskbar = $settingsAfter.dock.replaceTaskbar
         nativeTaskbarWindowVisible = $nativeTaskbarVisible
         desktopInteractionTested = $false; loginCycleTested = $false
     }
     $report | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $backup 'install-report.json') -Encoding utf8
     $report | ConvertTo-Json -Depth 5
+    if (-not $startupReady) {
+        Write-Warning ('WinDock was installed, but sign-in startup is incomplete or unconfirmed. Report: ' + (Join-Path $backup 'install-report.json'))
+        exit 2
+    }
 }
 catch {
     $failure = $_

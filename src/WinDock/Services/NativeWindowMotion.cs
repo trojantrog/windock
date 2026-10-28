@@ -27,6 +27,7 @@ sealed class NativeWindowMotion : IDisposable
     sealed record MotionDiagnostic(bool Connected, bool StatusHeaderValid, bool LoginEnabled, uint PublishedFlags, int ComponentPid, int ComponentBuild,
         int ComponentState, int ComponentError, long Opened, long Closed, long Minimized, long Restored,
         long Hidden, long Skipped, long Failed, int PreviousComponentPid, int PreviousComponentBuild);
+    sealed record DiagnosticSnapshot(MotionDiagnostic Status, DateTimeOffset At, long CapturedAt, bool Forced);
 
     readonly Dictionary<object, Func<IEnumerable<Anchor>>> providers = [];
     readonly Dictionary<(nint, uint, ulong, int), Remembered> history = [];
@@ -43,9 +44,13 @@ sealed class NativeWindowMotion : IDisposable
     string? errorKey;
     string? failureCode;
     long started;
+    readonly object diagnosticSync = new();
+    readonly SemaphoreSlim diagnosticWake = new(0, 1);
     MotionDiagnostic? lastDiagnostic;
+    DiagnosticSnapshot? pendingDiagnostic;
     Task? diagnosticWrite;
-    long diagnosticWrittenAt;
+    bool diagnosticWriting;
+    long diagnosticCompletedAt, diagnosticSavedCaptureAt, diagnosticNextWrite;
     PreviousComponent? previousComponent;
     StatusIdentity? retiredStatus;
     bool ControlsAvailable => !disposed && !activating && !configuringLogin && !inspectingPrevious
@@ -119,7 +124,7 @@ sealed class NativeWindowMotion : IDisposable
 
     public void Register(object owner, Func<IEnumerable<Anchor>> source) { providers[owner] = source; Publish(); }
     public void Unregister(object owner) { providers.Remove(owner); Publish(); }
-    public void Suspend() { suspended = true; Publish(); }
+    public void Suspend() { suspended = true; PublishCore(true); }
 
     public void PrepareLaunch(AppTile app, Rect anchor)
     {
@@ -197,7 +202,9 @@ sealed class NativeWindowMotion : IDisposable
             | (options.WindowMotion ? 8u : 0) | (options.WindowRestoreAnimation ? 16u : 0)
             | (options.WindowHideAnimation ? 32u : 0) : 0;
 
-    public void Publish()
+    public void Publish() => PublishCore(false);
+
+    void PublishCore(bool forceDiagnostic)
     {
         if (disposed || options is null) return;
         var flags = Flags;
@@ -235,7 +242,7 @@ sealed class NativeWindowMotion : IDisposable
             Marshal.WriteInt32(config.View, 12, sequence);
         }
         UpdateStatus();
-        RecordStatus(flags);
+        RecordStatus(flags, forceDiagnostic);
     }
 
     void U32(int offset, uint value) => BinaryPrimitives.WriteUInt32LittleEndian(packet.AsSpan(offset, 4), value);
@@ -391,10 +398,14 @@ sealed class NativeWindowMotion : IDisposable
         else if (!options.NativeWindowAnimations) key = "nativeMotionOff";
         else if (errorKey is not null) key = errorKey;
         else if (suspended) key = "nativeMotionPaused";
-        else if (IncompatibleComponent) key = "nativeMotionSignOut";
+        else if (IncompatibleComponent) key = options.WindowAnimationLoginEnabled
+            ? "nativeMotionSignOutAutomatic" : "nativeMotionSignOut";
         else if (StatusHeaderValid && !Connected) key = "nativeMotionNoResponse";
         else if (Flags == 0) key = "nativeMotionSystemOff";
-        else if (!Connected) key = "nativeMotionNeedsActivation";
+        else if (!Connected) key = !options.WindowAnimationLoginEnabled ? "nativeMotionNeedsActivation"
+            : previousComponent is not null ? "nativeMotionAutoUnconfirmed"
+            : recoveryAttempts >= 3 && Environment.TickCount64 >= nextRecovery ? "nativeMotionAutoIncomplete"
+            : inspectingConnection || refreshingLogin ? "nativeMotionAutoConnecting" : "nativeMotionAutoWaiting";
         else key = Marshal.ReadInt32(status!.View, 16) switch
         {
             1 => MotionActivityKey(),
@@ -415,10 +426,9 @@ sealed class NativeWindowMotion : IDisposable
         return Marshal.ReadInt64(status!.View, 80) > 0 ? "nativeMotionNotProcessing" : "nativeMotionWaitingForWindow";
     }
 
-    void RecordStatus(uint publishedFlags)
+    void RecordStatus(uint publishedFlags, bool force)
     {
         var now = Environment.TickCount64;
-        if (now - diagnosticWrittenAt < 2000 || diagnosticWrite is { IsCompleted: false }) return;
         var connected = Connected;
         var headerValid = StatusHeaderValid;
         int Read32(int offset) => headerValid ? Marshal.ReadInt32(status!.View, offset) : 0;
@@ -426,22 +436,83 @@ sealed class NativeWindowMotion : IDisposable
         var snapshot = new MotionDiagnostic(connected, headerValid, options?.WindowAnimationLoginEnabled == true,
             publishedFlags, Read32(12), Read32(24), Read32(16), Read32(20), Read64(40), Read64(48), Read64(56), Read64(64),
             Read64(72), Read64(80), Read64(88), previousComponent?.Pid ?? 0, previousComponent?.Build ?? 0);
-        if (snapshot == lastDiagnostic) return;
-        lastDiagnostic = snapshot;
-        diagnosticWrittenAt = now;
-        var entry = new { at = DateTimeOffset.Now, clientBuild = Build, status = snapshot,
-            reason = TransitionReason(snapshot.ComponentError) };
-        diagnosticWrite = Task.Run(() =>
+        lock (diagnosticSync)
         {
-            try
+            // Keep one complete latest snapshot, including a return to the last
+            // saved state while an older change is still being written.
+            if (!force && !diagnosticWriting && pendingDiagnostic is null && snapshot == lastDiagnostic
+                && now - diagnosticCompletedAt < 30000) return;
+            var wake = pendingDiagnostic is null || force;
+            pendingDiagnostic = new(snapshot, DateTimeOffset.Now, now, force || pendingDiagnostic?.Forced == true);
+            diagnosticWrite ??= Task.Run(WriteStatusLoopAsync);
+            if (wake && diagnosticWake.CurrentCount == 0) diagnosticWake.Release();
+        }
+    }
+
+    async Task WriteStatusLoopAsync()
+    {
+        // One asynchronous writer remains available after Suspend/Dispose and
+        // waits without retaining a thread. It cannot exit between a final
+        // dequeue and a new publication and strand the last state.
+        while (true)
+        {
+            await diagnosticWake.WaitAsync().ConfigureAwait(false);
+            while (true)
             {
+                DiagnosticSnapshot snapshot;
+                int delay;
+                lock (diagnosticSync)
+                {
+                    if (pendingDiagnostic is null) break;
+                    var now = Environment.TickCount64;
+                    // Do not duplicate a same-state publication during a
+                    // successful write. A newer 30-second heartbeat must still
+                    // survive a slow write of an old capture.
+                    if (!pendingDiagnostic.Forced && pendingDiagnostic.Status == lastDiagnostic
+                        && now - diagnosticCompletedAt < 30000
+                        && pendingDiagnostic.CapturedAt - diagnosticSavedCaptureAt < 30000)
+                    { pendingDiagnostic = null; break; }
+                    delay = pendingDiagnostic.Forced ? 0 : (int)Math.Clamp(diagnosticNextWrite - now, 0, 30000);
+                    snapshot = pendingDiagnostic;
+                    if (delay == 0) { pendingDiagnostic = null; diagnosticWriting = true; }
+                }
+                if (delay > 0)
+                {
+                    // Normal updates coalesce during this delay; a final stop
+                    // snapshot wakes the wait and bypasses the rate limit.
+                    await diagnosticWake.WaitAsync(delay).ConfigureAwait(false);
+                    continue;
+                }
                 var directory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "WinDock");
-                Directory.CreateDirectory(directory);
-                File.WriteAllText(Path.Combine(directory, "motion-status.json"),
-                    JsonSerializer.Serialize(entry, new JsonSerializerOptions { WriteIndented = true }));
+                var path = Path.Combine(directory, "motion-status.json");
+                var temporary = path + "." + Environment.ProcessId + ".tmp";
+                try
+                {
+                    var entry = new { at = snapshot.At, clientBuild = Build, status = snapshot.Status,
+                        reason = TransitionReason(snapshot.Status.ComponentError) };
+                    Directory.CreateDirectory(directory);
+                    File.WriteAllText(temporary, JsonSerializer.Serialize(entry, new JsonSerializerOptions { WriteIndented = true }));
+                    File.Move(temporary, path, overwrite: true);
+                    lock (diagnosticSync)
+                    {
+                        lastDiagnostic = snapshot.Status;
+                        diagnosticCompletedAt = Environment.TickCount64;
+                        diagnosticSavedCaptureAt = snapshot.CapturedAt;
+                        diagnosticNextWrite = diagnosticCompletedAt + 2000;
+                    }
+                }
+                catch (Exception error) when (error is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+                {
+                    // Consume this failed snapshot once. A later publication
+                    // may retry after a bounded backoff; failure itself never
+                    // requeues work or advances the successful-state baseline.
+                    lock (diagnosticSync) diagnosticNextWrite = Environment.TickCount64 + 30000;
+                    try { if (File.Exists(temporary)) File.Delete(temporary); }
+                    catch (Exception cleanup) when (cleanup is IOException or UnauthorizedAccessException or System.Security.SecurityException) { }
+                }
+                finally { lock (diagnosticSync) diagnosticWriting = false; }
             }
-            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
-        });
+        }
     }
 
     static string TransitionReason(int code) => code switch
@@ -781,7 +852,7 @@ sealed class NativeWindowMotion : IDisposable
     public void Dispose()
     {
         if (disposed) return;
-        suspended = true; Publish();
+        suspended = true; PublishCore(true);
         disposed = true;
         timer.Stop(); timer.Tick -= Tick;
         if (options is not null) options.Changed -= Changed;

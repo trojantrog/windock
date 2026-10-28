@@ -16,6 +16,10 @@ Windows 的 `UserNotificationListener` 可读取用户授权后系统当前保�
 
 源码中的读取操作仅在用户启用后、视图可用时发生。授权被撤销、功能关闭或当前读取被取消后，旧的异步结果不会交给调用方。系统授权和 WinDock 功能开关是两个独立状态，关闭功能不会替用户修改 Windows 隐私设置。
 
+关闭或返回图标列表会请求取消底层 Windows 操作。授权和读取分别在全进程只保留一个执行位置，跨面板关闭、重开也不重置：界面的等待结束后，仍须等原操作确认完成及取消调用结束，才能发出下一次请求。读取的 5 秒期限同时覆盖排队和结果等待；不写入通知内容，也不把晚到的权限错误应用到后来启用的会话。
+
+实现使用无取消参数的 `AsTask()` 保留底层完成信号，并另行请求 `IAsyncInfo.Cancel`。微软 C#/WinRT 的 [固定实现](https://github.com/microsoft/CsWinRT/blob/c28d756c4f042cf573d269c6ac39de05087e86c8/src/cswinrt/strings/additions/Windows.Foundation/Windows.Foundation.cs#L342) 会在带 token 的桥接取消时直接结束 Task，所以该 Task 的取消不能证明 Windows 操作已经停止。取消调用移至后台，每个执行位置最多一次；若 Windows 调用持续不结束，该位置持续占用，不叠加请求。无法建立可靠完成信号时也保留该限制，需重启 WinDock 才能重新尝试。
+
 ## 包身份
 
 `packaging/notifications/` 提供外部位置身份包与可执行文件清单模板，以及构建、签名、注册、移除脚本。身份包使用 `uap3:userNotificationListener` 声明；`Publisher` 必须与可信代码签名证书的主体一致，包名、发布者和应用 ID 必须与可执行文件的身份信息一致。构建脚本保留现有 DPI 和权限设置，在生成 .NET 单文件程序之前嵌入身份信息，并读回核对。应用图标资源同时提供在外部程序目录中。

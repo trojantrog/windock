@@ -121,14 +121,36 @@ public sealed class DockOptions : ObservableObject
 
     public void Retemplate() => Changed?.Invoke(nameof(CompactWidgets));
 
-    public bool StartWithWindows
+    Autostart.State startup = Autostart.Read();
+    public bool? StartWithWindows
     {
-        get => Autostart.Enabled;
+        get => startup.Registered == true && startup.MatchesCurrentExecutable && startup.WindowsAllowsStartup is null
+            ? null : startup.Enabled;
         set
         {
-            Autostart.Enabled = value;
-            OnPropertyChanged();
+            if (value is not { } enabled) return;
+            startup = Autostart.SetEnabled(enabled);
+            NotifyStartup();
+            if (enabled && startup.WindowsApproval == Autostart.Approval.Disabled) OpenStartupSettings();
         }
+    }
+    public bool CanChangeStartup => startup.CanChange;
+    public bool StartupNeedsAttention => startup.StatusKey.Length != 0;
+    public bool StartupNeedsWindowsSettings => startup.NeedsWindowsSettings;
+    public string StartupStatus => startup.StatusKey.Length == 0 ? "" : Loc.T(startup.StatusKey);
+    public void OpenStartupSettings() => Launcher.OpenFile("ms-settings:startupapps");
+    public void RefreshStartup()
+    {
+        startup = Autostart.Read();
+        NotifyStartup();
+    }
+    void NotifyStartup()
+    {
+        OnPropertyChanged(nameof(StartWithWindows));
+        OnPropertyChanged(nameof(CanChangeStartup));
+        OnPropertyChanged(nameof(StartupNeedsAttention));
+        OnPropertyChanged(nameof(StartupNeedsWindowsSettings));
+        OnPropertyChanged(nameof(StartupStatus));
     }
 
     public bool LensNone { get => Lens == DockSettings.LensNone; set { if (value) Lens = DockSettings.LensNone; else OnPropertyChanged(); } }

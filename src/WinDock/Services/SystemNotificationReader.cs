@@ -21,9 +21,10 @@ internal sealed class SystemNotificationReader : IDisposable
 {
     const int InsufficientBuffer = 122;
     const int MaximumItems = 100, MaximumTextElements = 10, MaximumTextLength = 4096;
+    static readonly NotificationOperationSlot authorizationSlot = new(), readSlot = new();
     readonly Dispatcher dispatcher;
     UserNotificationListener? listener;
-    Task<IReadOnlyList<UserNotification>>? pendingRead;
+    CancellationTokenSource? enabledLifetime;
     TypedEventHandler<UserNotificationListener, UserNotificationChangedEventArgs>? changeHandler;
     bool enabled, starting, subscribed, disposed;
     int generation, readGeneration, changePending;
@@ -55,18 +56,21 @@ internal sealed class SystemNotificationReader : IDisposable
     {
         dispatcher.VerifyAccess();
         if (disposed || cancellation.IsCancellationRequested) return SystemNotificationAccess.Cancelled;
-        if (enabled) return SystemNotificationAccess.Enabled;
+        if (enabled) return CheckAccess();
         if (starting) return SystemNotificationAccess.Busy;
         if (!HasPackageIdentity()) return SystemNotificationAccess.IdentityRequired;
         starting = true;
         var current = ++generation;
+        var lifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
+        enabledLifetime = lifetime;
         try
         {
             var candidate = UserNotificationListener.Current;
             var access = candidate.GetAccessStatus();
             if (access == UserNotificationListenerAccessStatus.Unspecified)
-                access = await candidate.RequestAccessAsync().AsTask().WaitAsync(cancellation);
+                access = await authorizationSlot.RunAsync(() => candidate.RequestAccessAsync(), lifetime.Token);
             if (disposed || cancellation.IsCancellationRequested || current != generation) return SystemNotificationAccess.Cancelled;
+            access = candidate.GetAccessStatus();
             if (access == UserNotificationListenerAccessStatus.Denied) return SystemNotificationAccess.Denied;
             if (access != UserNotificationListenerAccessStatus.Allowed) return SystemNotificationAccess.Unspecified;
             listener = candidate;
@@ -81,18 +85,32 @@ internal sealed class SystemNotificationReader : IDisposable
             return SystemNotificationAccess.Enabled;
         }
         catch (OperationCanceledException) { return SystemNotificationAccess.Cancelled; }
-        catch (Exception error) when (PlatformError(error)) { return SystemNotificationAccess.Unavailable; }
-        finally { starting = false; }
+        catch (Exception error) when (PlatformError(error))
+        {
+            return disposed || cancellation.IsCancellationRequested || current != generation
+                ? SystemNotificationAccess.Cancelled : SystemNotificationAccess.Unavailable;
+        }
+        finally
+        {
+            starting = false;
+            if (!enabled && ReferenceEquals(enabledLifetime, lifetime))
+            { enabledLifetime = null; CancelAndDispose(lifetime); }
+        }
     }
 
     public async Task<SystemNotificationSnapshot> ReadAsync(CancellationToken cancellation = default)
     {
         dispatcher.VerifyAccess();
         if (disposed || cancellation.IsCancellationRequested) return Empty(SystemNotificationAccess.Cancelled);
-        if (!enabled || listener is null) return Empty(SystemNotificationAccess.Disabled);
+        if (!enabled || listener is null || enabledLifetime is null) return Empty(SystemNotificationAccess.Disabled);
         var current = generation;
         var request = ++readGeneration;
         var source = listener;
+        var viewToken = enabledLifetime.Token;
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation, viewToken);
+        deadline.CancelAfter(TimeSpan.FromSeconds(5));
+        bool Current() => !disposed && !cancellation.IsCancellationRequested && !viewToken.IsCancellationRequested
+            && current == generation && request == readGeneration && enabled && ReferenceEquals(source, listener);
         try
         {
             if (source.GetAccessStatus() != UserNotificationListenerAccessStatus.Allowed)
@@ -100,9 +118,15 @@ internal sealed class SystemNotificationReader : IDisposable
                 Disable();
                 return Empty(SystemNotificationAccess.Denied);
             }
-            if (pendingRead is null || pendingRead.IsCompleted)
-                pendingRead = source.GetNotificationsAsync(NotificationKinds.Toast).AsTask();
-            var notifications = await pendingRead.WaitAsync(TimeSpan.FromSeconds(5), cancellation);
+            var notifications = await readSlot.RunAsync(() =>
+            {
+                // Waiting for an older operation must not carry an earlier
+                // permission decision into a new Windows request.
+                deadline.Token.ThrowIfCancellationRequested();
+                if (source.GetAccessStatus() != UserNotificationListenerAccessStatus.Allowed)
+                    throw new UnauthorizedAccessException();
+                return source.GetNotificationsAsync(NotificationKinds.Toast);
+            }, deadline.Token);
             if (disposed || cancellation.IsCancellationRequested || current != generation || request != readGeneration || !enabled)
                 return Empty(SystemNotificationAccess.Cancelled);
             if (source.GetAccessStatus() != UserNotificationListenerAccessStatus.Allowed)
@@ -151,9 +175,19 @@ internal sealed class SystemNotificationReader : IDisposable
             }
             return new SystemNotificationSnapshot(SystemNotificationAccess.Enabled, items);
         }
-        catch (OperationCanceledException) { return Empty(SystemNotificationAccess.Cancelled); }
-        catch (TimeoutException) { return Empty(SystemNotificationAccess.Unavailable); }
-        catch (Exception error) when (PlatformError(error)) { return Empty(SystemNotificationAccess.Unavailable); }
+        catch (OperationCanceledException)
+        {
+            return Empty(Current() ? SystemNotificationAccess.Unavailable : SystemNotificationAccess.Cancelled);
+        }
+        catch (UnauthorizedAccessException)
+        {
+            if (!Current()) return Empty(SystemNotificationAccess.Cancelled);
+            Disable();
+            return Empty(SystemNotificationAccess.Denied);
+        }
+        catch (TimeoutException) { return Empty(Current() ? SystemNotificationAccess.Unavailable : SystemNotificationAccess.Cancelled); }
+        catch (Exception error) when (PlatformError(error))
+        { return Empty(Current() ? SystemNotificationAccess.Unavailable : SystemNotificationAccess.Cancelled); }
     }
 
     public void Disable()
@@ -162,6 +196,8 @@ internal sealed class SystemNotificationReader : IDisposable
         ++generation; ++readGeneration;
         Interlocked.Exchange(ref changePending, 0);
         enabled = false;
+        var lifetime = enabledLifetime; enabledLifetime = null;
+        if (lifetime is not null) CancelAndDispose(lifetime);
         if (subscribed && listener is { } source && changeHandler is { } handler)
         {
             try { source.NotificationChanged -= handler; }
@@ -169,8 +205,14 @@ internal sealed class SystemNotificationReader : IDisposable
         }
         subscribed = false;
         changeHandler = null;
-        pendingRead = null;
         listener = null;
+    }
+
+    static void CancelAndDispose(CancellationTokenSource lifetime)
+    {
+        try { lifetime.Cancel(); }
+        catch (AggregateException) { }
+        finally { lifetime.Dispose(); }
     }
 
     void OnNotificationChanged(int current)

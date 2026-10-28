@@ -12,19 +12,34 @@ namespace WinDock.Views;
 public sealed class DockPreferences : StackPanel
 {
     sealed record Choice(string Id, string Name);
+    Window? owner;
     public DockPreferences()
     {
-        Loaded += (_, _) => { Loc.Instance.PropertyChanged += LanguageChanged; Build(); };
-        Unloaded += (_, _) => Loc.Instance.PropertyChanged -= LanguageChanged;
+        Loaded += (_, _) =>
+        {
+            Loc.Instance.PropertyChanged += LanguageChanged;
+            owner = Window.GetWindow(this);
+            if (owner is not null) owner.Activated += RefreshStartup;
+            Build();
+        };
+        Unloaded += (_, _) =>
+        {
+            Loc.Instance.PropertyChanged -= LanguageChanged;
+            if (owner is not null) owner.Activated -= RefreshStartup;
+            owner = null;
+        };
+        IsVisibleChanged += (_, _) => { if (IsVisible) RefreshStartup(this, EventArgs.Empty); };
     }
 
     void LanguageChanged(object? sender, PropertyChangedEventArgs e) => Build();
+    void RefreshStartup(object? sender, EventArgs e) => (DataContext as DockOptions)?.RefreshStartup();
     Brush Ink => (Brush)FindResource("Ink");
     Brush Muted => (Brush)FindResource("Muted");
     Style StyleOf(string key) => (Style)FindResource(key);
 
     void Build()
     {
+        RefreshStartup(this, EventArgs.Empty);
         Children.Clear();
         var appearance = Group("appearanceSettings");
         Number(appearance, "iconSize", nameof(DockOptions.IconSize), 24, 96, 1);
@@ -99,7 +114,27 @@ public sealed class DockPreferences : StackPanel
 
         var behavior = Group("behaviorSettings");
         Toggle(behavior, "showDock", nameof(DockOptions.Enabled));
-        Toggle(behavior, "trayStartup", nameof(DockOptions.StartWithWindows));
+        var startup = new ToggleButton { Content = Loc.T("trayStartup"), Style = StyleOf("SwitchToggle"),
+            Margin = new Thickness(0, 0, 0, 12) };
+        // Read back after the click: writing Run cannot override a Windows disable.
+        startup.SetBinding(ToggleButton.IsCheckedProperty, new Binding(nameof(DockOptions.StartWithWindows)) { Mode = BindingMode.OneWay });
+        startup.SetBinding(IsEnabledProperty, new Binding(nameof(DockOptions.CanChangeStartup)));
+        startup.Click += (_, _) =>
+        {
+            if (DataContext is DockOptions options) options.StartWithWindows = startup.IsChecked;
+            startup.GetBindingExpression(ToggleButton.IsCheckedProperty)?.UpdateTarget();
+        };
+        behavior.Children.Add(startup);
+        var startupStatus = new TextBlock { Foreground = Muted, TextWrapping = TextWrapping.Wrap, FontSize = 11,
+            Margin = new Thickness(0, 0, 0, 8) };
+        startupStatus.SetBinding(TextBlock.TextProperty, new Binding(nameof(DockOptions.StartupStatus)));
+        startupStatus.SetBinding(VisibilityProperty, new Binding(nameof(DockOptions.StartupNeedsAttention)) { Converter = new BooleanToVisibilityConverter() });
+        behavior.Children.Add(startupStatus);
+        var startupSettings = new Button { Content = Loc.T("startupWindowsSettings"), Style = StyleOf("GhostButton"),
+            HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 0, 0, 12) };
+        startupSettings.SetBinding(VisibilityProperty, new Binding(nameof(DockOptions.StartupNeedsWindowsSettings)) { Converter = new BooleanToVisibilityConverter() });
+        startupSettings.Click += (_, _) => (DataContext as DockOptions)?.OpenStartupSettings();
+        behavior.Children.Add(startupSettings);
         Toggle(behavior, "replaceTaskbar", nameof(DockOptions.ReplaceTaskbar), "replaceTaskbarDesc");
         Toggle(behavior, "autoHide", nameof(DockOptions.AutoHide));
         Toggle(behavior, "reserve", nameof(DockOptions.Reserve), enabledBy: nameof(DockOptions.CanReserve));

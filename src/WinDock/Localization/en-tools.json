@@ -230,5 +230,18 @@
   "motionCurveQuick": "Snappy",
   "windowCloseDistance": "Close downward travel",
   "windowCloseScale": "Close ending size",
-  "windowFadeHold": "Later fade-out"
+  "windowFadeHold": "Later fade-out",
+  "startupDisabledByWindows": "Sign-in startup is disabled in Windows",
+  "startupDisabledByPolicy": "Sign-in startup is blocked by system policy",
+  "startupUnconfirmed": "Registered; Windows startup status is not yet confirmed",
+  "startupUnknown": "Cannot confirm Windows startup status",
+  "startupDifferentVersion": "The startup entry does not point to this installation",
+  "startupChangeFailed": "Startup settings could not be saved",
+  "startupWindowsSettings": "Windows startup settings",
+  "startupCancelRegistration": "Remove sign-in startup",
+  "nativeMotionAutoConnecting": "Attempting to connect automatically",
+  "nativeMotionAutoWaiting": "Sign-in startup is configured; waiting for automatic connection",
+  "nativeMotionAutoIncomplete": "Automatic connection has not succeeded; sign-in startup remains configured",
+  "nativeMotionAutoUnconfirmed": "Sign-in startup is configured; the current component state is unconfirmed",
+  "nativeMotionSignOutAutomatic": "The previous component is still loaded; automatic activation is configured for the next sign-in"
 }

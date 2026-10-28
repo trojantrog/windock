@@ -511,5 +511,18 @@
   "motionCurveQuick": "利落",
   "windowCloseDistance": "关闭下移距离",
   "windowCloseScale": "关闭结束尺寸",
-  "windowFadeHold": "淡出延后程度"
+  "windowFadeHold": "淡出延后程度",
+  "startupDisabledByWindows": "已在 Windows 中禁用登录启动",
+  "startupDisabledByPolicy": "系统策略禁止登录启动",
+  "startupUnconfirmed": "已登记，Windows 启动状态尚未确认",
+  "startupUnknown": "无法确认 Windows 启动状态",
+  "startupDifferentVersion": "启动项未指向当前程序",
+  "startupChangeFailed": "启动设置未能保存",
+  "startupWindowsSettings": "Windows 启动设置",
+  "startupCancelRegistration": "取消登录启动",
+  "nativeMotionAutoConnecting": "正在尝试自动连接",
+  "nativeMotionAutoWaiting": "登录启动已配置，等待自动连接",
+  "nativeMotionAutoIncomplete": "自动连接尚未成功，登录启动设置已保留",
+  "nativeMotionAutoUnconfirmed": "登录启动已配置，当前组件状态尚未确认",
+  "nativeMotionSignOutAutomatic": "当前仍是旧组件，已配置下次登录自动启用"
 }

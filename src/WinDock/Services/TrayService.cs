@@ -69,7 +69,14 @@ public sealed class TrayService : IDisposable
         menu.Add(new Separator());
         menu.Add(Item(Loc.T("trayAuto"), () => vm.AutoSwitch = !vm.AutoSwitch, vm.AutoSwitch));
         menu.Add(Item(Loc.T("trayNotify"), () => vm.NotifySwitch = !vm.NotifySwitch, vm.NotifySwitch));
-        menu.Add(Item(Loc.T("trayStartup"), () => vm.Dock.StartWithWindows = !vm.Dock.StartWithWindows, vm.Dock.StartWithWindows));
+        vm.Dock.RefreshStartup();
+        var startup = Item(Loc.T(vm.Dock.StartWithWindows is null ? "startupCancelRegistration" : "trayStartup"),
+            () => vm.Dock.StartWithWindows = vm.Dock.StartWithWindows == false,
+            vm.Dock.StartWithWindows == true, vm.Dock.CanChangeStartup);
+        if (vm.Dock.StartupNeedsAttention) startup.ToolTip = vm.Dock.StartupStatus;
+        menu.Add(startup);
+        if (vm.Dock.StartupNeedsWindowsSettings)
+            menu.Add(Item(Loc.T("startupWindowsSettings"), vm.Dock.OpenStartupSettings));
         var language = new MenuItem { Header = Loc.T("trayLanguage") };
         language.Items.Add(Item("English", () => vm.SetLanguage(Loc.English), Loc.Instance.Language == Loc.English));
         language.Items.Add(Item("Português", () => vm.SetLanguage(Loc.Portuguese), Loc.Instance.Language == Loc.Portuguese));

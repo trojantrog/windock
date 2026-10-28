@@ -1086,7 +1086,14 @@ public partial class DockWindow : Window
         menu.Items.Add(Item(Loc.T("replaceTaskbar"), () => vm.Options.ReplaceTaskbar = !vm.Options.ReplaceTaskbar, vm.Options.ReplaceTaskbar));
         menu.Items.Add(Item(Loc.T("autoHide"), () => vm.Options.AutoHide = !vm.Options.AutoHide, vm.Options.AutoHide));
         menu.Items.Add(Item(Loc.T("followWindows"), () => vm.Options.FollowWindows = !vm.Options.FollowWindows, vm.Options.FollowWindows));
-        menu.Items.Add(Item(Loc.T("trayStartup"), () => vm.Options.StartWithWindows = !vm.Options.StartWithWindows, vm.Options.StartWithWindows));
+        vm.Options.RefreshStartup();
+        var startup = Item(Loc.T(vm.Options.StartWithWindows is null ? "startupCancelRegistration" : "trayStartup"),
+            () => vm.Options.StartWithWindows = vm.Options.StartWithWindows == false, vm.Options.StartWithWindows == true);
+        startup.IsEnabled = vm.Options.CanChangeStartup;
+        if (vm.Options.StartupNeedsAttention) startup.ToolTip = vm.Options.StartupStatus;
+        menu.Items.Add(startup);
+        if (vm.Options.StartupNeedsWindowsSettings)
+            menu.Items.Add(Item(Loc.T("startupWindowsSettings"), vm.Options.OpenStartupSettings));
         menu.Items.Add(Item(Loc.T("compactWidgets"), () => vm.Options.CompactWidgets = !vm.Options.CompactWidgets, vm.Options.CompactWidgets));
         if (global::System.Windows.Forms.Screen.AllScreens.Length > 1)
             menu.Items.Add(Item(Loc.T("perScreen"), () => vm.Options.PerScreen = !vm.Options.PerScreen, vm.Options.PerScreen));
