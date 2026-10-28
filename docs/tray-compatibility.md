@@ -12,8 +12,8 @@ Windows 输入法、语言栏和系统面板入口尚未完整替代，当前应
 | --- | --- | --- |
 | 标准图标注册、修改和删除 | 先复制请求，再读取 Explorer 的实际返回值；成功的 `NIM_ADD / MODIFY / DELETE` 才改变注册状态。发送回调前复核窗口及进程。 | 成功判定已对本机 `shell32.dll` 做静态核对；Explorer 私有传输格式仍可能随系统更新改变。失败 ADD 的显示补全有独立存在性检查，不能当作成功注册。[采集协议](tray-capture-protocol.md)、[微软协议](https://learn.microsoft.com/en-us/windows/win32/api/shellapi/nf-shellapi-shell_notifyiconw) |
 | 按有效字段更新 | 已按 `NIF_MESSAGE / ICON / TIP / STATE / INFO` 处理，隐藏状态使用 `dwStateMask`；旧结构按 `cbSize` 屏蔽不存在的字段，并截断旧版提示文字。 | 未设置有效标志的字段保留已有信息；不同历史结构的实际应用覆盖仍待确认。[字段约定](https://learn.microsoft.com/en-us/windows/win32/api/shellapi/ns-shellapi-notifyicondataw) |
-| GUID 标识及仅携 GUID 的后续操作 | 已要求 `NIF_GUID` 有效后才使用 GUID，拒绝字段不完整或空 GUID；已知 GUID 可复用原有窗口及进程归属，不再退回可能冲突的窗口标识查找。 | 首次收到未知 GUID、没有有效窗口及回调时，不能凭 GUID 生成可点击图标。[GUID 约定](https://learn.microsoft.com/en-us/windows/win32/api/shellapi/ns-shellapi-notifyicondataw) |
-| 协议版本与重新注册 | 仅成功 ADD 重置默认版本，仅成功 `NIM_SETVERSION` 更新版本；重复失败 ADD 保留既知版本。回调消息和版本均已确认时才直接交互。 | 未知协议可尝试委托对应的原生可见控件执行默认操作；不猜测回调版本，未知右键仍需使用原生托盘。[原生默认操作范围](native-tray-actions.md)、[版本约定](https://learn.microsoft.com/en-us/windows/win32/api/shellapi/nf-shellapi-shell_notifyiconw) |
+| GUID 标识及仅携 GUID 的后续操作 | 已要求 `NIF_GUID` 有效后才使用 GUID，拒绝字段不完整或空 GUID；已知 GUID 的 MODIFY、SETVERSION、SETFOCUS 保留登记时的窗口和图标 ID，接受的 DELETE 按 GUID 删除。 | 未知 GUID 的更新请求不能证明窗口归属；通过实际 ADD 或匹配系统版本的当前模型确认后才建立关联。[GUID 约定](https://learn.microsoft.com/en-us/windows/win32/api/shellapi/ns-shellapi-notifyicondataw) |
+| 协议版本与重新注册 | 成功 ADD 重置默认版本，成功 `NIM_SETVERSION` 更新版本；匹配系统版本的当前模型也可确认真实回调和版本。重复失败 ADD 保留既知版本。回调消息和版本均已确认时才直接交互。 | 未知协议可尝试委托对应的原生可见控件执行默认操作；GUID 归属证明失效时禁用此回退。未知右键仍需使用原生托盘。[原生默认操作范围](native-tray-actions.md)、[版本约定](https://learn.microsoft.com/en-us/windows/win32/api/shellapi/nf-shellapi-shell_notifyiconw) |
 | 菜单结束后归还焦点 | 已接入 `NIM_SETFOCUS`；仅匹配当前图标及其原窗口、进程的活动菜单会话，等待菜单结束后按当前焦点状态归还焦点。 | 用户已切到其他程序时不强制抢回焦点；实际归焦仍受 Windows 前台规则限制。[焦点约定](https://learn.microsoft.com/en-us/windows/win32/api/shellapi/nf-shellapi-shell_notifyiconw) |
 | 左键、右键、中键和双击 | 已发送原应用回调；版本 3/4 保留鼠标抬起与语义事件的兼容顺序，连续点击中的第 2、4 等偶数次按双击发送。拖出图标后松开时继续跟踪按下动作可能已打开的菜单。取得鼠标坐标失败时不发送伪造坐标。 | 在按下时打开菜单和拖出图标后松开等情况仍需逐类确认；不能把一次回调发送成功视为应用已经处理。 |
 | 键盘选择与菜单键 | 已支持 Enter、Space、菜单键及 Shift+F10；版本 4 的键盘锚点使用图标左上角屏幕坐标。 | 原应用是否接收、是否正确聚焦其菜单仍待实测。[回调参数](https://learn.microsoft.com/en-us/windows/win32/api/shellapi/ns-shellapi-notifyicondataw) |
@@ -23,14 +23,14 @@ Windows 输入法、语言栏和系统面板入口尚未完整替代，当前应
 | `NIF_INFO` 提示 | 已保存最近 50 条非实时提示请求和图标提示点，保存在内存中；带 `NIF_REALTIME` 的请求不加入提示历史。提示点在用户清空记录时移除。 | 提示点表示收到请求，不能代表真实未读数或系统确实弹出过通知。静默时段、实时丢弃和气泡交互继续由 Explorer 处理。[通知字段](https://learn.microsoft.com/en-us/windows/win32/api/shellapi/ns-shellapi-notifyicondataw) |
 | 系统气泡点击、关闭和超时 | Explorer 继续接收原始请求并负责原生气泡回调。 | WinDock 的提示历史不是原生气泡，点开或清空历史不等于发送 `NIN_BALLOONUSERCLICK`，也不会标记其他应用消息已读。[气泡事件](https://learn.microsoft.com/en-us/windows/win32/api/shellapi/nf-shellapi-shell_notifyiconw) |
 | Windows 通知中心的现代应用通知 | 保留进入系统通知中心的入口。 | 独立托盘尚未接入完整的通知中心列表、操作按钮及已读状态。微软的通知监听接口是另一项能力，需要相应声明和用户授权。[通知监听接口](https://learn.microsoft.com/en-us/windows/apps/develop/notifications/app-notifications/notification-listener) |
-| 应用主动隐藏的图标 | 已接收的 `NIS_HIDDEN` 状态继续生效，WinDock 的固定和排序独立保存。 | 原生登记快照没有应用隐藏状态，首次补入的图标要等待有效状态更新才能确认；不把折叠区偏好当作应用隐藏状态。当前不承诺复刻 Explorer 的排序和置顶结果。 |
+| 应用主动隐藏的图标 | 已接收的 `NIS_HIDDEN` 状态继续生效，WinDock 的固定和排序独立保存。诊断区分隐藏状态已知与未知。 | 两类登记读取目前均未提供应用隐藏状态；首次补入且状态未知的图标暂按显示处理，可能包含应用主动隐藏的登记项。有效状态更新到达后再调整；不把折叠区偏好当作应用隐藏状态。 |
 | 标准 Win32 菜单和子菜单 | 已调用应用自己的菜单，观察菜单生命周期并处理焦点交接。 | 菜单字体、位图和抗锯齿由应用绘制；WinDock 的磨玻璃与圆角样式不能直接改善第三方菜单像素质量。 |
 | WPF、Qt 等自绘菜单或面板 | 已有普通弹窗识别及菜单会话处理，按可确认的窗口所有者链关联辅助进程面板。 | 尚不能覆盖所有复用窗口、延迟显示、特殊样式和没有可确认所有者关系的跨进程面板。不能仅识别标准菜单窗口类。 |
 | 使用 `Shell_NotifyIconGetRect` 定位的菜单 | 保留 Windows 原有的图标矩形查询。可选的菜单定位功能默认关闭；启用后，仅在点击 WinDock 图标后短时间内出现、且能确认线程和窗口归属的单个标准菜单靠近原生图标时，尝试将其移到 Dock 图标附近。 | 没有改写系统查询；自绘窗口、跨进程菜单和无法确认来源的窗口仍可能出现在原任务栏附近。移动请求异步发送，目标程序卡住时可能稍后才执行；该功能尚未进行桌面验证。[矩形接口](https://learn.microsoft.com/en-us/windows/win32/api/shellapi/nf-shellapi-shell_notifyicongetrect) |
 | 由系统或辅助进程显示的面板 | 原始应用回调继续发送，有可确认窗口所有者关系的面板参与会话处理。 | 只凭图标进程无法证明另一个进程的面板归属；快速设置等系统界面也不能按普通应用菜单承诺完整复制。 |
 | Windows 输入法和语言栏入口 | 可尝试从 WinDock 打开 Windows 原生输入法入口，继续保留原生任务栏；该操作不切换输入模式或修改输入法配置。 | WinDock 尚未完整替代输入法切换和语言栏入口；无法识别系统控件时应使用原任务栏。快捷键兼容仍待确认。 |
-| 初始连接、Explorer 重建和断线重连 | 已重连并限频请求重新注册；另通过原生登记快照补全当前仍有效的窗口、进程、GUID、图标及提示。快照在回调退出后校验真实进程路径和图标存在性，连接变化或注册事件发生时丢弃过期结果。 | 快照接口不是公开稳定接口，历史记录须过滤；它不提供回调、协议版本及 `NIS_HIDDEN`。无法确认归属或权限不足的图标仍可能缺失。[登记快照边界](native-tray-inventory.md)、[任务栏重建](https://learn.microsoft.com/en-us/windows/win32/shell/taskbar#taskbar-creation-notification) |
-| 丢事件后的恢复 | 已识别采集队列和界面队列丢失更新，显示状态提示，并限频请求 `TaskbarCreated` 重新注册；刷新间隔至少 10 秒，自动恢复间隔至少 30 秒。 | 忽略重新注册请求的应用仍可能缺失；丢失 DELETE 时，仍存活的接收窗口可能留下旧图标。不能仅凭应用没有重发图标就认定它已经删除图标。 |
+| 初始连接、Explorer 重建和断线重连 | 已重连并限频请求重新注册；新增对精确匹配的 Taskbar 映像读取当前登记集合、回调和版本，核对进程创建时间、窗口线程和窗口类。旧登记接口继续用于补充显示信息。合并期间收到协议变更时撤销该批协议并重新读取。 | 当前模型读取只支持已核对的系统映像；系统更新或读取失败会停用该路径。旧 COM 接口在当前会话中返回 0 条，尚不能依赖它恢复缺少的图像和提示。[当前模型边界](native-tray-model.md)、[旧登记快照边界](native-tray-inventory.md) |
+| 丢事件后的恢复 | 已识别采集队列和界面队列丢失更新，撤销所有图标的旧回调和版本证明，清理过期补全请求，并限频请求重新注册。直接回调前排空待处理协议；原生默认操作提交前还复核捕获的协议序列。 | 忽略重新注册请求的应用仍可能缺失；丢失 DELETE 时，仍存活的接收窗口可能留下无法操作的旧图标。当前读取不凭“某次没读到”删除条目。刷新间隔至少 10 秒，自动恢复间隔至少 30 秒。 |
 | 高低权限应用 | 已校验窗口归属，保留 Windows 的消息和前台限制。 | 普通权限 WinDock 可能无法操作更高权限窗口；允许获得前台不等于解除消息权限限制。[UIPI](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-changewindowmessagefilterex) |
 | 32/64 位应用与系统架构 | 当前组件面向 x64 Windows 10 19041 及更新系统的 x64 Explorer；采集点位于 Explorer。 | 这不等于仅支持 64 位应用，32 位应用也会向 Explorer 注册；实际跨架构覆盖未测。32 位系统与 ARM64 系统当前不支持。[钩子架构要求](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowshookexw) |
 | 多屏、缩放和负坐标 | 已启用 PerMonitorV2，回调使用屏幕像素，保留负坐标；图标按设备像素对齐并高质量缩放。 | 混合缩放、热插拔及缩放改变后的重注册未测。协议坐标范围和应用原图分辨率仍有限制，低分辨率图标不能恢复缺失细节。 |

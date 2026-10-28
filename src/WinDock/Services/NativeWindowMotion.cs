@@ -21,7 +21,7 @@ sealed class NativeWindowMotion : IDisposable
     public static NativeWindowMotion Shared { get; } = new();
     public readonly record struct Anchor(nint Window, uint Pid, string? Exe, Rect Bounds, uint Flags = 0, int Screen = 0);
     sealed record Remembered(Anchor Anchor, long Until);
-    sealed record Request(uint Pid, bool Minimized, long Until);
+    sealed record Request(uint Pid, uint ThreadId, bool Minimized, long Until);
     sealed record PreviousComponent(int Pid, int Build, DateTimeOffset ObservedAt);
     readonly record struct StatusIdentity(int Pid, int Build, long Heartbeat);
     sealed record MotionDiagnostic(bool Connected, bool StatusHeaderValid, bool LoginEnabled, uint PublishedFlags, int ComponentPid, int ComponentBuild,
@@ -39,7 +39,7 @@ sealed class NativeWindowMotion : IDisposable
     bool activating, disposed, suspended;
     bool configuringLogin, refreshingLogin, inspectingConnection, inspectingPrevious = true;
     int sequence, session, recoveryAttempts;
-    long nextConnectionInspection, nextRecovery, nextLoginInspection;
+    long nextConnectionInspection, nextRecovery, nextLoginInspection, animationSettingRevision;
     string? errorKey;
     string? failureCode;
     long started;
@@ -48,6 +48,8 @@ sealed class NativeWindowMotion : IDisposable
     long diagnosticWrittenAt;
     PreviousComponent? previousComponent;
     StatusIdentity? retiredStatus;
+    bool ControlsAvailable => !disposed && !activating && !configuringLogin && !inspectingPrevious
+        && !inspectingConnection && !refreshingLogin;
 
     public void Initialize(DockOptions value)
     {
@@ -101,6 +103,7 @@ sealed class NativeWindowMotion : IDisposable
     {
         if (name == nameof(DockOptions.NativeWindowAnimations))
         {
+            ++animationSettingRevision;
             suspended = false;
             errorKey = null;
             failureCode = null;
@@ -127,25 +130,43 @@ sealed class NativeWindowMotion : IDisposable
 
     public bool TryReverse(nint window, Rect anchor)
     {
-        if (!requests.TryGetValue(window, out var request) || request.Until < Environment.TickCount64) return false;
-        Native.GetWindowThreadProcessId(window, out var pid);
-        if (unchecked((uint)pid) != request.Pid) { requests.Remove(window); return false; }
-        RequestState(window, anchor, !request.Minimized);
+        if (requests.TryGetValue(window, out var request))
+        {
+            var thread = Native.GetWindowThreadProcessId(window, out var pid);
+            if (request.Until > Environment.TickCount64 && thread != 0 && thread == request.ThreadId
+                && unchecked((uint)pid) == request.Pid)
+            {
+                RequestState(window, anchor, !request.Minimized);
+                return true;
+            }
+            requests.Remove(window);
+        }
+        // A posted show-state event can still be waiting in the app's queue
+        // even when this particular animation is disabled. Reverse that live
+        // intent without inventing a visual-animation lifetime for it.
+        if (!WindowMotionNative.TryGetPendingState(window, out var minimized)) return false;
+        RequestState(window, anchor, !minimized);
         return true;
     }
 
     public void RequestState(nint window, Rect anchor, bool minimized)
     {
         if (!Native.IsWindow(window)) return;
-        Native.GetWindowThreadProcessId(window, out var pid);
+        var thread = Native.GetWindowThreadProcessId(window, out var pid);
+        if (thread == 0) return;
         Add(new(window, unchecked((uint)pid), null, anchor, 1, int.MinValue), 1500);
-        var duration = minimized ? options?.WindowMotionDuration ?? 320 : options?.WindowRestoreDuration ?? 240;
-        if (Flags != 0 && Connected && Marshal.ReadInt32(status!.View, 16) == 1)
-            requests[window] = new(unchecked((uint)pid), minimized, Environment.TickCount64 + duration);
-        else requests.Remove(window);
+        // Publish the target before posting the native event, but only remember
+        // a reversal after Windows has accepted the state request.
         Publish();
-        WindowMotionNative.SetState(window, minimized);
-        if (!minimized) WindowTracker.Focus(window);
+        var accepted = WindowMotionNative.SetState(window, minimized);
+        if (Native.GetWindowThreadProcessId(window, out var currentPid) != thread || currentPid != pid)
+        { requests.Remove(window); return; }
+        var duration = minimized ? options?.WindowMotionDuration ?? 320 : options?.WindowRestoreDuration ?? 240;
+        var action = minimized ? 8u : 16u;
+        if (accepted && (Flags & action) != 0 && Connected && Marshal.ReadInt32(status!.View, 16) == 1)
+            requests[window] = new(unchecked((uint)pid), thread, minimized, Environment.TickCount64 + duration);
+        else requests.Remove(window);
+        if (!minimized && (accepted || !Native.IsIconic(window))) WindowTracker.Focus(window);
     }
 
     static bool Valid(Rect rect) => !rect.IsEmpty && double.IsFinite(rect.X) && double.IsFinite(rect.Y)
@@ -250,9 +271,10 @@ sealed class NativeWindowMotion : IDisposable
 
     async Task RestoreDisconnectedComponentAsync()
     {
-        if (disposed || inspectingPrevious || inspectingConnection || activating || configuringLogin || Connected
+        if (disposed || inspectingPrevious || inspectingConnection || refreshingLogin || activating || configuringLogin || Connected
             || options is null || config is null || status is null) return;
         inspectingConnection = true;
+        UpdateStatus();
         nextConnectionInspection = Environment.TickCount64 + 10000;
         try
         {
@@ -296,7 +318,7 @@ sealed class NativeWindowMotion : IDisposable
             nextRecovery = Environment.TickCount64 + (++recoveryAttempts == 1 ? 10000 : 30000);
             await RefreshLoginAsync(true);
         }
-        finally { inspectingConnection = false; }
+        finally { inspectingConnection = false; UpdateStatus(); }
     }
 
     static PreviousComponent? ReadPreviousComponent()
@@ -363,6 +385,7 @@ sealed class NativeWindowMotion : IDisposable
     void UpdateStatus()
     {
         if (options is null) return;
+        options.WindowAnimationControlsEnabled = ControlsAvailable;
         string key;
         if (activating || inspectingPrevious) key = "nativeMotionActivating";
         else if (!options.NativeWindowAnimations) key = "nativeMotionOff";
@@ -449,6 +472,7 @@ sealed class NativeWindowMotion : IDisposable
     {
         if (refreshingLogin || disposed || options is null) return;
         refreshingLogin = true;
+        UpdateStatus();
         nextLoginInspection = Environment.TickCount64 + 30000;
         try
         {
@@ -467,7 +491,7 @@ sealed class NativeWindowMotion : IDisposable
                 }
             }
         }
-        finally { refreshingLogin = false; }
+        finally { refreshingLogin = false; UpdateStatus(); }
     }
 
     static bool InspectLoginTask(bool run)
@@ -539,11 +563,14 @@ sealed class NativeWindowMotion : IDisposable
 
     public async Task SetLoginEnabledAsync(bool enabled)
     {
-        if (configuringLogin || activating || disposed || options is null) return;
+        if (!ControlsAvailable || options is null) return;
         configuringLogin = true;
+        var requestedAt = animationSettingRevision;
+        UpdateStatus();
         try
         {
             var validation = await Task.Run(() => ValidatePackage(enabled));
+            if (disposed) return;
             if (validation is not null) { errorKey = validation; return; }
             using var identity = WindowsIdentity.GetCurrent();
             var sid = identity.User?.Value;
@@ -557,6 +584,7 @@ sealed class NativeWindowMotion : IDisposable
             }));
             if (process is null) { errorKey = "nativeMotionLoginFailed"; return; }
             await process.WaitForExitAsync();
+            if (disposed) return;
             if (process.ExitCode != 0)
             {
                 errorKey = "nativeMotionLoginFailed";
@@ -564,7 +592,10 @@ sealed class NativeWindowMotion : IDisposable
                 return;
             }
             errorKey = null; failureCode = null;
-            if (enabled) { options.NativeWindowAnimations = true; options.Flush(); }
+            // A newer toggle choice made while Windows asked for permission
+            // takes precedence over the original registration request.
+            if (enabled && requestedAt == animationSettingRevision)
+            { options.NativeWindowAnimations = true; options.Flush(); }
         }
         catch (Win32Exception e)
         {
@@ -584,29 +615,39 @@ sealed class NativeWindowMotion : IDisposable
 
     public async Task ActivateAsync()
     {
-        if (activating || disposed || options is null) return;
+        if (!ControlsAvailable || options is null) return;
         if (config is null || status is null) { errorKey = "nativeMotionMappingFailed"; UpdateStatus(); return; }
-        options.NativeWindowAnimations = true;
-        options.Flush();
-        if (Connected)
-        {
-            errorKey = Marshal.ReadInt32(status.View, 24) != Build ? "nativeMotionSignOut" : null;
-            failureCode = null;
-            UpdateStatus(); return;
-        }
-        if (Flags == 0) { UpdateStatus(); return; }
-        activating = true; errorKey = null; failureCode = null; Publish();
+        // Own the operation before enabling the setting: its change callback
+        // can otherwise start the login task alongside the manual helper.
+        activating = true; errorKey = null; failureCode = null;
         SharedMap? report = null;
         int? exitCode = null, helperPid = null, windowsError = null;
+        var attempted = false;
         try
         {
+            options.NativeWindowAnimations = true;
+            options.Flush();
+            if (Connected)
+            {
+                errorKey = Marshal.ReadInt32(status.View, 24) != Build ? "nativeMotionSignOut" : null;
+                return;
+            }
+            if (Flags == 0) return;
+            Publish();
             var validation = await Task.Run(() => ValidatePackage());
             if (validation is not null) { errorKey = validation; return; }
             if (!options.NativeWindowAnimations || disposed) { errorKey = "nativeMotionCanceled"; return; }
+            if (Connected)
+            {
+                errorKey = Marshal.ReadInt32(status!.View, 24) != Build ? "nativeMotionSignOut" : null;
+                return;
+            }
+            if (Flags == 0) return;
             Publish();
             var nonce = Guid.NewGuid().ToString("N");
             using var current = Process.GetCurrentProcess();
             report = new($"Local\\WinDock.Motion.Activation.v1.{current.SessionId}.{nonce}", ActivationBytes, null);
+            attempted = true;
             using var process = await Task.Run(() => Process.Start(new ProcessStartInfo
             {
                 FileName = Path.Combine(AppContext.BaseDirectory, "WinDock.MotionHost.exe"),
@@ -617,6 +658,7 @@ sealed class NativeWindowMotion : IDisposable
             if (process is null) { errorKey = "nativeMotionFailed"; return; }
             helperPid = process.Id;
             await process.WaitForExitAsync();
+            if (disposed) { errorKey = "nativeMotionCanceled"; return; }
             exitCode = process.ExitCode;
             errorKey = exitCode switch
             {
@@ -658,7 +700,7 @@ sealed class NativeWindowMotion : IDisposable
         { errorKey = "nativeMotionFilesChanged"; }
         finally
         {
-            RecordActivation(exitCode, helperPid, windowsError, report);
+            if (attempted) RecordActivation(exitCode, helperPid, windowsError, report);
             report?.Dispose();
             activating = false; UpdateStatus();
         }

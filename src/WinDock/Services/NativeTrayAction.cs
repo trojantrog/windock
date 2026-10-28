@@ -8,7 +8,7 @@ namespace WinDock.Services;
 
 internal enum NativeTrayActionResult { Requested, Unavailable, Busy, Cancelled, TimedOut, Pending }
 
-internal sealed record NativeTrayIdentity(nint Window, uint ProcessId, uint Id, Guid Guid, long ProcessStarted);
+internal sealed record NativeTrayIdentity(nint Window, uint ProcessId, uint Id, Guid Guid, long ProcessStarted, uint ThreadId, string OwnerClass);
 
 internal sealed record NativeTraySurface(nint Window, uint ProcessId, Native.Rect IconBounds)
 {
@@ -28,26 +28,28 @@ internal sealed class NativeTrayOperation
     readonly object sync = new();
     readonly TaskCompletionSource<NativeTrayActionResult> completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
     readonly CancellationToken cancellation;
+    readonly Func<bool> protocolCurrent;
     readonly long deadline = Environment.TickCount64 + 2500;
     bool expired, cancelled, submitted;
     internal NativeTrayIdentity Identity { get; }
     internal Func<NativeTraySurface, bool> Prepare { get; }
 
-    internal NativeTrayOperation(NativeTrayIdentity identity, Func<NativeTraySurface, bool> prepare, CancellationToken cancellation)
-    { Identity = identity; Prepare = prepare; this.cancellation = cancellation; }
+    internal NativeTrayOperation(NativeTrayIdentity identity, Func<NativeTraySurface, bool> prepare,
+        Func<bool> protocolCurrent, CancellationToken cancellation)
+    { Identity = identity; Prepare = prepare; this.protocolCurrent = protocolCurrent; this.cancellation = cancellation; }
 
     internal bool IsResolving => !completion.Task.IsCompleted && !Stopped;
     internal bool Submitted { get { lock (sync) return submitted; } }
     internal bool Stopped
     {
-        get { lock (sync) return expired || cancelled || cancellation.IsCancellationRequested || Environment.TickCount64 >= deadline; }
+        get { lock (sync) return expired || cancelled || cancellation.IsCancellationRequested || Environment.TickCount64 >= deadline || !protocolCurrent(); }
     }
 
     internal bool TrySubmit()
     {
         lock (sync)
         {
-            if (submitted || expired || cancelled || cancellation.IsCancellationRequested || Environment.TickCount64 >= deadline) return false;
+            if (submitted || expired || cancelled || cancellation.IsCancellationRequested || Environment.TickCount64 >= deadline || !protocolCurrent()) return false;
             submitted = true;
             return true;
         }
@@ -104,10 +106,10 @@ internal static class NativeTrayAction
     static int reserved;
 
     internal static NativeTrayOperation? TryStart(NativeTrayIdentity identity,
-        Func<NativeTraySurface, bool> prepare, CancellationToken cancellation, Action<NativeTrayOperation> starting)
+        Func<NativeTraySurface, bool> prepare, Func<bool> protocolCurrent, CancellationToken cancellation, Action<NativeTrayOperation> starting)
     {
         if (Interlocked.CompareExchange(ref reserved, 1, 0) != 0) return null;
-        var operation = new NativeTrayOperation(identity, prepare, cancellation);
+        var operation = new NativeTrayOperation(identity, prepare, protocolCurrent, cancellation);
         var queued = false;
         try
         {
@@ -164,9 +166,10 @@ internal static class NativeTrayAction
 
             bool Current()
             {
-                Native.GetWindowThreadProcessId(identity.Window, out var pid);
+                var ownerThread = Native.GetWindowThreadProcessId(identity.Window, out var pid);
                 Native.GetWindowThreadProcessId(explorer.Window, out var shellPid);
-                return !operation.Stopped && pid == identity.ProcessId && Native.IsWindow(identity.Window)
+                return !operation.Stopped && pid == identity.ProcessId && ownerThread == identity.ThreadId
+                    && Native.ClassOf(identity.Window) == identity.OwnerClass && Native.IsWindow(identity.Window)
                     && shellPid == explorer.Process && Native.FindWindow("Shell_TrayWnd", null) == explorer.Window
                     && WaitForSingleObject(owner, 0) == 258 && WaitForSingleObject(shell, 0) == 258;
             }

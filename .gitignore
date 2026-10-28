@@ -5,3 +5,4 @@ publish/
 *.user
 *.suo
 TestResults/
+scripts/__pycache__/

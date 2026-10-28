@@ -49,26 +49,21 @@ public sealed class DockPreferences : StackPanel
         var login = new ToggleButton { Content = Loc.T("nativeMotionLogin"), Style = StyleOf("SwitchToggle"),
             Margin = new Thickness(0, 0, 0, 12) };
         login.SetBinding(ToggleButton.IsCheckedProperty, new Binding(nameof(DockOptions.WindowAnimationLoginEnabled)) { Mode = BindingMode.OneWay });
+        login.SetBinding(IsEnabledProperty, new Binding(nameof(DockOptions.WindowAnimationControlsEnabled)));
         login.Click += async (_, _) =>
         {
             var enabled = login.IsChecked == true;
-            login.IsEnabled = false;
             try { await NativeWindowMotion.Shared.SetLoginEnabledAsync(enabled); }
             finally
             {
                 login.GetBindingExpression(ToggleButton.IsCheckedProperty)?.UpdateTarget();
-                login.IsEnabled = true;
             }
         };
         motion.Children.Add(login);
         var activate = new Button { Content = Loc.T("nativeMotionActivate"), Style = StyleOf("ActionButton"), HorizontalAlignment = HorizontalAlignment.Left,
             Padding = new Thickness(12, 6, 12, 6), Margin = new Thickness(0, 0, 0, 8) };
-        activate.Click += async (_, _) =>
-        {
-            activate.IsEnabled = false;
-            try { await NativeWindowMotion.Shared.ActivateAsync(); }
-            finally { activate.IsEnabled = true; }
-        };
+        activate.SetBinding(IsEnabledProperty, new Binding(nameof(DockOptions.WindowAnimationControlsEnabled)));
+        activate.Click += async (_, _) => await NativeWindowMotion.Shared.ActivateAsync();
         motion.Children.Add(activate);
         var motionStatus = new TextBlock { Foreground = Muted, TextWrapping = TextWrapping.Wrap, FontSize = 11,
             Margin = new Thickness(0, 0, 0, 14) };
@@ -77,15 +72,15 @@ public sealed class DockPreferences : StackPanel
         Toggle(motion, "windowOpenAnimation", nameof(DockOptions.WindowOpenAnimation));
         Number(motion, "windowOpenDuration", nameof(DockOptions.WindowOpenDuration), 120, 600, 20, "{0} ms", nameof(DockOptions.WindowOpenAnimation));
         Toggle(motion, "windowCloseAnimation", nameof(DockOptions.WindowCloseAnimation));
-        Number(motion, "windowCloseDuration", nameof(DockOptions.WindowCloseDuration), 120, 600, 20, "{0} ms", nameof(DockOptions.WindowCloseAnimation));
+        Number(motion, "windowCloseDuration", nameof(DockOptions.WindowCloseDuration), 120, 600, 20, "{0} ms", nameof(DockOptions.WindowCloseParametersEnabled));
         Toggle(motion, "windowMotion", nameof(DockOptions.WindowMotion));
         Number(motion, "windowMotionDuration", nameof(DockOptions.WindowMotionDuration), 120, 600, 20, "{0} ms", nameof(DockOptions.WindowMotion));
         Toggle(motion, "windowRestoreAnimation", nameof(DockOptions.WindowRestoreAnimation));
         Number(motion, "windowRestoreDuration", nameof(DockOptions.WindowRestoreDuration), 120, 600, 20, "{0} ms", nameof(DockOptions.WindowRestoreAnimation));
         Toggle(motion, "windowHideAnimation", nameof(DockOptions.WindowHideAnimation));
         Select(motion, "windowMotionCurve", nameof(DockOptions.WindowMotionCurve), ("smooth", "motionCurveSmooth"), ("quick", "motionCurveQuick"));
-        Number(motion, "windowCloseDistance", nameof(DockOptions.WindowCloseDistance), 0, 120, 2, "{0} px", nameof(DockOptions.WindowCloseAnimation));
-        Number(motion, "windowCloseScale", nameof(DockOptions.WindowCloseScale), .75, 1, .01, "{0:P0}", nameof(DockOptions.WindowCloseAnimation));
+        Number(motion, "windowCloseDistance", nameof(DockOptions.WindowCloseDistance), 0, 120, 2, "{0} px", nameof(DockOptions.WindowCloseParametersEnabled));
+        Number(motion, "windowCloseScale", nameof(DockOptions.WindowCloseScale), .75, 1, .01, "{0:P0}", nameof(DockOptions.WindowCloseParametersEnabled));
         Number(motion, "windowFadeHold", nameof(DockOptions.WindowFadeHold), .5, .95, .01, "{0:P0}");
         Toggle(motion, "iconAnimation", nameof(DockOptions.IconAnimation));
         Number(motion, "animationStrength", nameof(DockOptions.AnimationStrength), .2, 1.3, .01, "{0:0.00}×", nameof(DockOptions.IconAnimation));

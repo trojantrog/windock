@@ -1,0 +1,118 @@
+{
+  "schema": 1,
+  "image": {
+    "fileName": "Taskbar.dll",
+    "machine": 34404,
+    "timeDateStamp": 1989904251,
+    "sizeOfImage": 3178496,
+    "fileLength": 3217192,
+    "sha256": "ca1e335ac1fae5ff57519035302a2f365c4620d3a230f31f1231af7331760741",
+    "pdbName": "Taskbar.pdb",
+    "pdbGuid": "dab69a79-fee0-33f0-d81e-023fbf172b51",
+    "pdbAge": 1
+  },
+  "symbols": {
+    "root": {
+      "rva": 2353560,
+      "size": 8,
+      "sha256": "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc"
+    },
+    "itemVtable": {
+      "rva": 1859656,
+      "size": 8,
+      "sha256": "256ffedf2a2400e74101ab15fd70d3d4b79cc499d162f10bcaab684b3aaa5f1b"
+    },
+    "copyData": {
+      "rva": 593600,
+      "size": 559,
+      "sha256": "08b78c8efe6f684a37d54237ce9081428984e47cff467126b50654a70d219587"
+    },
+    "notify": {
+      "rva": 641080,
+      "size": 173,
+      "sha256": "e988cfc3e8474f712cd3ecb996a0a7a7a7823c5143d490ac16d73c35efa62d6c"
+    },
+    "getRect": {
+      "rva": 641260,
+      "size": 520,
+      "sha256": "f07470401566081bb7693e4a1d2bcb073fe6884ee2b1bef5a38de7c2c0d9516b"
+    },
+    "identity": {
+      "rva": 117224,
+      "size": 53,
+      "sha256": "fc5ee6f684b5fea8efc6af7d88f4e68064aaf7d80ce44ae9bb996954e2c3e1e6"
+    },
+    "sendOwner": {
+      "rva": 409232,
+      "size": 200,
+      "sha256": "b0ccf87c58afd47d104e890e764b935e78b3d4cf31026e0a52e9b89fa1a5eabe"
+    },
+    "modify": {
+      "rva": 313012,
+      "size": 571,
+      "sha256": "547f03de90ef77239b8eb91530bd1a900855a0ef56acca12348b5e58f26cd485"
+    },
+    "setVersion": {
+      "rva": 674256,
+      "size": 172,
+      "sha256": "52adad8f08bfd6c88e669cdd260d9f2808298e10ecfaf99fe628282269db519c"
+    },
+    "addIcon": {
+      "rva": 495064,
+      "size": 395,
+      "sha256": "be43db928136a2f93fc80f2722f3b17a7c1e3eea49eb3d7530c51294b72b2dc6"
+    },
+    "managerCopy": {
+      "rva": 443220,
+      "size": 48,
+      "sha256": "f040f1f3dc3f286a7bba7370f46d724131bce1c7e98f5e8e711b7e63ac67d9ee"
+    },
+    "findIdentity": {
+      "rva": 110792,
+      "size": 182,
+      "sha256": "399c176f836af5638184b150017a7f1a4dd1f324478bc7d2ae270fdd0dcac830"
+    }
+  },
+  "layout": {
+    "model": 624,
+    "manager": 584,
+    "managerVectorBegin": 0,
+    "managerVectorEnd": 8,
+    "window": 80,
+    "id": 88,
+    "guid": 92,
+    "callback": 152,
+    "version": 148
+  },
+  "capabilities": {
+    "currentRegistration": true,
+    "callback": true,
+    "version": true,
+    "applicationHidden": false,
+    "tip": false,
+    "icon": false,
+    "nativeInvocation": false
+  },
+  "evidence": {
+    "pdb": {
+      "guid": "dab69a79-fee0-33f0-d81e-023fbf172b51",
+      "infoAge": 3,
+      "dbiAge": 1,
+      "sha256": "20069f339a72cc1857f57e9cf612f8431e9742e018944ee020889eb38dead652",
+      "bytes": 7606272,
+      "source": "https://msdl.microsoft.com/download/symbols/Taskbar.pdb/DAB69A79FEE033F0D81E023FBF172B511/Taskbar.pdb"
+    },
+    "reviewedImageOnly": true,
+    "processMemoryRead": false,
+    "comActivated": false,
+    "desktopTested": false,
+    "unknown": [
+      "applicationHidden",
+      "tipHeaderLength",
+      "HICON",
+      "collectionVectorInterfaceOffset",
+      "runtimeSnapshotCompleteness",
+      "nativeInvocationThreadAndLifetime"
+    ]
+  }
+}

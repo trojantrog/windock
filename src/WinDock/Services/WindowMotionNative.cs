@@ -23,7 +23,7 @@ static class WindowMotionNative
     [DllImport("user32.dll")]
     static extern bool GetWindowPlacement(nint window, ref Placement placement);
 
-    sealed record StateRequest(int Pid, bool Minimized, bool Maximized, long Until);
+    sealed record StateRequest(int Pid, uint ThreadId, bool Minimized, bool Maximized, long Until);
     static readonly object stateLock = new();
     static readonly Dictionary<nint, StateRequest> stateRequests = [];
 
@@ -143,30 +143,53 @@ static class WindowMotionNative
         return rect.Width > 0 && rect.Height > 0 ? new Rect(rect.Left, rect.Top, rect.Width, rect.Height) : Rect.Empty;
     }
 
-    internal static void SetState(nint window, bool minimized)
+    // True means a new or already pending request was accepted by Windows;
+    // it does not confirm that the application processed it or drew a frame.
+    internal static bool SetState(nint window, bool minimized)
     {
         lock (stateLock)
         {
-            if (!Native.IsWindow(window) || Native.GetWindowThreadProcessId(window, out var pid) == 0) return;
+            if (!Native.IsWindow(window)) return false;
+            var thread = Native.GetWindowThreadProcessId(window, out var pid);
+            if (thread == 0) return false;
             var now = Environment.TickCount64;
             foreach (var key in stateRequests.Where(pair => pair.Value.Until < now).Select(pair => pair.Key).ToArray()) stateRequests.Remove(key);
             stateRequests.TryGetValue(window, out var pending);
-            if (pending is not null && pending.Pid != pid) { stateRequests.Remove(window); pending = null; }
+            if (pending is not null && (pending.Pid != pid || pending.ThreadId != thread)) { stateRequests.Remove(window); pending = null; }
             var iconic = Native.IsIconic(window);
             if (pending is not null && iconic == pending.Minimized)
             {
                 stateRequests.Remove(window);
                 pending = null;
             }
-            if (pending?.Minimized == minimized) return;
-            if (pending is null && iconic == minimized) return;
+            if (pending?.Minimized == minimized) return true;
+            if (pending is null && iconic == minimized) return false;
             var placement = new Placement { Length = Marshal.SizeOf<Placement>() };
             var hasPlacement = GetWindowPlacement(window, ref placement);
             var maximize = IsZoomed(window) || (hasPlacement && (placement.ShowCommand == 3 || (placement.Flags & 2) != 0))
                 || (pending is { Minimized: true, Maximized: true });
             var command = minimized ? Native.SW_MINIMIZE : maximize ? 3 : Native.SW_RESTORE;
-            if (Native.ShowWindowAsync(window, command))
-                stateRequests[window] = new(pid, minimized, maximize, now + 1500);
+            if (!Native.ShowWindowAsync(window, command)) return false;
+            stateRequests[window] = new(pid, thread, minimized, maximize, now + 1500);
+            return true;
+        }
+    }
+
+    internal static bool TryGetPendingState(nint window, out bool minimized)
+    {
+        minimized = false;
+        lock (stateLock)
+        {
+            if (!stateRequests.TryGetValue(window, out var pending)) return false;
+            if (pending.Until <= Environment.TickCount64 || !Native.IsWindow(window)
+                || Native.GetWindowThreadProcessId(window, out var pid) != pending.ThreadId || pid != pending.Pid
+                || Native.IsIconic(window) == pending.Minimized)
+            {
+                stateRequests.Remove(window);
+                return false;
+            }
+            minimized = pending.Minimized;
+            return true;
         }
     }
 

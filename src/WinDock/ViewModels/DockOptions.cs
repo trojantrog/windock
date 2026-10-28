@@ -61,11 +61,12 @@ public sealed class DockOptions : ObservableObject
     public bool WindowOpenAnimation { get => D.WindowOpenAnimation; set => Set(() => D.WindowOpenAnimation = value); }
     public int WindowOpenDuration { get => D.WindowOpenDuration; set => Set(() => D.WindowOpenDuration = value); }
     public bool NativeWindowAnimations { get => D.NativeWindowAnimations; set => Set(() => D.NativeWindowAnimations = value); }
-    public bool WindowCloseAnimation { get => D.WindowCloseAnimation; set => Set(() => D.WindowCloseAnimation = value); }
+    public bool WindowCloseAnimation { get => D.WindowCloseAnimation; set => Set(() => D.WindowCloseAnimation = value, nameof(WindowCloseParametersEnabled)); }
     public int WindowCloseDuration { get => D.WindowCloseDuration; set => Set(() => D.WindowCloseDuration = value); }
     public bool WindowRestoreAnimation { get => D.WindowRestoreAnimation; set => Set(() => D.WindowRestoreAnimation = value); }
     public int WindowRestoreDuration { get => D.WindowRestoreDuration; set => Set(() => D.WindowRestoreDuration = value); }
-    public bool WindowHideAnimation { get => D.WindowHideAnimation; set => Set(() => D.WindowHideAnimation = value); }
+    public bool WindowHideAnimation { get => D.WindowHideAnimation; set => Set(() => D.WindowHideAnimation = value, nameof(WindowCloseParametersEnabled)); }
+    public bool WindowCloseParametersEnabled => WindowCloseAnimation || WindowHideAnimation;
     public double WindowCloseDistance { get => D.WindowCloseDistance; set => Set(() => D.WindowCloseDistance = Math.Round(value)); }
     public double WindowCloseScale { get => D.WindowCloseScale; set => Set(() => D.WindowCloseScale = Math.Round(value, 2)); }
     public double WindowFadeHold { get => D.WindowFadeHold; set => Set(() => D.WindowFadeHold = Math.Round(value, 2)); }
@@ -74,6 +75,8 @@ public sealed class DockOptions : ObservableObject
     public string WindowAnimationStatus { get => windowAnimationStatus; set => SetProperty(ref windowAnimationStatus, value); }
     bool windowAnimationLoginEnabled;
     public bool WindowAnimationLoginEnabled { get => windowAnimationLoginEnabled; set => SetProperty(ref windowAnimationLoginEnabled, value); }
+    bool windowAnimationControlsEnabled;
+    public bool WindowAnimationControlsEnabled { get => windowAnimationControlsEnabled; set => SetProperty(ref windowAnimationControlsEnabled, value); }
     public bool SearchEnabled { get => D.SearchEnabled; set => Set(() => D.SearchEnabled = value); }
     public bool OrganizerEnabled { get => D.OrganizerEnabled; set => Set(() => D.OrganizerEnabled = value); }
     public bool SystemTrayEnabled { get => D.SystemTrayEnabled; set => Set(() => D.SystemTrayEnabled = value); }

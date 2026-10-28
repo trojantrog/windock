@@ -10,6 +10,7 @@ internal static class TrayActionRouter
 {
     internal static bool CanAttempt(SystemTrayItem item) => !item.CanInvoke && !item.Hidden
         && item.Window != 0 && item.ProcessId != 0 && item.ProcessStarted > 0 && (!item.CallbackObserved || !item.VersionObserved)
+        && (item.Guid == Guid.Empty || item.RegistrationObserved || item.NativeModelObserved)
         && (!item.CallbackObserved || item.Callback is >= 0x400 and <= 0xFFFF);
 
     internal static async Task<NativeTrayActionResult> ActivateAsync(SystemTrayService service, SystemTrayItem item,
@@ -22,17 +23,21 @@ internal static class TrayActionRouter
         // A new explicit intent cancels the earlier unresolved icon even when
         // its provider is still occupying the worker and this request is Busy.
         interaction.CancelPendingNativeAction();
-        if (!service.Ready || !CanAttempt(item) || !service.Icons.Contains(item) || cancellation.IsCancellationRequested
+        if (!service.Ready || !service.ProtocolCurrent || !CanAttempt(item) || !service.Icons.Contains(item) || cancellation.IsCancellationRequested
             || !anchor.IsVisible || !window.IsVisible)
             return NativeTrayActionResult.Unavailable;
-        var identity = new NativeTrayIdentity(item.Window, item.ProcessId, item.Id, item.Guid, item.ProcessStarted);
+        var identity = new NativeTrayIdentity(item.Window, item.ProcessId, item.Id, item.Guid, item.ProcessStarted, item.ThreadId, item.OwnerClass);
         var generation = service.RegistrationGeneration;
+        var protocolSequence = service.ProtocolSequence;
         NativeTrayOperation? operation = null;
 
-        bool Current() => !cancellation.IsCancellationRequested && service.Ready && service.RegistrationGeneration == generation
+        bool ProtocolCurrent() => service.ProtocolCurrent && service.ProtocolSequence == protocolSequence && service.RegistrationGeneration == generation;
+
+        bool Current() => !cancellation.IsCancellationRequested && service.Ready && ProtocolCurrent()
             && service.Icons.Contains(item) && CanAttempt(item) && anchor.IsVisible && window.IsVisible
             && Window.GetWindow(anchor) == window && identity.Window == item.Window && identity.ProcessId == item.ProcessId
-            && identity.Id == item.Id && identity.Guid == item.Guid && identity.ProcessStarted == item.ProcessStarted;
+            && identity.Id == item.Id && identity.Guid == item.Guid && identity.ProcessStarted == item.ProcessStarted
+            && identity.ThreadId == item.ThreadId && identity.OwnerClass == item.OwnerClass;
 
         void Changed(object? sender, EventArgs args)
         {
@@ -46,7 +51,7 @@ internal static class TrayActionRouter
         {
             var queued = NativeTrayAction.TryStart(identity, surface => anchor.Dispatcher.Invoke(() =>
                 Current() && operation is not null && interaction.PrepareNativeTrayAction(operation, surface),
-                DispatcherPriority.Send, cancellation, TimeSpan.FromMilliseconds(400)), cancellation, started =>
+                DispatcherPriority.Send, cancellation, TimeSpan.FromMilliseconds(400)), ProtocolCurrent, cancellation, started =>
             {
                 operation = started;
                 interaction.BeginNativeTrayAction(item, anchor, started);
