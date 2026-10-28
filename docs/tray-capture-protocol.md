@@ -2,6 +2,14 @@
 
 当前本地传输版本为 7。WinDock 在选定的 Explorer 托盘线程安装 `WH_CALLWNDPROC` 和 `WH_CALLWNDPROCRET`，保持原窗口过程和原钩子链。组件与宿主必须使用相同协议版本。v7 使用独立文件 `WinDock.TrayHook.v7.x64.dll`，升级时不覆盖仍可能被 Explorer 持有的旧版 DLL。
 
+## 钩子的线程寿命
+
+微软规定，创建线程退出时，其创建的 hook 对象会被销毁，参见 [Object Interface](https://learn.microsoft.com/en-us/windows/win32/sysinfo/object-interface) 和 [Terminating a Thread](https://learn.microsoft.com/en-us/windows/win32/procthread/terminating-a-thread)。因此不能在普通线程池异步续体中安装长驻钩子；一次 `await` 之后线程可能回到池中，随后因空闲退出，即使 WinDock 进程和原生管道线程仍存在。
+
+preview.24 将每个连接的钩子交给一条专用线程，从安装、消息循环一直保持到卸载结束。连接读取完成和资源清理后才结束该线程，后续连接再创建自己的线程。原生 v7 协议和 DLL 不变，诊断另记录钩子所属线程及运行状态。异步方法外套 `TaskCreationOptions.LongRunning` 不能保证续体仍在原线程上，不能代替这一寿命约束。
+
+preview.23 的正常启动日志曾在收到 318 个包后停止收包，而宿主请求、模型读取和诊断心跳仍继续。原生管道线程只检查宿主进程存活，并不知道安装线程已退出；这一代码缺陷可以解释该表现，但当时没有记录安装线程 ID，不能声称已观测到该次线程退出。修复后的实际持续运行情况另行记录，不把发送请求成功当作钩子已处理请求。
+
 ## 按处理结果更新
 
 前置钩子复制有效字段和 `HICON`，返回钩子只读取保存的副本及 `CWPRETSTRUCT.lResult`，不再解引用原消息的数据指针。微软规定 [`WM_COPYDATA` 数据只在消息处理期间有效](https://learn.microsoft.com/en-us/windows/win32/dataxchg/wm-copydata)，[`CWPRETSTRUCT.lResult` 是窗口过程的返回值](https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-cwpretstruct)。

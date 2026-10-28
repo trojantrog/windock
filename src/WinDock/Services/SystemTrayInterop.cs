@@ -4,6 +4,7 @@ using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Security.Principal;
 using System.Text;
+using System.Windows.Threading;
 using Microsoft.Win32.SafeHandles;
 
 namespace WinDock.Services;
@@ -20,6 +21,7 @@ internal static class SystemTrayInterop
     [DllImport("kernel32.dll")] [return: MarshalAs(UnmanagedType.Bool)] internal static extern bool GetNamedPipeClientProcessId(SafePipeHandle pipe, out uint processId);
     [DllImport("kernel32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] internal static extern bool GetProcessTimes(nint process, out long created, out long exited, out long kernel, out long user);
     [DllImport("kernel32.dll")] internal static extern uint WaitForSingleObject(nint handle, uint milliseconds);
+    [DllImport("kernel32.dll")] internal static extern uint GetCurrentThreadId();
     [UnmanagedFunctionPointer(CallingConvention.Winapi)] internal delegate uint ProtocolVersion();
 
     internal static NamedPipeServerStream CreateTrayPipe(string name)
@@ -79,12 +81,18 @@ internal static class SystemTrayInterop
 internal sealed class TrayHookSession : IDisposable
 {
     const uint Magic = 0x52544457, Version = 7;
+    static readonly SemaphoreSlim OwnerSlot = new(1, 1);
+    readonly CancellationTokenSource cancellation;
     readonly CancellationToken token;
     readonly uint nonce = BitConverter.ToUInt32(RandomNumberGenerator.GetBytes(4)) | 1;
     NamedPipeServerStream? pipe;
     nint module, hook, returnHook, target, explorerHandle;
     long lastHeaderAt, lastPacketAt, lastSourceSequence, completePackets;
     int lastPacketKind, imageSendError;
+    int readStarted, readFinished, disposeRequested, cancellationDisposed;
+    uint ownerThreadId;
+    volatile bool ownerRunning, ownerIsThreadPool;
+    volatile string ownerState = "not started";
     volatile string readPhase = "not started";
     volatile bool connected;
     string imageSendResult = "not attempted";
@@ -94,10 +102,94 @@ internal sealed class TrayHookSession : IDisposable
     internal long ExplorerStarted { get; private set; }
     internal uint Nonce => nonce;
     internal bool IsConnected => connected && !token.IsCancellationRequested;
-    public TrayHookSession(CancellationToken token) => this.token = token;
+    public TrayHookSession(CancellationToken token)
+    {
+        cancellation = CancellationTokenSource.CreateLinkedTokenSource(token);
+        this.token = cancellation.Token;
+    }
 
     public async Task ReadAsync(Action<uint, ulong, byte[]> receive, Action connected)
     {
+        if (Interlocked.CompareExchange(ref readStarted, 1, 0) != 0) throw new InvalidOperationException();
+        var slotTaken = false;
+        Thread? owner = null;
+        var ownerStarted = false;
+        try
+        {
+            token.ThrowIfCancellationRequested();
+            ownerState = "waiting owner";
+            // Stop followed immediately by Start cannot accumulate hook owners.
+            await OwnerSlot.WaitAsync(token).ConfigureAwait(false);
+            slotTaken = true;
+            token.ThrowIfCancellationRequested();
+            var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            owner = new Thread(() => RunOwner(receive, connected, completion))
+            { IsBackground = true, Name = "WinDock tray hook" };
+            owner.SetApartmentState(ApartmentState.MTA);
+            owner.Start(); ownerStarted = true;
+            await completion.Task.ConfigureAwait(false);
+        }
+        finally
+        {
+            // Completion is published after cleanup and Dispatcher.Run exits.
+            // Join also covers the final thread return before the slot is reused.
+            if (ownerStarted) owner!.Join();
+            if (slotTaken) OwnerSlot.Release();
+            Volatile.Write(ref readFinished, 1);
+            if (!ownerStarted) ownerState = "stopped";
+            if (Volatile.Read(ref disposeRequested) != 0) DisposeCancellation();
+        }
+    }
+
+    void RunOwner(Action<uint, ulong, byte[]> receive, Action connected, TaskCompletionSource<bool> completion)
+    {
+        Exception? failure = null;
+        var coreFinished = false;
+        ownerThreadId = SystemTrayInterop.GetCurrentThreadId();
+        ownerIsThreadPool = Thread.CurrentThread.IsThreadPoolThread;
+        ownerRunning = true; ownerState = "starting";
+        try
+        {
+            var loop = Dispatcher.CurrentDispatcher;
+            SynchronizationContext.SetSynchronizationContext(new DispatcherSynchronizationContext(loop));
+            _ = loop.BeginInvoke(DispatcherPriority.Send, new Action(async () =>
+            {
+                try
+                {
+                    ownerState = "running";
+                    // Every await in the core captures this owner dispatcher.
+                    // ThreadStart itself remains inside the message loop.
+                    await ReadCoreAsync(receive, connected);
+                }
+                catch (Exception error) { failure = error; }
+                finally
+                {
+                    coreFinished = true; this.connected = false; ownerState = "stopping";
+                    if (!loop.HasShutdownStarted) loop.BeginInvokeShutdown(DispatcherPriority.Send);
+                }
+            }));
+            Dispatcher.Run();
+            if (!coreFinished) failure ??= new IOException(Loc.T("systemTrayHookFailed"));
+        }
+        catch (Exception error) { failure ??= error; }
+        finally
+        {
+            this.connected = false;
+            try { cancellation.Cancel(); }
+            catch (Exception error) { failure ??= error; }
+            try { ReleaseOwnerResources(); }
+            catch (Exception error) { failure ??= error; }
+            ownerRunning = false;
+            ownerState = failure is null or OperationCanceledException ? "stopped" : "failed";
+            if (failure is OperationCanceledException && token.IsCancellationRequested) completion.TrySetCanceled(token);
+            else if (failure is not null) completion.TrySetException(failure);
+            else completion.TrySetResult(true);
+        }
+    }
+
+    async Task ReadCoreAsync(Action<uint, ulong, byte[]> receive, Action connected)
+    {
+        token.ThrowIfCancellationRequested();
         readPhase = "opening";
         if (RuntimeInformation.ProcessArchitecture != Architecture.X64 || RuntimeInformation.OSArchitecture != Architecture.X64 ||
             !OperatingSystem.IsWindowsVersionAtLeast(10, 0, 19041)) throw new NotSupportedException(Loc.T("systemTrayUnsupported"));
@@ -109,6 +201,7 @@ internal sealed class TrayHookSession : IDisposable
             var actual = Convert.ToHexString(await SHA256.HashDataAsync(stream, token));
             if (!string.Equals(actual, expected, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException(Loc.T("systemTrayHashFailed"));
         }
+        token.ThrowIfCancellationRequested();
         var explorer = SystemTrayInterop.ExplorerTray();
         if (explorer.Window == 0 || explorer.Thread == 0) throw new IOException(Loc.T("systemTrayExplorerMissing"));
         explorerHandle = Native.OpenProcess(0x101000, false, (int)explorer.Process);
@@ -128,6 +221,7 @@ internal sealed class TrayHookSession : IDisposable
         module = NativeLibrary.Load(path);
         var protocol = Marshal.GetDelegateForFunctionPointer<SystemTrayInterop.ProtocolVersion>(NativeLibrary.GetExport(module, "WinDockTrayProtocol"));
         if (protocol() != Version) throw new InvalidDataException(Loc.T("systemTrayVersionFailed"));
+        token.ThrowIfCancellationRequested();
         returnHook = SystemTrayInterop.SetWindowsHookExW(12, NativeLibrary.GetExport(module, "WinDockTrayReturnHook"), module, explorer.Thread);
         if (returnHook == 0) throw new IOException(Loc.T("systemTrayHookFailed"));
         hook = SystemTrayInterop.SetWindowsHookExW(4, NativeLibrary.GetExport(module, "WinDockTrayHook"), module, explorer.Thread);
@@ -196,6 +290,8 @@ internal sealed class TrayHookSession : IDisposable
     internal object Observe() => new
     {
         readPhase, connected = IsConnected,
+        hookOwnerThreadId = Volatile.Read(ref ownerThreadId), hookOwnerState = ownerState,
+        hookOwnerRunning = ownerRunning, hookOwnerIsThreadPool = ownerIsThreadPool,
         lastHeaderAt = TrayDiagnostics.Time(Interlocked.Read(ref lastHeaderAt)),
         lastPacketAt = TrayDiagnostics.Time(Interlocked.Read(ref lastPacketAt)),
         lastKind = Volatile.Read(ref lastPacketKind),
@@ -207,7 +303,22 @@ internal sealed class TrayHookSession : IDisposable
 
     public void Dispose()
     {
+        if (Interlocked.Exchange(ref disposeRequested, 1) != 0) return;
         connected = false;
+        // Cancellation resumes the read on its owner dispatcher. Only that
+        // thread may unhook or release resources that the core is still using.
+        try { cancellation.Cancel(); }
+        catch (ObjectDisposedException) { }
+        if (Volatile.Read(ref readStarted) == 0 || Volatile.Read(ref readFinished) != 0) DisposeCancellation();
+    }
+
+    void DisposeCancellation()
+    {
+        if (Interlocked.Exchange(ref cancellationDisposed, 1) == 0) cancellation.Dispose();
+    }
+
+    void ReleaseOwnerResources()
+    {
         // Remove only our own hook. Never mutate Explorer's window procedure,
         // taskbar visibility, registry, or another application's hook chain.
         if (target != 0 && hook != 0)
