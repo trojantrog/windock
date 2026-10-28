@@ -71,6 +71,171 @@
       "rva": 110792,
       "size": 182,
       "sha256": "399c176f836af5638184b150017a7f1a4dd1f324478bc7d2ae270fdd0dcac830"
+    },
+    "managerConstructor": {
+      "rva": 1250068,
+      "size": 378,
+      "sha256": "ddc6c65fc094642e22dd0a318f1903d26cfb5ff827a7d0e1224f76d51d373c6f"
+    },
+    "promoted": {
+      "rva": 758956,
+      "size": 33,
+      "sha256": "6b5ca24a18c71c1deb8db2b109ad4861af50328bd8252f6e650004ae94240ee9"
+    },
+    "overflow": {
+      "rva": 568180,
+      "size": 33,
+      "sha256": "d5920fe03f0ab1c584e3664d59bd858c4f5a4bf2923b00ec0844e1fc1a8bed02"
+    },
+    "isVisible": {
+      "rva": 324000,
+      "size": 346,
+      "sha256": "2c9f510f05d1280fce7b2c4fedfac76183a5624c50740ca80fb1e2708829eca1"
+    },
+    "addVisible": {
+      "rva": 324352,
+      "size": 183,
+      "sha256": "518fc3eb648d8e4aaad1a067cd479c9d5f67a4449a3e182126bb1c6e89a20b26"
+    },
+    "removeVisible": {
+      "rva": 320728,
+      "size": 346,
+      "sha256": "00d90bece8a616e1a0eee0831c1199f4e4770982a615e5ddb238d2deaeee0e51"
+    },
+    "setTooltip": {
+      "rva": 114476,
+      "size": 277,
+      "sha256": "cd29be07b8e12b9ce0d4b16c58413041786b9260266888220d8023afc8d80b4b"
+    },
+    "stringConstructor": {
+      "rva": 115436,
+      "size": 143,
+      "sha256": "caaaaa4aa6762f2cf76d57831867ddde0e28bff2694572b9597d2818c64521a3"
+    },
+    "precreateString": {
+      "rva": 116348,
+      "size": 191,
+      "sha256": "5cb2e6a24ec59e9f72951cd0c364ba572c05b29f923be6c269c5faf46f1ea6c5"
+    },
+    "createString": {
+      "rva": 116068,
+      "size": 113,
+      "sha256": "465b6e2f66c82bc5bf2b2bc7f9106fe12a16ccb4f523dbd796e14eb09bda83b7"
+    },
+    "attachString": {
+      "rva": 116620,
+      "size": 43,
+      "sha256": "c2030390505887670fb980564905aad0db0c8b6852747ce6bdcab8f159044f36"
+    },
+    "stringBuffer": {
+      "rva": 116548,
+      "size": 28,
+      "sha256": "db1e72569940e0d57e51cdb6cf1d6a7c6e3edf324f511c8fb634250e5e23d29d"
+    },
+    "appOwnsToolTips": {
+      "rva": 430628,
+      "size": 43,
+      "sha256": "d947daaa6d48300d6a429203ebbc611efcbaf81ab75eb03c811beb9447fb1c40"
+    },
+    "observableFactory": {
+      "rva": 1248844,
+      "size": 90,
+      "sha256": "3bd36e2851f41fa863be7519dda8e1587ac9c25d74228c55942e2dea99e38b72"
+    },
+    "vectorConstructor": {
+      "rva": 1248972,
+      "size": 172,
+      "sha256": "f6534271161178460557d06a05ab38398e3efeb3e34c8666ec1fbbedae6b7857"
+    },
+    "observableProducer": {
+      "rva": 1249852,
+      "size": 17,
+      "sha256": "604ccfb49139075b20a86006014102bb8f1d7136912bca39c40b4bd5d6e631d2"
+    },
+    "observableProducerBase": {
+      "rva": 1249612,
+      "size": 17,
+      "sha256": "fd25e8eb768b19070cfe93bd620ef11198689a520889e51d47d010d33a4b0630"
+    },
+    "observableProduce": {
+      "rva": 499168,
+      "size": 27,
+      "sha256": "9dc7b65d3328760982bb0afe77013de6d9bbaa290c32b3e110b9640d2486853e"
+    },
+    "vectorProducer": {
+      "rva": 1249900,
+      "size": 17,
+      "sha256": "604ccfb49139075b20a86006014102bb8f1d7136912bca39c40b4bd5d6e631d2"
+    },
+    "vectorProducerBase": {
+      "rva": 1249660,
+      "size": 17,
+      "sha256": "bd76eb61c9d9fe33f03909f68ddb77f93b288755c5f9032f1a02a40b1aa939a3"
+    },
+    "vectorProduce": {
+      "rva": 1249260,
+      "size": 27,
+      "sha256": "c7af3c7ff12e3f9f2990d4daed69f7f872e80b511486c79033c4f9e0c0281130"
+    },
+    "typedVectorSize": {
+      "rva": 438384,
+      "size": 73,
+      "sha256": "9d519bc079ecbe58298f6f4fad0cb0197fb4edd4e7bd9eb8a3c9f537109e29c9"
+    },
+    "typedVectorAt": {
+      "rva": 423120,
+      "size": 71,
+      "sha256": "599bce4dd0434f9e08bba172c23a1f1dd0a6527b078a6f239ddcc3da97b585a4"
+    },
+    "vectorBaseAt": {
+      "rva": 423200,
+      "size": 146,
+      "sha256": "9a41d802f520b5f51b854b1abbc88e170b63eb2c8a1b73bfc707f2ff20f24c09"
+    },
+    "consumeVectorSize": {
+      "rva": 323800,
+      "size": 193,
+      "sha256": "38356b99ef68e58f8892f92614a1709d6ef2fb1e42d98918febe65666bff65ea"
+    },
+    "consumeVectorAt": {
+      "rva": 111508,
+      "size": 226,
+      "sha256": "da4e75055de59157e3c1037bd05bd6c33d3ef74ebd9f6519862a57661db7cb63"
+    },
+    "consumeVectorInsert": {
+      "rva": 324544,
+      "size": 199,
+      "sha256": "132b074609e150a1a4f520827ec1b00dc913b5d7a0cb0d47de4054df84cc40a9"
+    },
+    "findVisibleIdentity": {
+      "rva": 110544,
+      "size": 242,
+      "sha256": "ac40a410fbc4095268dd3521fd1c603b651868b781482c024bb1d03a1efb57aa"
+    },
+    "getTip": {
+      "rva": 115184,
+      "size": 118,
+      "sha256": "6aa691c0692122ee7b0efb12add1177355f060611dc08a4768a6fad83e654f8c"
+    },
+    "getAppOwnsToolTips": {
+      "rva": 430576,
+      "size": 43,
+      "sha256": "6c64722c0873bea9b82f114dda62ca109c72ad19d953ac2f1938e5abea83443c"
+    },
+    "observableVtable": {
+      "rva": 1859960,
+      "size": 64,
+      "sha256": "c9bb4375b150c26cf149ccf24a8603fec9b3c522e5c3a37f01c7e81564b1ee0b"
+    },
+    "vectorVtable": {
+      "rva": 1899752,
+      "size": 144,
+      "sha256": "becdb923f616c919a702504147ee9c69069e6e2d366eb5ea3d0e4269bb1ef1a6"
+    },
+    "itemInterfaceVtable": {
+      "rva": 1867736,
+      "size": 120,
+      "sha256": "c6f1d2e5d8d6e4fdc97fdefc70e93d3d1808d2de2b96cdf3cf03145754edfd48"
     }
   },
   "layout": {
@@ -84,12 +249,72 @@
     "callback": 152,
     "version": 148
   },
+  "metadata": {
+    "placement": {
+      "managerPromoted": 24,
+      "managerOverflow": 32,
+      "observableInterfaceOffset": 16,
+      "vectorInterfaceOffset": 24,
+      "vectorBegin": 112,
+      "vectorEnd": 120,
+      "vectorCapacity": 128,
+      "itemInterfaceOffset": 16,
+      "requiredFunctions": [
+        "managerConstructor",
+        "promoted",
+        "overflow",
+        "observableFactory",
+        "vectorConstructor",
+        "observableProducer",
+        "observableProducerBase",
+        "observableProduce",
+        "vectorProducer",
+        "vectorProducerBase",
+        "vectorProduce",
+        "typedVectorSize",
+        "typedVectorAt",
+        "vectorBaseAt",
+        "consumeVectorSize",
+        "consumeVectorAt",
+        "consumeVectorInsert",
+        "findVisibleIdentity",
+        "addVisible",
+        "removeVisible",
+        "isVisible"
+      ]
+    },
+    "tip": {
+      "field": 160,
+      "headerLength": 4,
+      "headerBuffer": 16,
+      "requiredFunctions": [
+        "setTooltip",
+        "getTip",
+        "stringConstructor",
+        "precreateString",
+        "createString",
+        "attachString",
+        "stringBuffer"
+      ]
+    },
+    "tooltipMode": {
+      "field": 224,
+      "minimumVersion": 4,
+      "requiredFunctions": [
+        "appOwnsToolTips",
+        "getAppOwnsToolTips",
+        "modify"
+      ]
+    }
+  },
   "capabilities": {
     "currentRegistration": true,
     "callback": true,
     "version": true,
     "applicationHidden": false,
-    "tip": false,
+    "placement": true,
+    "tip": true,
+    "tooltipMode": true,
     "icon": false,
     "nativeInvocation": false
   },
@@ -108,9 +333,7 @@
     "desktopTested": false,
     "unknown": [
       "applicationHidden",
-      "tipHeaderLength",
-      "HICON",
-      "collectionVectorInterfaceOffset",
+      "currentIconPixels",
       "runtimeSnapshotCompleteness",
       "nativeInvocationThreadAndLifetime"
     ]

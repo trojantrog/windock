@@ -21,7 +21,8 @@ public sealed class SystemTrayIconButton : Border
     Point pressedAt;
     MouseButton? pressed;
     int clicks;
-    bool popupOpen, dragging, nativePress;
+    bool popupOpen, dragging, nativePress, appOwnsHover;
+    TrayEndpoint? popupEndpoint;
     CancellationTokenSource? nativeActivation;
     long moveAt;
     public event Action<SystemTrayItem>? PinRequested;
@@ -92,12 +93,14 @@ public sealed class SystemTrayIconButton : Border
         hover.Tick += (_, _) =>
         {
             hover.Stop();
-            if (!IsMouseOver || editing || !IsEnabled || pressed is not null || Interaction?.IsBusy == true) return;
+            if (!IsMouseOver || editing || !IsEnabled || item.Hidden || pressed is not null || Interaction?.IsBusy == true) return;
             Send(0x2A1); // WM_MOUSEHOVER
-            if (item.Version >= 4 && item.CanInvoke && !item.ShowStandardTip)
+            if (AppOwnsHover)
             {
                 Interaction?.BeginTrayHover(item);
-                popupOpen = Send(0x406);
+                var endpoint = item.Endpoint;
+                popupOpen = Send(0x406, expected: endpoint);
+                popupEndpoint = popupOpen ? endpoint : null;
                 if (!popupOpen) Interaction?.CompleteTrayHover(item);
             }
         };
@@ -129,6 +132,7 @@ public sealed class SystemTrayIconButton : Border
             if (!editing && !nativePress) Interaction?.CompleteTrayMenu(true);
             nativePress = false;
         };
+        appOwnsHover = AppOwnsHover;
     }
 
     static void AddMenu(ContextMenu menu, string title, Action action, bool enabled)
@@ -137,8 +141,19 @@ public sealed class SystemTrayIconButton : Border
         item.Click += (_, _) => action(); menu.Items.Add(item);
     }
 
-    void ItemChanged(object? sender, PropertyChangedEventArgs e) =>
-        Cursor = item.CanInvoke || TrayActionRouter.CanAttempt(item) ? Cursors.Hand : Cursors.Arrow;
+    bool AppOwnsHover => !item.Hidden && item.CanInvoke && item.ProcessStarted > 0 && item.Version >= 4 && !item.ShowStandardTip;
+
+    void ItemChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        Cursor = !item.Hidden && (item.CanInvoke || TrayActionRouter.CanAttempt(item)) ? Cursors.Hand : Cursors.Arrow;
+        var ownsHover = AppOwnsHover;
+        if (!ownsHover && popupOpen) EndHover();
+        if (ownsHover == appOwnsHover) return;
+        appOwnsHover = ownsHover;
+        if (ownsHover && IsMouseOver && IsEnabled && pressed is null && Interaction?.IsBusy != true)
+        { hover.Stop(); hover.Start(); }
+        else if (!ownsHover) hover.Stop();
+    }
 
     void OnDown(object sender, MouseButtonEventArgs e)
     {
@@ -277,11 +292,13 @@ public sealed class SystemTrayIconButton : Border
         hover.Stop();
         if (!popupOpen) return;
         popupOpen = false;
-        Send(0x407);
+        var endpoint = popupEndpoint;
+        popupEndpoint = null;
+        if (endpoint is { } original) Send(0x407, expected: original);
         Interaction?.CompleteTrayHover(item);
     }
 
-    bool Send(uint message, bool keyboard = false)
+    bool Send(uint message, bool keyboard = false, TrayEndpoint? expected = null)
     {
         Point point;
         if (keyboard) point = PointToScreen(new Point(0, 0));
@@ -290,6 +307,6 @@ public sealed class SystemTrayIconButton : Border
             if (!Native.GetCursorPos(out var cursor)) return false;
             point = new Point(cursor.X, cursor.Y);
         }
-        return service.Invoke(item, message, point);
+        return expected is { } endpoint ? service.InvokeEndpoint(item, message, point, endpoint) : service.Invoke(item, message, point);
     }
 }

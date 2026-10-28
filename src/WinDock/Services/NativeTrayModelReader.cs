@@ -16,16 +16,30 @@ namespace WinDock.Services;
 // rejects the read; it must not turn an unverified offset into a callback.
 internal static class NativeTrayModelReader
 {
+    internal enum Placement { Unknown, Promoted, Overflow, NotVisible }
     internal sealed record Record(nint Window, uint ProcessId, uint ThreadId, uint Id, Guid Guid,
         uint Callback, uint Version, long ProcessStarted, string ProcessPath, string OwnerClass,
-        string? Tip, BitmapSource? Icon, bool? Hidden);
+        string? Tip, BitmapSource? Icon, bool? Hidden, Placement Placement, bool? ShowStandardTip);
+    internal sealed record FilterCounts(int InvalidProtocol, int InvalidWindow, int OwnerAccess, int OwnerIdentity,
+        int OwnerChanged, int PlacementUnavailable, int TipUnavailable, int PlacementEvidenceRejected, int TipEvidenceRejected,
+        int TooltipModeUnavailable, int TooltipModeEvidenceRejected);
+    sealed class FiltersBuilder
+    {
+        internal int InvalidProtocol, InvalidWindow, OwnerAccess, OwnerIdentity, OwnerChanged, PlacementUnavailable, TipUnavailable,
+            PlacementEvidenceRejected, TipEvidenceRejected, TooltipModeUnavailable, TooltipModeEvidenceRejected;
+        internal FilterCounts Snapshot() => new(InvalidProtocol, InvalidWindow, OwnerAccess, OwnerIdentity,
+            OwnerChanged, PlacementUnavailable, TipUnavailable, PlacementEvidenceRejected, TipEvidenceRejected,
+            TooltipModeUnavailable, TooltipModeEvidenceRejected);
+    }
 
     static readonly SemaphoreSlim worker = new(1, 1);
+    static FilterCounts filters = new(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     static volatile string status = "not_started";
     static int candidateCount, validatedCount;
     internal static string Status => status;
     internal static int CandidateCount => Volatile.Read(ref candidateCount);
     internal static int ValidatedCount => Volatile.Read(ref validatedCount);
+    internal static FilterCounts Filters => Volatile.Read(ref filters);
     const int MaximumItems = 512;
     const ulong LastUserAddress = 0x0000800000000000;
 
@@ -37,18 +51,23 @@ internal static class NativeTrayModelReader
         var completion = new TaskCompletionSource<IReadOnlyList<Record>>(TaskCreationOptions.RunContinuationsAsynchronously);
         Interlocked.Exchange(ref candidateCount, 0);
         Interlocked.Exchange(ref validatedCount, 0);
+        Volatile.Write(ref filters, new(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0));
         try
         {
             var thread = new Thread(() =>
             {
-                try { completion.TrySetResult(Read(explorerWindow, explorerProcess, cancellation)); }
-                catch (OperationCanceledException) { status = "cancelled"; completion.TrySetCanceled(cancellation); }
-                catch (ReadRejected e) { status = e.Reason; completion.TrySetResult([]); }
+                var reasons = new FiltersBuilder();
+                void Complete(IReadOnlyList<Record> records)
+                { Volatile.Write(ref filters, reasons.Snapshot()); completion.TrySetResult(records); }
+                try { Complete(Read(explorerWindow, explorerProcess, cancellation, reasons)); }
+                catch (OperationCanceledException)
+                { status = "cancelled"; Volatile.Write(ref filters, reasons.Snapshot()); completion.TrySetCanceled(cancellation); }
+                catch (ReadRejected e) { status = e.Reason; Complete([]); }
                 catch (Exception e) when (e is IOException or Win32Exception or UnauthorizedAccessException
                     or InvalidOperationException or ArgumentException or NotSupportedException or JsonException
                     or BadImageFormatException or System.Security.SecurityException or OverflowException or FormatException)
-                { status = "unavailable:" + e.GetType().Name; completion.TrySetResult([]); }
-                finally { worker.Release(); }
+                { status = "unavailable:" + e.GetType().Name; Complete([]); }
+                finally { Volatile.Write(ref filters, reasons.Snapshot()); worker.Release(); }
             }) { IsBackground = true, Name = "WinDock current tray inventory" };
             thread.SetApartmentState(ApartmentState.MTA);
             thread.Start();
@@ -59,7 +78,7 @@ internal static class NativeTrayModelReader
         return await completion.Task.WaitAsync(cancellation).ConfigureAwait(false);
     }
 
-    static IReadOnlyList<Record> Read(nint shellWindow, uint shellProcess, CancellationToken cancellation)
+    static IReadOnlyList<Record> Read(nint shellWindow, uint shellProcess, CancellationToken cancellation, FiltersBuilder reasons)
     {
         if (!Environment.Is64BitProcess || RuntimeInformation.ProcessArchitecture != Architecture.X64)
             throw new ReadRejected("architecture_unsupported");
@@ -77,7 +96,7 @@ internal static class NativeTrayModelReader
         var profile = FindProfile(image);
         image.ValidateProfile(profile);
         if (module.Size != profile.Image.SizeOfImage) throw new ReadRejected("image_mismatch");
-        image.ValidateLoaded(remote, module.Address, profile);
+        var evidence = image.ValidateLoaded(remote, module.Address, profile, reasons);
 
         var layout = profile.Layout;
         var root = remote.Pointer(module.Address + profile.Symbols["root"].Rva);
@@ -97,6 +116,9 @@ internal static class NativeTrayModelReader
         var windows = new List<(nint Window, uint Process, uint Thread)>();
         var identities = new HashSet<string>(StringComparer.Ordinal);
         var objects = new HashSet<ulong>();
+        var addresses = new List<ulong>();
+        var tips = new List<Observed<string>?>();
+        var tooltipModes = new List<Observed<bool>?>();
         try
         {
             for (var at = 0; at < entries.Length; at += 8)
@@ -113,38 +135,69 @@ internal static class NativeTrayModelReader
                 var version = remote.Value32(Add(address, layout.Version));
                 // A zero callback remains display-only. Unsupported values are
                 // never interpreted as a different, guessed callback protocol.
-                if ((callback != 0 && callback is < 0x400 or > 0xFFFF) || version is not (0 or 3 or 4)) continue;
+                if ((callback != 0 && callback is < 0x400 or > 0xFFFF) || version is not (0 or 3 or 4))
+                { ++reasons.InvalidProtocol; continue; }
                 var thread = Native.GetWindowThreadProcessId(window, out var pid);
-                if (thread == 0 || pid <= 0 || !Native.IsWindow(window)) continue;
+                if (thread == 0 || pid <= 0 || !Native.IsWindow(window)) { ++reasons.InvalidWindow; continue; }
                 if (!owners.TryGetValue((uint)pid, out var owner))
                 {
-                    owner = Owner.TryOpen((uint)pid);
+                    owner = Owner.TryOpen((uint)pid, reasons);
                     if (owner is null) continue;
                     owners.Add((uint)pid, owner);
                 }
-                if (!owner.Alive) throw new ReadRejected("owner_changed");
+                if (!owner.Alive) { ++reasons.OwnerChanged; throw new ReadRejected("owner_changed"); }
                 var windowClass = Native.ClassOf(window);
                 if (windowClass.Length == 0 || Native.GetWindowThreadProcessId(window, out var afterPid) != thread || afterPid != pid)
-                    throw new ReadRejected("owner_changed");
+                { ++reasons.OwnerChanged; throw new ReadRejected("owner_changed"); }
                 var key = guid == Guid.Empty ? $"{window:X}:{id}:{pid}" : guid.ToString("D");
                 if (!identities.Add(key)) throw new ReadRejected("identity_ambiguous");
-                // This container is the registration set, including both tray
-                // placements. Placement does not establish NIS_HIDDEN. The local
-                // image's icon field is a COM image object, not an HICON; neither
-                // it nor an unverified HSTRING layout is dereferenced here.
+                // Placement never establishes NIS_HIDDEN. The current image
+                // stores a COM image object, not an HICON; it remains untouched.
                 results.Add(new(window, (uint)pid, thread, id, guid, callback, version, owner.Started,
-                    owner.Path, windowClass, null, null, null));
+                    owner.Path, windowClass, null, null, null, Placement.Unknown, null));
+                addresses.Add(address);
+                tips.Add(evidence.Tip is not null && profile.Metadata?.Tip is { } tip ? ObserveTip(remote, address, tip) : null);
+                tooltipModes.Add(evidence.TooltipMode is not null && profile.Metadata?.TooltipMode is { } mode
+                    ? ObserveTooltipMode(remote, address, mode) : null);
                 windows.Add((window, (uint)pid, thread));
+            }
+            var placements = evidence.Placement is not null && profile.Metadata?.Placement is { } placement
+                ? ObservePlacement(remote, manager, module.Address, profile, placement, objects) : null;
+            // Optional metadata has its own read set. A torn collection/string
+            // becomes unknown without invalidating otherwise stable identity.
+            // Each successful read set is verified in reverse acquisition order.
+            if (evidence.Placement is not null && !evidence.Placement.Verify())
+            { ++reasons.PlacementEvidenceRejected; placements = null; }
+            if (placements is not null && !placements.Reads.Verify()) placements = null;
+            if (placements is null) reasons.PlacementUnavailable += results.Count;
+            var tipEvidenceCurrent = evidence.Tip is not null && evidence.Tip.Verify();
+            if (evidence.Tip is not null && !tipEvidenceCurrent) ++reasons.TipEvidenceRejected;
+            var modeEvidenceCurrent = evidence.TooltipMode is not null && evidence.TooltipMode.Verify();
+            if (evidence.TooltipMode is not null && !modeEvidenceCurrent) ++reasons.TooltipModeEvidenceRejected;
+            for (var i = tips.Count - 1; i >= 0; --i)
+            {
+                var tip = tipEvidenceCurrent ? tips[i] : null;
+                if (tip is not null && !tip.Reads.Verify()) tip = null;
+                if (tip is null) ++reasons.TipUnavailable;
+                var mode = modeEvidenceCurrent ? tooltipModes[i] : null;
+                if (mode is not null && !mode.Reads.Verify()) mode = null;
+                if (mode is null) ++reasons.TooltipModeUnavailable;
+                results[i] = results[i] with
+                {
+                    Tip = tip?.Value,
+                    ShowStandardTip = mode?.Value,
+                    Placement = placements?.Value.GetValueOrDefault(addresses[i], Placement.NotVisible) ?? Placement.Unknown
+                };
             }
             // Recheck every observed pointer, vector and protocol field as one
             // batch. The service additionally rejects a changed hook generation
             // or protocol sequence before it merges these records.
             remote.VerifyReads();
             foreach (var owner in owners.Values)
-                if (!owner.Alive) throw new ReadRejected("owner_changed");
+                if (!owner.Alive) { ++reasons.OwnerChanged; throw new ReadRejected("owner_changed"); }
             foreach (var window in windows)
                 if (Native.GetWindowThreadProcessId(window.Window, out var pid) != window.Thread || pid != window.Process)
-                    throw new ReadRejected("owner_changed");
+                { ++reasons.OwnerChanged; throw new ReadRejected("owner_changed"); }
             if (Native.GetWindowThreadProcessId(shellWindow, out var currentPid) != shellThread || currentPid != shellProcess)
                 throw new ReadRejected("explorer_changed");
             remote.Check();
@@ -153,6 +206,144 @@ internal static class NativeTrayModelReader
             return results.AsReadOnly();
         }
         finally { foreach (var owner in owners.Values) owner.Dispose(); }
+    }
+
+    sealed record Observed<T>(T Value, OptionalReads Reads);
+    sealed record LoadedEvidence(OptionalReads? Placement, OptionalReads? Tip, OptionalReads? TooltipMode);
+    sealed class OptionalReads(ReadSession remote)
+    {
+        readonly Dictionary<(ulong Address, int Size, ulong ImageBase), byte[]> observations = [];
+        internal byte[] Read(ulong address, int size, ulong imageBase = 0)
+        {
+            var value = remote.Read(address, size, remember: false, imageBase: imageBase);
+            var key = (address, size, imageBase);
+            if (observations.TryGetValue(key, out var previous) && !value.AsSpan().SequenceEqual(previous))
+                throw new ReadRejected("metadata_changed");
+            observations[key] = value;
+            return value;
+        }
+        internal ulong Value64(ulong address) => BinaryPrimitives.ReadUInt64LittleEndian(Read(address, 8));
+        internal bool Verify()
+        {
+            try
+            {
+                foreach (var (key, value) in observations.Reverse())
+                    if (!remote.Read(key.Address, key.Size, remember: false, imageBase: key.ImageBase).AsSpan().SequenceEqual(value)) return false;
+                return true;
+            }
+            catch (ReadRejected e) when (OptionalFailure(e)) { return false; }
+        }
+    }
+    static bool OptionalFailure(ReadRejected error) => error.Reason is not ("deadline" or "read_limit" or "explorer_changed");
+
+    static Observed<Dictionary<ulong, Placement>>? ObservePlacement(ReadSession remote, ulong manager,
+        ulong module, Profile profile, PlacementLayout layout, HashSet<ulong> registrations)
+    {
+        var reads = new OptionalReads(remote);
+        var result = new Dictionary<ulong, Placement>();
+        try
+        {
+            ReadCollection(layout.ManagerPromoted, Placement.Promoted);
+            ReadCollection(layout.ManagerOverflow, Placement.Overflow);
+            return new(result, reads);
+        }
+        catch (ReadRejected e) when (OptionalFailure(e)) { return null; }
+
+        void ReadCollection(int field, Placement placement)
+        {
+            var pointer = reads.Value64(Add(manager, field));
+            if (!ValidPointer(pointer) || pointer < (uint)layout.ObservableInterfaceOffset + 0x10000ul)
+                throw new ReadRejected("placement_invalid");
+            var implementation = pointer - (uint)layout.ObservableInterfaceOffset;
+            if (reads.Value64(pointer) != module + profile.Symbols["observableVtable"].Rva
+                || reads.Value64(Add(implementation, layout.VectorInterfaceOffset)) != module + profile.Symbols["vectorVtable"].Rva)
+                throw new ReadRejected("placement_type_mismatch");
+            var begin = reads.Value64(Add(implementation, layout.VectorBegin));
+            var end = reads.Value64(Add(implementation, layout.VectorEnd));
+            var capacity = reads.Value64(Add(implementation, layout.VectorCapacity));
+            if (end < begin || capacity < end || (end - begin) % 8 != 0 || (capacity - begin) % 8 != 0
+                || capacity - begin > MaximumItems * 8 || (capacity != 0 && (!ValidPointer(begin) || !ValidPointer(end) || !ValidPointer(capacity))))
+                throw new ReadRejected("placement_bounds_invalid");
+            if (end == begin) return;
+            var items = reads.Read(begin, checked((int)(end - begin)));
+            for (var i = 0; i < items.Length; i += 8)
+            {
+                var projected = BinaryPrimitives.ReadUInt64LittleEndian(items.AsSpan(i, 8));
+                if (!ValidPointer(projected) || projected < (uint)layout.ItemInterfaceOffset + 0x10000ul)
+                    throw new ReadRejected("placement_item_invalid");
+                var item = projected - (uint)layout.ItemInterfaceOffset;
+                if (!registrations.Contains(item) || reads.Value64(item) != module + profile.Symbols["itemVtable"].Rva
+                    || reads.Value64(projected) != module + profile.Symbols["itemInterfaceVtable"].Rva
+                    || !result.TryAdd(item, placement)) throw new ReadRejected("placement_item_invalid");
+            }
+        }
+    }
+
+    static readonly UnicodeEncoding StrictUtf16 = new(false, false, true);
+    static Observed<bool>? ObserveTooltipMode(ReadSession remote, ulong item, TooltipModeLayout layout)
+    {
+        var reads = new OptionalReads(remote);
+        try
+        {
+            var value = reads.Read(Add(item, layout.Field), 1)[0];
+            // Preserve inverse NIF_SHOWTIP itself. The native getter also checks
+            // the protocol version; doing that here would lose the flag if the
+            // application switches to version 4 after this snapshot.
+            return value <= 1 ? new(value == 0, reads) : null;
+        }
+        catch (ReadRejected e) when (OptionalFailure(e)) { return null; }
+    }
+
+    static Observed<string>? ObserveTip(ReadSession remote, ulong item, TipLayout layout)
+    {
+        var reads = new OptionalReads(remote);
+        try
+        {
+            var handle = reads.Value64(Add(item, layout.Field));
+            // The null HSTRING represents the empty string. The field itself
+            // remains in the observation set and must still match at commit.
+            if (handle == 0) return new("", reads);
+            if (!ValidPointer(handle)) return null;
+            Exception? callbackError = null;
+            var callbackThread = Environment.CurrentManagedThreadId;
+            var callbacks = 0;
+            uint requestedBytes = 0;
+            InspectStringCallback callback = (_, address, bytesToRead, output) =>
+            {
+                try
+                {
+                    // Only ComBase's local inspection code is called. All reads
+                    // of the target go through the existing bounded RPM reader.
+                    if (Environment.CurrentManagedThreadId != callbackThread || callbackError is not null
+                        || ++callbacks > 8 || bytesToRead is 0 or > 256 || output == 0
+                        || (requestedBytes += bytesToRead) > 1024) return unchecked((int)0x80070057);
+                    var value = reads.Read((ulong)address, (int)bytesToRead);
+                    Marshal.Copy(value, 0, output, value.Length);
+                    return 0;
+                }
+                catch (Exception error)
+                {
+                    // A managed exception must never unwind through ComBase.
+                    callbackError = error;
+                    return unchecked((int)0x80004005);
+                }
+            };
+            int inspected;
+            uint length;
+            nuint buffer;
+            try { inspected = WindowsInspectString((nuint)handle, 0x8664, callback, 0, out length, out buffer); }
+            finally { GC.KeepAlive(callback); }
+            if (callbackError is OperationCanceledException) throw callbackError;
+            if (callbackError is ReadRejected rejected && !OptionalFailure(rejected)) throw rejected;
+            if (callbackError is not null || inspected < 0 || callbacks == 0 || length > 128
+                || (ulong)buffer < 0x10000 || (ulong)buffer >= LastUserAddress || ((ulong)buffer & 1) != 0) return null;
+            var text = reads.Read((ulong)buffer, checked(((int)length + 1) * 2));
+            if (text[^2] != 0 || text[^1] != 0) return null;
+            return new(StrictUtf16.GetString(text, 0, checked((int)length * 2)), reads);
+        }
+        catch (ReadRejected e) when (OptionalFailure(e)) { return null; }
+        catch (Exception e) when (e is EntryPointNotFoundException or DllNotFoundException or DecoderFallbackException)
+        { return null; }
     }
 
     sealed class ReadRejected(string reason) : Exception { internal string Reason => reason; }
@@ -172,16 +363,17 @@ internal static class NativeTrayModelReader
         internal string Path { get; }
         internal bool Alive => WaitForSingleObject(Handle, 0) == 258;
         Owner(nint handle, long started, string path) { Handle = handle; Started = started; Path = path; }
-        internal static Owner? TryOpen(uint pid)
+        internal static Owner? TryOpen(uint pid, FiltersBuilder reasons)
         {
-            if (pid == 0 || pid > int.MaxValue) return null;
+            if (pid == 0 || pid > int.MaxValue) { ++reasons.OwnerIdentity; return null; }
             var handle = Native.OpenProcess(0x101000, false, (int)pid);
-            if (handle == 0) return null;
+            if (handle == 0) { ++reasons.OwnerAccess; return null; }
             try
             {
                 var path = ProcessPath(handle);
-                if (WaitForSingleObject(handle, 0) != 258 || path is null
-                    || !GetProcessTimes(handle, out var started, out _, out _, out _) || started == 0) return null;
+                if (WaitForSingleObject(handle, 0) != 258) { ++reasons.OwnerChanged; return null; }
+                if (path is null || !GetProcessTimes(handle, out var started, out _, out _, out _) || started == 0)
+                { ++reasons.OwnerIdentity; return null; }
                 var result = new Owner(handle, started, path); handle = 0; return result;
             }
             finally { if (handle != 0) Native.CloseHandle(handle); }
@@ -274,7 +466,12 @@ internal static class NativeTrayModelReader
         public void Dispose() => Native.CloseHandle(process);
     }
 
-    sealed record Profile(int Schema, ImageIdentity Image, Dictionary<string, Symbol> Symbols, Layout Layout);
+    sealed record Profile(int Schema, ImageIdentity Image, Dictionary<string, Symbol> Symbols, Layout Layout, Metadata? Metadata);
+    sealed record Metadata(PlacementLayout? Placement, TipLayout? Tip, TooltipModeLayout? TooltipMode);
+    sealed record PlacementLayout(int ManagerPromoted, int ManagerOverflow, int ObservableInterfaceOffset,
+        int VectorInterfaceOffset, int VectorBegin, int VectorEnd, int VectorCapacity, int ItemInterfaceOffset, string[] RequiredFunctions);
+    sealed record TipLayout(int Field, string[] RequiredFunctions);
+    sealed record TooltipModeLayout(int Field, uint MinimumVersion, string[] RequiredFunctions);
     sealed record ImageIdentity(string FileName, uint Machine, uint TimeDateStamp, uint SizeOfImage, string Sha256,
         string PdbName, Guid PdbGuid, uint PdbAge);
     sealed record Symbol(uint Rva, int Size, string? Sha256);
@@ -301,6 +498,8 @@ internal static class NativeTrayModelReader
     // establish that Explorer is still using the same image after an update.
     sealed class ImageEvidence : IDisposable
     {
+        static readonly string[] CoreSymbols = ["root", "itemVtable", "copyData", "notify", "getRect", "identity",
+            "sendOwner", "modify", "setVersion", "addIcon", "managerCopy", "findIdentity"];
         readonly FileStream file;
         readonly PEReader pe;
         internal string Hash { get; }
@@ -323,7 +522,7 @@ internal static class NativeTrayModelReader
             if (target.FileName != "Taskbar.dll" || target.Machine != 0x8664
                 || (uint)pe.PEHeaders.CoffHeader.Machine != target.Machine || header.Magic != PEMagic.PE32Plus
                 || (uint)pe.PEHeaders.CoffHeader.TimeDateStamp != target.TimeDateStamp || header.SizeOfImage != target.SizeOfImage
-                || profile.Symbols is null || profile.Symbols.Count is < 7 or > 48 || profile.Layout is null)
+                || profile.Symbols is null || profile.Symbols.Count is < 12 or > 48 || profile.Layout is null)
                 throw new ReadRejected("profile_invalid");
             var codeView = pe.ReadDebugDirectory().Where(e => e.Type == DebugDirectoryEntryType.CodeView).ToArray();
             if (codeView.Length != 1) throw new ReadRejected("image_pdb_mismatch");
@@ -331,7 +530,7 @@ internal static class NativeTrayModelReader
             if (pdb.Guid != target.PdbGuid || pdb.Age != target.PdbAge
                 || !string.Equals(System.IO.Path.GetFileName(pdb.Path), target.PdbName, StringComparison.OrdinalIgnoreCase))
                 throw new ReadRejected("image_pdb_mismatch");
-            foreach (var name in new[] { "root", "itemVtable", "copyData", "notify", "getRect", "identity", "sendOwner" })
+            foreach (var name in CoreSymbols)
                 if (!profile.Symbols.ContainsKey(name)) throw new ReadRejected("profile_invalid");
             foreach (var (name, symbol) in profile.Symbols)
             {
@@ -339,17 +538,18 @@ internal static class NativeTrayModelReader
                     || !InImage(symbol.Rva, symbol.Size, target.SizeOfImage)) throw new ReadRejected("profile_invalid");
                 var section = Section(symbol.Rva, symbol.Size);
                 var executable = (section.SectionCharacteristics & SectionCharacteristics.MemExecute) != 0;
-                if (name is "root" or "itemVtable")
+                if (name == "root")
                 {
-                    if (executable || (name == "itemVtable" && (section.SectionCharacteristics & SectionCharacteristics.MemWrite) != 0))
-                        throw new ReadRejected("profile_invalid");
+                    if (executable) throw new ReadRejected("profile_invalid");
                     continue;
                 }
-                if (!executable || symbol.Sha256 is null) throw new ReadRejected("profile_invalid");
+                var vtable = IsVtable(name);
+                if (symbol.Sha256 is null || (vtable ? executable || (section.SectionCharacteristics & SectionCharacteristics.MemWrite) != 0
+                    || symbol.Size > 1024 || symbol.Size % 8 != 0 : !executable)) throw new ReadRejected("profile_invalid");
                 var actual = pe.GetSectionData((int)symbol.Rva).GetContent(0, symbol.Size).ToArray();
                 if (!string.Equals(Convert.ToHexString(SHA256.HashData(actual)), symbol.Sha256, StringComparison.OrdinalIgnoreCase))
                     throw new ReadRejected("profile_invalid");
-                RejectCodeRelocations(symbol);
+                if (!vtable) RejectCodeRelocations(symbol);
             }
             var l = profile.Layout;
             var offsets = new[] { l.Model, l.Manager, l.ManagerVectorBegin, l.ManagerVectorEnd, l.Window, l.Id, l.Guid, l.Callback, l.Version };
@@ -358,7 +558,38 @@ internal static class NativeTrayModelReader
                 || l.ManagerVectorBegin % 8 != 0 || l.ManagerVectorEnd != l.ManagerVectorBegin + 8
                 || l.Id != l.Window + 8 || l.Guid != l.Id + 4 || l.Callback % 4 != 0 || l.Version % 4 != 0
                 || l.Callback == l.Version) throw new ReadRejected("profile_invalid");
+            if (profile.Metadata?.Placement is { } placement)
+            {
+                var fields = new[] { placement.ManagerPromoted, placement.ManagerOverflow, placement.ObservableInterfaceOffset,
+                    placement.VectorInterfaceOffset, placement.VectorBegin, placement.VectorEnd, placement.VectorCapacity, placement.ItemInterfaceOffset };
+                if (fields.Any(x => x is <= 0 or > 4096 || x % 8 != 0)
+                    || placement.ManagerPromoted == placement.ManagerOverflow
+                    || placement.VectorInterfaceOffset <= placement.ObservableInterfaceOffset
+                    || placement.VectorBegin <= placement.VectorInterfaceOffset || placement.VectorEnd != placement.VectorBegin + 8
+                    || placement.VectorCapacity != placement.VectorEnd + 8) throw new ReadRejected("metadata_profile_invalid");
+                foreach (var name in new[] { "observableVtable", "vectorVtable", "itemInterfaceVtable" })
+                    if (!profile.Symbols.TryGetValue(name, out var symbol) || symbol.Size < 48)
+                        throw new ReadRejected("metadata_profile_invalid");
+                RequireFunctions(placement.RequiredFunctions);
+            }
+            if (profile.Metadata?.Tip is { } tip)
+            {
+                if (tip.Field is <= 0 or > 4096 || tip.Field % 8 != 0) throw new ReadRejected("metadata_profile_invalid");
+                RequireFunctions(tip.RequiredFunctions);
+            }
+            if (profile.Metadata?.TooltipMode is { } mode)
+            {
+                if (mode.Field is <= 0 or > 4096 || mode.MinimumVersion != 4) throw new ReadRejected("metadata_profile_invalid");
+                RequireFunctions(mode.RequiredFunctions);
+            }
+            void RequireFunctions(string[] names)
+            {
+                if (names is null || names.Length is < 1 or > 48 || names.Distinct(StringComparer.Ordinal).Count() != names.Length
+                    || names.Any(name => name is null or "root" || IsVtable(name) || !profile.Symbols.ContainsKey(name)))
+                    throw new ReadRejected("metadata_profile_invalid");
+            }
         }
+        static bool IsVtable(string name) => name is "itemVtable" or "observableVtable" or "vectorVtable" or "itemInterfaceVtable";
         SectionHeader Section(uint rva, int size)
         {
             foreach (var s in pe.PEHeaders.SectionHeaders)
@@ -388,7 +619,7 @@ internal static class NativeTrayModelReader
                 offset += (int)block;
             }
         }
-        internal void ValidateLoaded(ReadSession remote, ulong address, Profile profile)
+        internal LoadedEvidence ValidateLoaded(ReadSession remote, ulong address, Profile profile, FiltersBuilder reasons)
         {
             var target = profile.Image;
             remote.VerifyMappedFile(address, file.SafeFileHandle);
@@ -424,23 +655,76 @@ internal static class NativeTrayModelReader
                 found = true;
             }
             if (!found) throw new ReadRejected("loaded_pdb_mismatch");
+            var optionalSymbols = new HashSet<string>(StringComparer.Ordinal);
+            if (profile.Metadata?.Placement is { } placement)
+            {
+                optionalSymbols.UnionWith(placement.RequiredFunctions);
+                optionalSymbols.UnionWith(["observableVtable", "vectorVtable", "itemInterfaceVtable"]);
+            }
+            if (profile.Metadata?.Tip is { } tip) optionalSymbols.UnionWith(tip.RequiredFunctions);
+            if (profile.Metadata?.TooltipMode is { } mode) optionalSymbols.UnionWith(mode.RequiredFunctions);
+            optionalSymbols.ExceptWith(CoreSymbols);
             foreach (var (name, symbol) in profile.Symbols)
             {
-                var count = name is "root" or "itemVtable" ? 8 : symbol.Size;
+                if (optionalSymbols.Contains(name)) continue;
+                var count = name == "root" ? 8 : symbol.Size;
                 var bytes = remote.Read(address + symbol.Rva, count, imageBase: address);
-                if (name == "root") continue;
-                if (name == "itemVtable")
+                ValidateSymbol(name, symbol, bytes);
+            }
+            // The core layout remains usable when only optional display code
+            // has changed in memory. Each optional proof set has a separate
+            // transaction, including its complete vtables and function hashes.
+            OptionalReads? placementProof = null, tipProof = null, modeProof = null;
+            if (profile.Metadata?.Placement is { } placementLayout)
+            {
+                placementProof = OptionalProof(placementLayout.RequiredFunctions.Concat(
+                    ["observableVtable", "vectorVtable", "itemInterfaceVtable"]));
+                if (placementProof is null) ++reasons.PlacementEvidenceRejected;
+            }
+            if (profile.Metadata?.Tip is { } tipLayout)
+            {
+                tipProof = OptionalProof(tipLayout.RequiredFunctions);
+                if (tipProof is null) ++reasons.TipEvidenceRejected;
+            }
+            if (profile.Metadata?.TooltipMode is { } modeLayout)
+            {
+                modeProof = OptionalProof(modeLayout.RequiredFunctions);
+                if (modeProof is null) ++reasons.TooltipModeEvidenceRejected;
+            }
+            return new(placementProof, tipProof, modeProof);
+
+            OptionalReads? OptionalProof(IEnumerable<string> names)
+            {
+                var reads = new OptionalReads(remote);
+                try
                 {
-                    // Vtable contents contain relocated addresses. Verify the
-                    // first entry against this same file after ASLR adjustment.
-                    var disk = pe.GetSectionData((int)symbol.Rva).GetContent(0, 8).ToArray();
+                    foreach (var name in names.Distinct(StringComparer.Ordinal))
+                    {
+                        var symbol = profile.Symbols[name];
+                        ValidateSymbol(name, symbol, reads.Read(address + symbol.Rva, symbol.Size, imageBase: address));
+                    }
+                    return reads;
+                }
+                catch (ReadRejected e) when (OptionalFailure(e)) { return null; }
+            }
+            void ValidateSymbol(string name, Symbol symbol, byte[] bytes)
+            {
+                if (name == "root") return;
+                if (IsVtable(name))
+                {
+                    // Validate every profiled slot after ASLR adjustment, not
+                    // just the first method shared by many COM producers.
+                    var disk = pe.GetSectionData((int)symbol.Rva).GetContent(0, symbol.Size).ToArray();
                     var preferred = pe.PEHeaders.PEHeader!.ImageBase;
-                    var pointer = BinaryPrimitives.ReadUInt64LittleEndian(disk);
-                    if (pointer < preferred || pointer - preferred >= target.SizeOfImage
-                        || (Section((uint)(pointer - preferred), 1).SectionCharacteristics & SectionCharacteristics.MemExecute) == 0
-                        || BinaryPrimitives.ReadUInt64LittleEndian(bytes) != address + pointer - preferred)
-                        throw new ReadRejected("loaded_vtable_mismatch");
-                    continue;
+                    for (var slot = 0; slot < disk.Length; slot += 8)
+                    {
+                        var pointer = BinaryPrimitives.ReadUInt64LittleEndian(disk.AsSpan(slot, 8));
+                        if (pointer < preferred || pointer - preferred >= target.SizeOfImage
+                            || (Section((uint)(pointer - preferred), 1).SectionCharacteristics & SectionCharacteristics.MemExecute) == 0
+                            || BinaryPrimitives.ReadUInt64LittleEndian(bytes.AsSpan(slot, 8)) != address + pointer - preferred)
+                            throw new ReadRejected("loaded_vtable_mismatch");
+                    }
+                    return;
                 }
                 if (!string.Equals(Convert.ToHexString(SHA256.HashData(bytes)), symbol.Sha256, StringComparison.OrdinalIgnoreCase))
                     throw new ReadRejected("loaded_code_mismatch");
@@ -508,4 +792,10 @@ internal static class NativeTrayModelReader
     [DllImport("kernel32.dll")] static extern uint WaitForSingleObject(nint handle, uint milliseconds);
     [DllImport("kernel32.dll")] [return: MarshalAs(UnmanagedType.Bool)]
     static extern bool GetProcessTimes(nint process, out long created, out long exited, out long kernel, out long user);
+    // winstring.h: HRESULT (WINAPI *)(void*, UINT_PTR, UINT32, BYTE*).
+    [UnmanagedFunctionPointer(CallingConvention.Winapi)]
+    delegate int InspectStringCallback(nint context, nuint address, uint length, nint buffer);
+    [DllImport("combase.dll", ExactSpelling = true, CallingConvention = CallingConvention.Winapi)]
+    static extern int WindowsInspectString(nuint targetHString, ushort machine, InspectStringCallback callback,
+        nint context, out uint length, out nuint targetStringAddress);
 }

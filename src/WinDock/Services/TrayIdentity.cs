@@ -119,9 +119,10 @@ internal sealed class TrayIdentity
     public static string Name(SystemTrayItem item)
     {
         var executable = Path.GetFileNameWithoutExtension(item.ProcessPath).ToLowerInvariant();
+        var hosted = executable is "explorer" or "rundll32" or "svchost";
         if (executable == "securityhealthsystray") return Loc.T("traySecurity");
         if (executable == "bthudtask") return Loc.T("trayBluetooth");
-        if (executable is "explorer" or "rundll32" or "svchost" || item.ApplicationName.Length == 0)
+        if (hosted || item.ApplicationName.Length == 0)
         {
             var tip = item.Tip;
             if (Contains(tip, "音量", "扬声器", "耳机", "volume", "speaker", "headphone")) return Loc.T("trayAudio");
@@ -130,10 +131,11 @@ internal sealed class TrayIdentity
             if (Contains(tip, "电池", "battery")) return Loc.T("trayBattery");
             if (Contains(tip, "网络", "network", "internet access")) return Loc.T("trayNetwork");
         }
-        if (item.ApplicationName.Length > 0) return item.ApplicationName;
+        if (!hosted && item.ApplicationName.Length > 0) return item.ApplicationName;
         var first = item.Tip.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries).FirstOrDefault()?.Trim() ?? "";
         // Status-only tips (rates, counts, percentages) are not application names.
-        return first.Length > 0 && !char.IsDigit(first[0]) && !Contains(first, "kb/s", "mb/s", "gb/s", "kib/s") ? first : "";
+        if (first.Length > 0 && !char.IsDigit(first[0]) && !Contains(first, "kb/s", "mb/s", "gb/s", "kib/s")) return first;
+        return item.ApplicationName;
     }
 
     static bool Contains(string text, params string[] values) => values.Any(value => text.Contains(value, StringComparison.OrdinalIgnoreCase));

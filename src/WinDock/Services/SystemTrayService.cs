@@ -10,6 +10,9 @@ using System.Windows.Threading;
 
 namespace WinDock.Services;
 
+internal readonly record struct TrayEndpoint(nint Window, uint Process, uint Thread, long Started,
+    string WindowClass, uint Id, Guid Guid, uint Callback, uint Version);
+
 public sealed class SystemTrayItem : INotifyPropertyChanged
 {
     public string Key { get; internal set; } = "";
@@ -24,9 +27,12 @@ public sealed class SystemTrayItem : INotifyPropertyChanged
     internal bool VersionObserved { get; set; }
     internal bool IconObserved { get; set; }
     internal bool TipObserved { get; set; }
+    internal bool NativeTipObserved { get; set; }
     internal bool NativeSnapshotObserved { get; set; }
     internal bool NativeModelObserved { get; set; }
     internal bool HiddenObserved { get; set; }
+    internal NativeTrayModelReader.Placement NativePlacement { get; set; }
+    internal bool ApplicationHidden { get; private set; }
     internal long ProcessStarted { get; set; }
     public Guid Guid { get; internal set; }
     public string Title { get; internal set; } = "";
@@ -37,13 +43,23 @@ public sealed class SystemTrayItem : INotifyPropertyChanged
         : ProcessPath.Length > 0 ? $"exe:{ProcessPath.ToLowerInvariant()}:{OwnerClass}:{Id}" : "";
     public string Tip { get; internal set; } = "";
     public bool ShowStandardTip { get; internal set; }
-    public string? HoverTip => Version >= 4 && CanInvoke && !ShowStandardTip ? null :
+    public string? HoverTip => Hidden || (Version >= 4 && CanInvoke && !ShowStandardTip) ? null :
         Title.Length == 0 || Tip.Contains(Title, StringComparison.OrdinalIgnoreCase) ? (Tip.Length > 0 ? Tip : null) :
         Tip.Length == 0 ? Title : Title + "\n" + Tip;
     public BitmapSource? Icon { get; internal set; }
-    public bool Hidden { get; internal set; }
+    public bool Hidden
+    {
+        get => NativePlacement switch
+        {
+            NativeTrayModelReader.Placement.NotVisible => true,
+            NativeTrayModelReader.Placement.Promoted or NativeTrayModelReader.Placement.Overflow => false,
+            _ => HiddenObserved && ApplicationHidden
+        };
+        internal set { ApplicationHidden = value; NativePlacement = NativeTrayModelReader.Placement.Unknown; }
+    }
     public bool HasHint { get; internal set; }
     public bool CanInvoke => CallbackObserved && VersionObserved && Callback >= 0x400 && Callback <= 0xFFFF && Window != 0;
+    internal TrayEndpoint Endpoint => new(Window, ProcessId, ThreadId, ProcessStarted, OwnerClass, Id, Guid, Callback, Version);
     public string AccessibleName => Title.Length > 0 ? Title : Loc.T("systemTrayUnnamed");
     public event PropertyChangedEventHandler? PropertyChanged;
     internal void Refresh() => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(null));
@@ -67,13 +83,15 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
     readonly Dictionary<string, uint> pendingVersions = [];
     readonly object pendingLock = new();
     readonly Queue<(uint Kind, byte[] Data)> pending = [];
+    readonly Dictionary<string, bool> queuedTipModes = [];
     volatile CancellationTokenSource? lifetime;
     TrayHookSession? activeSession;
     Task? runner;
-    bool scheduled, ready;
+    bool scheduled, ready, draining;
     int pendingBytes;
     int sessionNumber;
     long registrationGeneration;
+    long metadataPackets, processedMetadataPackets;
     long receivedPackets, nativeLossReports, interfaceLossReports, registrationPackets, processedRegistrationPackets, rejectedOwners, rejectedRegistrations, confirmedCandidates;
     int nativeSnapshotRecords, nativeModelRecords, nativeModelApplied;
     bool snapshotPending;
@@ -88,6 +106,7 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
     internal long RegistrationGeneration => Interlocked.Read(ref registrationGeneration);
     internal long ProtocolSequence => Interlocked.Read(ref registrationPackets);
     internal bool ProtocolCurrent => Interlocked.Read(ref processedRegistrationPackets) == Interlocked.Read(ref registrationPackets);
+    bool MetadataCurrent => Interlocked.Read(ref processedMetadataPackets) == Interlocked.Read(ref metadataPackets);
     public event PropertyChangedEventHandler? PropertyChanged;
     public event Action? LayoutChanged;
     public event Action<SystemTrayItem>? FocusRequested;
@@ -172,7 +191,12 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
                         UnauthorizedAccessException => Loc.T("systemTrayHookFailed"),
                         _ => error.Message
                     };
-                    lock (pendingLock) { pending.Clear(); pendingBytes = 0; scheduled = false; processedRegistrationPackets = registrationPackets; }
+                    lock (pendingLock)
+                    {
+                        pending.Clear(); pendingBytes = 0; scheduled = false;
+                        queuedTipModes.Clear();
+                        processedRegistrationPackets = registrationPackets; processedMetadataPackets = metadataPackets;
+                    }
                 });
                 // Missing/untrusted/incompatible components require an explicit
                 // retry after repair; never repeatedly load the same bad DLL.
@@ -191,7 +215,9 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
         {
             activeSession = session;
             pending.Clear(); pendingBytes = 0; scheduled = false;
+            queuedTipModes.Clear();
             processedRegistrationPackets = registrationPackets;
+            processedMetadataPackets = metadataPackets;
         }
         Ready = false; recovery.Stop(); ClearIcons();
         ++sessionNumber; connectionError = null;
@@ -216,14 +242,34 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
             if (lifetime != run || !ReferenceEquals(activeSession, session)) return;
             if (kind is 1 or 4) Interlocked.Increment(ref receivedPackets);
             else if (kind == 3) Interlocked.Increment(ref nativeLossReports);
-            // A model snapshot includes callback/version as well as identity.
-            // Invalidate it when any accepted protocol change arrives, even if
-            // its UI-thread packet has not yet been drained.
+            // Model reads include registration and visible-set membership.
+            // Text has its own sequence so changing a tooltip does not cancel
+            // an otherwise valid native action.
             if (kind == 3 || (kind == 1 && data.Length >= 36 && (BitConverter.ToUInt32(data, 0) is 0 or 2 or 4
-                || (BitConverter.ToUInt32(data, 0) == 1 && (BitConverter.ToUInt32(data, 32) & 1) != 0))))
+                || (BitConverter.ToUInt32(data, 0) == 1 && (BitConverter.ToUInt32(data, 32) & 9) != 0))))
                 Interlocked.Increment(ref registrationPackets);
+            if (kind == 3) queuedTipModes.Clear();
+            else if (kind == 1 && data.Length >= 976)
+            {
+                var operation = BitConverter.ToUInt32(data, 0);
+                var flags = BitConverter.ToUInt32(data, 32);
+                var key = (flags & 0x20) != 0 ? new Guid(data.AsSpan(956, 16)).ToString()
+                    : $"{BitConverter.ToUInt32(data, 24):X8}:{BitConverter.ToUInt32(data, 28)}:{BitConverter.ToUInt32(data, 4)}";
+                if (operation is 0 or 1)
+                {
+                    var showTip = (flags & 0x80) != 0;
+                    if (operation == 1 && ((flags & 4) != 0 || !queuedTipModes.TryGetValue(key, out var oldMode) || oldMode != showTip))
+                        Interlocked.Increment(ref metadataPackets);
+                    if (!queuedTipModes.ContainsKey(key) && queuedTipModes.Count >= 512) queuedTipModes.Clear();
+                    queuedTipModes[key] = showTip;
+                }
+                else if (operation == 2) queuedTipModes.Remove(key);
+            }
             if (pending.Count >= 256 || pendingBytes + data.Length > 8 * 1024 * 1024)
-            { Interlocked.Increment(ref interfaceLossReports); Interlocked.Increment(ref registrationPackets); pending.Clear(); pendingBytes = 0; pending.Enqueue((3, [])); }
+            {
+                Interlocked.Increment(ref interfaceLossReports); Interlocked.Increment(ref registrationPackets);
+                pending.Clear(); pendingBytes = 0; queuedTipModes.Clear(); pending.Enqueue((3, []));
+            }
             pending.Enqueue((kind, data));
             pendingBytes += data.Length;
             if (scheduled) return;
@@ -234,15 +280,19 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
 
     void Drain(CancellationTokenSource run, TrayHookSession session)
     {
+        if (draining) return;
         (uint Kind, byte[] Data)[] batch;
         long batchSequence;
+        long batchMetadata;
         lock (pendingLock)
         {
             if (lifetime != run || !ReferenceEquals(activeSession, session)) return;
             batch = pending.ToArray(); pending.Clear(); pendingBytes = 0; scheduled = false;
             batchSequence = registrationPackets;
+            batchMetadata = metadataPackets;
         }
         if (!Ready) return;
+        draining = true;
         try
         {
             foreach (var (kind, data) in batch)
@@ -257,7 +307,15 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
             }
         }
         catch (InvalidDataException) { Stop(); Status = Loc.T("systemTrayDataFailed"); }
-        finally { Interlocked.Exchange(ref processedRegistrationPackets, batchSequence); }
+        finally
+        {
+            if (IsCurrent(run, session))
+            {
+                Interlocked.Exchange(ref processedRegistrationPackets, batchSequence);
+                Interlocked.Exchange(ref processedMetadataPackets, batchMetadata);
+            }
+            draining = false;
+        }
     }
 
     void Apply(byte[] bytes, bool candidate = false, bool presenceConfirmed = false)
@@ -300,7 +358,7 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
             if (useGuid && (item is null || item.Window != window || item.ProcessId != pid || item.Id != id)) return;
             // A failed ADD does not establish that an icon exists. Confirm it
             // through the shell before using any of its missing display fields.
-            if (item is null || (!item.IconObserved && item.Icon is null) || (!item.TipObserved && item.Tip.Length == 0)
+            if (item is null || (!item.IconObserved && item.Icon is null) || (!item.TipObserved && !item.NativeTipObserved && item.Tip.Length == 0)
                 || (!item.CallbackObserved && item.Callback == 0))
                 QueueBootstrap(key, bytes, window, pid, id, guid);
             return;
@@ -347,7 +405,7 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
             item.Version = 0; item.RegistrationObserved = true; item.VersionObserved = true;
             item.NativeModelObserved = false;
             item.Callback = 0; item.CallbackObserved = true;
-            item.Tip = ""; item.TipObserved = true; item.ShowStandardTip = false; item.Hidden = false;
+            item.Tip = ""; item.TipObserved = true; item.NativeTipObserved = false; item.ShowStandardTip = false; item.Hidden = false;
             item.HiddenObserved = true;
             item.Icon = null; item.IconObserved = true;
         }
@@ -356,13 +414,14 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
             item.Callback = callback;
             if (!candidate) item.CallbackObserved = true;
         }
-        if ((flags & 4) != 0 && (!candidate || (!item.TipObserved && item.Tip.Length == 0)))
+        if ((flags & 4) != 0 && (!candidate || (!item.TipObserved && !item.NativeTipObserved && item.Tip.Length == 0)))
         {
             item!.Tip = ReadText(bytes, 44, 128);
-            item.ShowStandardTip = (flags & 0x80) != 0;
-            if (!candidate) item.TipObserved = true;
+            if (!candidate) { item.TipObserved = true; item.NativeTipObserved = false; }
         }
-        else if (!candidate && (flags & 0x80) != 0) item.ShowStandardTip = true;
+        // Explorer updates this mode on every accepted ModifyIcon call, even
+        // when that call only supplies pixels. A rejected ADD proves no mode.
+        if (!candidate) item.ShowStandardTip = (flags & 0x80) != 0;
         if (!candidate && (flags & 8) != 0 && (stateMask & 1) != 0)
         { item!.Hidden = (state & 1) != 0; item.HiddenObserved = true; }
         if ((flags & 2) != 0 && (!candidate || (!item.IconObserved && item.Icon is null)))
@@ -521,12 +580,14 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
                 await Task.Delay(750, timeout.Token);
                 if (!Ready || !IsCurrent(run, session)) return;
                 Drain(run, session);
-                if (!Ready || !ProtocolCurrent) { retry = Ready; return; }
+                if (!Ready || !ProtocolCurrent || !MetadataCurrent) { retry = Ready; return; }
                 var generation = RegistrationGeneration;
                 var packets = Interlocked.Read(ref registrationPackets);
+                var metadata = Interlocked.Read(ref metadataPackets);
                 var model = await NativeTrayModelReader.ReadAsync(session.ExplorerWindow, session.ExplorerProcess, timeout.Token);
                 if (!Ready || !IsCurrent(run, session) || generation != RegistrationGeneration
-                    || packets != Interlocked.Read(ref registrationPackets) || !ProtocolCurrent || timeout.IsCancellationRequested)
+                    || packets != Interlocked.Read(ref registrationPackets) || metadata != Interlocked.Read(ref metadataPackets)
+                    || !ProtocolCurrent || !MetadataCurrent || timeout.IsCancellationRequested)
                 { retry = Ready && !timeout.IsCancellationRequested; return; }
                 nativeModelRecords = model.Count;
                 nativeModelApplied = 0;
@@ -537,26 +598,30 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
                         if (MergeNativeModel(record) is { } item) { merged.Add(item); ++nativeModelApplied; }
                     // Explorer can change while this UI-thread merge runs. Do
                     // not expose an earlier protocol until queued changes drain.
-                    if (packets != Interlocked.Read(ref registrationPackets))
+                    if (packets != Interlocked.Read(ref registrationPackets) || metadata != Interlocked.Read(ref metadataPackets))
                     {
-                        InvalidateProtocol(merged);
+                        if (packets != Interlocked.Read(ref registrationPackets)) InvalidateProtocol(merged);
                         Drain(run, session);
                         retry = true; return;
                     }
-                    if (!Icons.Any(item => (!item.IconObserved && item.Icon is null) || (!item.TipObserved && item.Tip.Length == 0))) return;
+                    if (!Icons.Any(item => (!item.IconObserved && item.Icon is null)
+                        || (!item.TipObserved && !item.NativeTipObserved && item.Tip.Length == 0))) return;
                     // Current model identity/protocol can coexist with display
                     // metadata from the older inventory. Our own merges changed
                     // the generation, so establish a fresh race barrier here.
                     generation = RegistrationGeneration;
                     packets = Interlocked.Read(ref registrationPackets);
+                    metadata = Interlocked.Read(ref metadataPackets);
                 }
                 var records = await NativeTraySnapshot.ReadAsync(session.ExplorerWindow, session.ExplorerProcess, timeout.Token);
                 if (!Ready || !IsCurrent(run, session) || generation != RegistrationGeneration
-                    || packets != Interlocked.Read(ref registrationPackets) || !ProtocolCurrent || timeout.IsCancellationRequested)
+                    || packets != Interlocked.Read(ref registrationPackets) || metadata != Interlocked.Read(ref metadataPackets)
+                    || !ProtocolCurrent || !MetadataCurrent || timeout.IsCancellationRequested)
                 { retry = Ready && !timeout.IsCancellationRequested; return; }
                 nativeSnapshotRecords = records.Count;
                 foreach (var record in records) MergeNativeRegistration(record);
-                if (packets != Interlocked.Read(ref registrationPackets)) { Drain(run, session); retry = true; }
+                if (packets != Interlocked.Read(ref registrationPackets) || metadata != Interlocked.Read(ref metadataPackets))
+                { Drain(run, session); retry = true; }
             }
             catch (OperationCanceledException) { }
             catch (Exception error) when (error is InvalidOperationException or System.Runtime.InteropServices.COMException
@@ -576,14 +641,20 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
     void InvalidateProtocol(IEnumerable<SystemTrayItem> items, bool modelOnly = true)
     {
         var changed = false;
+        var layoutChanged = false;
         foreach (var item in items)
         {
             if ((modelOnly && !item.NativeModelObserved) || !known.TryGetValue(item.Key, out var current) || !ReferenceEquals(current, item)) continue;
+            var wasHidden = item.Hidden;
             item.NativeModelObserved = item.CallbackObserved = item.VersionObserved = false;
+            item.NativePlacement = NativeTrayModelReader.Placement.Unknown;
+            item.NativeTipObserved = false;
             if (!modelOnly) item.RegistrationObserved = item.HiddenObserved = false;
+            layoutChanged |= wasHidden != item.Hidden;
             item.Refresh(); changed = true;
         }
         if (changed) BumpRegistrationGeneration();
+        if (layoutChanged) LayoutChanged?.Invoke();
     }
 
     SystemTrayItem? MergeNativeModel(NativeTrayModelReader.Record record)
@@ -620,8 +691,10 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
         item.ProcessStarted = record.ProcessStarted;
         if (record.ProcessPath.Length > 0) item.ProcessPath = record.ProcessPath;
         if (!item.IconObserved && item.Icon is null && record.Icon is not null) item.Icon = record.Icon;
-        if (!item.TipObserved && item.Tip.Length == 0 && record.Tip is not null) item.Tip = record.Tip;
+        if (record.Tip is not null) { item.Tip = record.Tip; item.NativeTipObserved = true; }
+        if (record.ShowStandardTip is { } showTip) item.ShowStandardTip = showTip;
         if (record.Hidden is { } hidden) { item.Hidden = hidden; item.HiddenObserved = true; }
+        item.NativePlacement = record.Placement;
         // A pending historical candidate must never overwrite this protocol.
         pendingVersions.Remove(key);
         item.Title = TrayIdentity.Name(item); item.Refresh();
@@ -678,7 +751,7 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
         }
         item!.NativeSnapshotObserved = true;
         if (!item.IconObserved && item.Icon is null) item.Icon = record.Icon;
-        if (!item.TipObserved && item.Tip.Length == 0) item.Tip = record.Tip;
+        if (!item.TipObserved && !item.NativeTipObserved && item.Tip.Length == 0) item.Tip = record.Tip;
         if (item.ProcessPath.Length == 0) item.ProcessPath = record.Executable;
         if (item.ProcessStarted == 0) item.ProcessStarted = record.ProcessStarted;
         item.Title = TrayIdentity.Name(item); item.Refresh();
@@ -686,12 +759,35 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
         if (!item.CallbackObserved || !item.VersionObserved) RequestRegistration(item.Window, item.ProcessId);
     }
 
-    public bool Invoke(SystemTrayItem item, uint message, Point physicalPoint)
+    public bool Invoke(SystemTrayItem item, uint message, Point physicalPoint) => InvokeCore(item, message, physicalPoint, null);
+
+    internal bool InvokeEndpoint(SystemTrayItem item, uint message, Point physicalPoint, TrayEndpoint endpoint) =>
+        InvokeCore(item, message, physicalPoint, endpoint);
+
+    bool InvokeCore(SystemTrayItem item, uint message, Point physicalPoint, TrayEndpoint? expected)
     {
-        if (!ProtocolCurrent && lifetime is { } run && activeSession is { } session) Drain(run, session);
-        if (!Ready || !ProtocolCurrent || !item.CanInvoke || !known.TryGetValue(item.Key, out var current) || !ReferenceEquals(item, current)) return false;
+        if (expected is { } original && item.Endpoint != original) return false;
+        if (draining)
+        {
+            // Property notifications can end a hover inside Apply. Preserve
+            // packet order and defer only the paired close to that same owner.
+            if (message != 0x407) return false;
+            var endpoint = expected ?? item.Endpoint;
+            _ = dispatcher.BeginInvoke(DispatcherPriority.Background, () =>
+            {
+                InvokeCore(item, message, physicalPoint, endpoint);
+            });
+            return true;
+        }
+        if ((!ProtocolCurrent || (message == 0x406 && !MetadataCurrent))
+            && lifetime is { } run && activeSession is { } session) Drain(run, session);
+        // A hidden icon can still need its previously opened hover popup closed.
+        if (!Ready || !ProtocolCurrent || (item.Hidden && message != 0x407) || !item.CanInvoke
+            || !known.TryGetValue(item.Key, out var current) || !ReferenceEquals(item, current)) return false;
+        if (expected is { } afterDrain && item.Endpoint != afterDrain) return false;
+        if (message == 0x406 && (!MetadataCurrent || item.ShowStandardTip || item.Version < 4 || item.ProcessStarted <= 0)) return false;
         if (!OwnerIsCurrent(item.Window, item.ProcessId, item.ProcessStarted, item.ThreadId, item.OwnerClass)) { Remove(item); return false; }
-        if (!ProtocolCurrent) return false;
+        if (!ProtocolCurrent || (message == 0x406 && !MetadataCurrent)) return false;
         var x = (short)Math.Clamp(Math.Round(physicalPoint.X), short.MinValue, short.MaxValue);
         var y = (short)Math.Clamp(Math.Round(physicalPoint.Y), short.MinValue, short.MaxValue);
         if (message is >= 0x201 and <= 0x209 or 0x7B or 0x400 or 0x401)
@@ -711,7 +807,12 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
         runner = null;
         // The runner owns cancellation registrations until it completes.
         prune.Stop(); recovery.Stop(); diagnosticTimer.Stop(); Ready = false; ClearIcons(); Hints.Clear(); retainedHints.Clear(); Status = Loc.T("systemTrayOff");
-        lock (pendingLock) { activeSession = null; pending.Clear(); pendingBytes = 0; scheduled = false; processedRegistrationPackets = registrationPackets; }
+        lock (pendingLock)
+        {
+            activeSession = null; pending.Clear(); pendingBytes = 0; scheduled = false;
+            queuedTipModes.Clear();
+            processedRegistrationPackets = registrationPackets; processedMetadataPackets = metadataPackets;
+        }
         RecordStatus();
     }
 
@@ -735,6 +836,7 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
         nativeModelStatus = NativeTrayModelReader.Status,
         nativeModelCandidates = NativeTrayModelReader.CandidateCount,
         nativeModelValidated = NativeTrayModelReader.ValidatedCount,
+        nativeModelFiltered = NativeTrayModelReader.Filters,
         nativeModelRecords,
         nativeModelApplied,
         protocolCurrent = ProtocolCurrent,
@@ -756,7 +858,12 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
             nativeSnapshotObserved = item.NativeSnapshotObserved,
             nativeModelObserved = item.NativeModelObserved,
             hidden = item.Hidden,
+            applicationHidden = item.ApplicationHidden,
             hiddenObserved = item.HiddenObserved,
+            nativePlacement = item.NativePlacement.ToString(),
+            hasTip = item.Tip.Length > 0,
+            nativeTipObserved = item.NativeTipObserved,
+            showStandardTip = item.ShowStandardTip,
             hasIcon = item.Icon is not null,
             canInvoke = item.CanInvoke
         }).ToArray()
