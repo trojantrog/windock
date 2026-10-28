@@ -43,4 +43,14 @@ WinDock 不写入或删除任何 `StartupApproved` 值，也不修改启动策�
 | `startupReady` | 普通启动和本次请求的动画启动均已核对就绪 |
 | `loginCycleTested` | 是否实际完成登录验证；本次保持 false |
 
-本次仅进行源码检查和编译检查，没有运行程序、登录任务或桌面验证。仍无法从这些状态判断磁盘故障、后续策略变化、其他安全软件拦截或下次登录时的真实执行结果。
+## 本机安装记录：preview.25
+
+2026-10-29 07:48 将源码提交 `61de8be05248d847a00d96cf75231da948be55a8` 构建的 preview.25 安装到 `D:\WinDock`。构建零警告、零错误，发布包 21 个文件校验一致，Defender 扫描未发现威胁。程序仍为本地未签名预览版。
+
+安装后核对普通启动命令为 `"D:\WinDock\WinDock.exe" --tray`，Windows 状态为 `enabled`，没有已配置的 Run 禁用策略。动画任务与登录触发器均已启用，唯一执行动作匹配当前 build 13 的受保护组件；直接复用已有任务，本次未申请新的管理员确认。报告的 `startupReady=true`、`differentComponentMayRun=false`，表示这两个启动入口已核对就绪。
+
+Dock 已从安装目录正常启动，18 个固定应用保持不变，原生任务栏可见。当前会话仍驻留动画 build 10，build 13 尚未连接，等待下一次 Windows 登录。未执行登录周期、桌面交互或独立探针验证。上述配置核对不能预判后续策略变化、安全软件拦截或下次登录的真实执行结果。
+
+正常启动产生的 `motion-status.json` 从 07:48:23 继续更新至 07:49:53；期间连接状态保持未连接、登录入口保持启用、动作计数均为零。这确认本次运行中未变化状态的记录仍持续更新，不表示整窗动画已生效。
+
+安装前的程序、设置和动画任务备份位于 `publish/backups/install-20261029-074814-707`。需要回退程序时，可运行 `scripts/Install-LocalBuild.ps1 -PackagePath publish/WinDock-0.6.0-preview.24 -DestinationPath D:\WinDock`；这会保留原生任务栏，不替换本次会话已驻留的动画组件。
