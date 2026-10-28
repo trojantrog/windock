@@ -113,7 +113,7 @@ function Write-NotificationBundleRecord($Bundle) {
     $target = Join-Path $Bundle.Root 'notification-package.json'
     $temporary = Join-Path $Bundle.Root ([Guid]::NewGuid().ToString('N') + '.json.tmp')
     [IO.File]::WriteAllText($temporary, ($Bundle.Record | ConvertTo-Json -Depth 6), [Text.UTF8Encoding]::new($false))
-    if (Test-Path -LiteralPath $target) { [IO.File]::Replace($temporary, $target, $null) }
+    if (Test-Path -LiteralPath $target) { [IO.File]::Replace($temporary, $target, ($target + '.bak')) }
     else { [IO.File]::Move($temporary, $target) }
 }
 
