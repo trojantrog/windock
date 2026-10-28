@@ -15,11 +15,15 @@ sealed class TrayMenuSession : IDisposable
     long deadline, lastOpen;
     bool sent, seen, disposed;
     public uint ProcessId { get; }
+    public SystemTrayItem Item { get; }
+    public bool IsHover { get; }
     public bool EscapePressed { get; private set; }
+    public bool ReturnFocusRequested { get; private set; }
     public bool PreserveSource { get; private set; }
 
-    public TrayMenuSession(Window source, SystemTrayItem item)
+    public TrayMenuSession(Window source, SystemTrayItem item, bool hover = false)
     {
+        Item = item; IsHover = hover;
         this.source = source; callback = item.Window; ProcessId = item.ProcessId;
         callbackThread = Native.GetWindowThreadProcessId(callback, out _);
         threads.Add(callbackThread);
@@ -27,14 +31,27 @@ sealed class TrayMenuSession : IDisposable
         deadline = Environment.TickCount64 + 1200;
     }
 
-    public void CompleteRequest() { sent = true; deadline = Environment.TickCount64 + 900; }
+    public void CompleteRequest(int grace = 900) { sent = true; deadline = Environment.TickCount64 + grace; }
     public void SetEscapeIntent(bool value) => EscapePressed = value;
+    public bool Matches(SystemTrayItem item) => ReferenceEquals(item, Item) && item.Window == callback && item.ProcessId == ProcessId;
+
+    public void RequestFocus(SystemTrayItem item)
+    {
+        if (!disposed && !IsHover && Matches(item) && CanRestoreFocus()) ReturnFocusRequested = true;
+    }
+
+    public bool CanRestoreFocus()
+    {
+        var foreground = Native.GetForegroundWindow();
+        return foreground == 0 || foreground == new WindowInteropHelper(source).Handle || !Native.IsWindowVisible(foreground)
+            || foreground == callback || foreground == menuOwner || popups.Contains(foreground) || IsSystemTray(foreground);
+    }
 
     public void Observe(uint ev, nint window, uint thread)
     {
         if (disposed) return;
         Native.GetWindowThreadProcessId(window, out var pid);
-        if (pid != ProcessId && !threads.Contains(thread)) return;
+        if (pid != ProcessId && !threads.Contains(thread) && !RelatedWindow(window)) return;
         threads.Add(thread);
         if (ev is 4 or 6) { EscapePressed = false; seen = true; lastOpen = Environment.TickCount64; }
         if (ev is 5 or 7 && (GetAsyncKeyState(0x1B) & 0x8000) != 0) EscapePressed = true;
@@ -44,7 +61,7 @@ sealed class TrayMenuSession : IDisposable
     {
         if (window == 0 || window == new WindowInteropHelper(source).Handle) return true;
         Native.GetWindowThreadProcessId(window, out var pid);
-        return pid == ProcessId || (pid == Environment.ProcessId && PopupInteraction.For(source).HasMenu);
+        return RelatedWindow(window) || IsSystemTray(window) || (pid == Environment.ProcessId && PopupInteraction.For(source).HasMenu);
     }
 
     public bool Update(bool managedMenu)
@@ -60,10 +77,10 @@ sealed class TrayMenuSession : IDisposable
         if (!sent && !PointerPressed()) CompleteRequest();
         popups.Clear();
         foreach (var popup in VisiblePopups())
-            if (!baseline.Contains(popup)) popups.Add(popup);
+            if (!baseline.Contains(popup)) { popups.Add(popup); threads.Add(Native.GetWindowThreadProcessId(popup, out _)); }
         var foreground = Native.GetForegroundWindow();
         var foregroundThread = Native.GetWindowThreadProcessId(foreground, out var foregroundPid);
-        if (foregroundPid == ProcessId) threads.Add(foregroundThread);
+        if (foregroundPid == ProcessId || RelatedWindow(foreground)) threads.Add(foregroundThread);
         var nativeMenu = false;
         foreach (var thread in threads.Where(value => value != 0))
         {
@@ -73,11 +90,13 @@ sealed class TrayMenuSession : IDisposable
         }
         if (managedMenu || nativeMenu || popups.Count > 0)
         {
+            if ((GetAsyncKeyState(0x1B) & 0x8000) != 0) EscapePressed = true;
             seen = true; lastOpen = now; return true;
         }
         if (!sent || now < (seen ? lastOpen + 160 : deadline)) return true;
         PreserveSource = source.IsActive || foreground == 0 || !Native.IsWindowVisible(foreground)
-            || foreground == callback || (menuOwner != 0 && foreground == menuOwner);
+            || foreground == callback || (menuOwner != 0 && foreground == menuOwner)
+            || ReturnFocusRequested && CanRestoreFocus();
         return false;
     }
 
@@ -86,8 +105,7 @@ sealed class TrayMenuSession : IDisposable
         var window = Native.GetAncestor(WindowFromPoint(point), Native.GA_ROOT);
         if (window == 0) return false;
         if (Application.Current.Windows.OfType<Window>().Any(owner => new WindowInteropHelper(owner).Handle == window)) return false;
-        Native.GetWindowThreadProcessId(window, out var pid);
-        return pid == ProcessId && (popups.Contains(window) || IsPopup(window) && !baseline.Contains(window));
+        return RelatedWindow(window) && (popups.Contains(window) || IsPopup(window) && !baseline.Contains(window));
     }
 
     HashSet<nint> VisiblePopups()
@@ -97,12 +115,23 @@ sealed class TrayMenuSession : IDisposable
         Native.EnumWindows((window, _) =>
         {
             if (!Native.IsWindowVisible(window) || own.Contains(window)) return true;
-            Native.GetWindowThreadProcessId(window, out var pid);
-            if (pid == ProcessId && IsPopup(window)) result.Add(window);
+            if (RelatedWindow(window) && IsPopup(window)) result.Add(window);
             return true;
         }, 0);
         return result;
     }
+
+    bool RelatedWindow(nint window)
+    {
+        for (var depth = 0; window != 0 && depth < 16; depth++, window = Native.GetWindow(window, Native.GW_OWNER))
+        {
+            Native.GetWindowThreadProcessId(window, out var pid);
+            if (pid == ProcessId) return true;
+        }
+        return false;
+    }
+
+    static bool IsSystemTray(nint window) => Native.ClassOf(window) is "Shell_TrayWnd" or "Shell_SecondaryTrayWnd" or "NotifyIconOverflowWindow";
 
     static bool IsPopup(nint window)
     {

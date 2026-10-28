@@ -1,8 +1,10 @@
 # WinDock 中文版
 
-基于 [Breno Alvim 的 WinDock 0.5.0](https://github.com/obrenoalvim/windock) 维护的分支，增加简体中文、Everything 搜索和 PecoFence 收纳管理。当前版本为 `0.6.0-preview.9`。
+基于 [Breno Alvim 的 WinDock 0.5.0](https://github.com/obrenoalvim/windock) 维护的分支，增加简体中文、Everything 搜索和 PecoFence 收纳管理。当前版本为 `0.6.0-preview.10`。
 
 ## 使用
+
+目前应保留 Windows 原生任务栏。独立托盘尚未完整替代输入法、语言栏和系统面板，关闭“替换 Windows 任务栏”后仍可使用 Dock、搜索和收纳。通用托盘行为及已知缺口见[系统托盘兼容范围](docs/tray-compatibility.md)。
 
 右击 Dock 空白处，选择“Dock 设置”。界面右上角可切换中文、英语和葡萄牙语。新增功能提供中文和英语文字。
 

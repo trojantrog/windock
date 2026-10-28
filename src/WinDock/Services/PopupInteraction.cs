@@ -32,6 +32,7 @@ sealed class PopupInteraction : IDisposable
     (MouseButton Button, long Sequence)? consumedRelease;
     public FrameworkElement? Anchor { get; set; }
     public event Action? Changed;
+    public event Action<SystemTrayItem>? TrayFocusRestored;
 
     static PopupInteraction()
     {
@@ -149,6 +150,24 @@ sealed class PopupInteraction : IDisposable
         Signal(); UpdateWatchers();
     }
 
+    public void BeginTrayHover(SystemTrayItem item)
+    {
+        if (disposed || external is not null) return;
+        ++generation;
+        acceptInactive = false;
+        external = new(window, item, true);
+        external.CompleteRequest();
+        poll.Start();
+        Signal(); UpdateWatchers();
+    }
+
+    public void CompleteTrayHover(SystemTrayItem item)
+    {
+        if (external is { IsHover: true } session && session.Matches(item)) session.CompleteRequest(160);
+    }
+
+    public void RequestTrayFocus(SystemTrayItem item) => external?.RequestFocus(item);
+
     public void CompleteTrayMenu(bool sent)
     {
         if (external is null) return;
@@ -165,13 +184,13 @@ sealed class PopupInteraction : IDisposable
     void EndTrayMenu(bool preserve)
     {
         if (external is not { } session) return;
-        var restoreFocus = preserve && session.EscapePressed;
+        var restoreFocus = preserve && !session.IsHover && (session.EscapePressed || session.ReturnFocusRequested) && session.CanRestoreFocus();
         external = null;
         session.Dispose(); poll.Stop();
         acceptInactive = preserve;
         acceptedForeground = Native.GetForegroundWindow();
-        if (restoreFocus && window.IsVisible)
-            Native.SetForegroundWindow(new WindowInteropHelper(window).Handle);
+        if (restoreFocus && window.IsVisible && Native.SetForegroundWindow(new WindowInteropHelper(window).Handle))
+            TrayFocusRestored?.Invoke(session.Item);
         Signal(); UpdateWatchers(); Review();
     }
 
@@ -373,7 +392,7 @@ sealed class PopupInteraction : IDisposable
         window.LostMouseCapture -= CaptureChanged;
         window.PreviewMouseDown -= PointerDown; window.PreviewMouseUp -= PointerUp; window.PreviewKeyDown -= KeyDown;
         window.IsVisibleChanged -= VisibilityChanged; window.Closed -= Closed;
-        instances.Remove(window); Changed = null; UpdateWatchers();
+        instances.Remove(window); Changed = null; TrayFocusRestored = null; UpdateWatchers();
     }
 
     delegate nint MouseHookProc(int code, nint wParam, nint lParam);

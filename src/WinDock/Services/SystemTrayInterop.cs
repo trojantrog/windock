@@ -76,7 +76,7 @@ internal static class SystemTrayInterop
 
 internal sealed class TrayHookSession : IDisposable
 {
-    const uint Magic = 0x52544457, Version = 2;
+    const uint Magic = 0x52544457, Version = 3;
     readonly CancellationToken token;
     readonly uint nonce = BitConverter.ToUInt32(RandomNumberGenerator.GetBytes(4)) | 1;
     NamedPipeServerStream? pipe;
@@ -105,7 +105,7 @@ internal sealed class TrayHookSession : IDisposable
         if (protocol() != Version) throw new InvalidDataException(Loc.T("systemTrayVersionFailed"));
         hook = SystemTrayInterop.SetWindowsHookExW(4, NativeLibrary.GetExport(module, "WinDockTrayHook"), module, explorer.Thread);
         if (hook == 0) throw new IOException(Loc.T("systemTrayHookFailed"));
-        var connectMessage = SystemTrayInterop.RegisterWindowMessage("WinDock.TrayHook.Connect.v2");
+        var connectMessage = SystemTrayInterop.RegisterWindowMessage("WinDock.TrayHook.Connect.v3");
         if (SystemTrayInterop.SendMessageTimeoutW(target, connectMessage, (nuint)Environment.ProcessId, (nint)nonce, 0x3, 250, out _) == 0)
             throw new IOException(Loc.T("systemTrayHookFailed"));
         await connection.WaitAsync(TimeSpan.FromSeconds(4), token);
@@ -140,7 +140,7 @@ internal sealed class TrayHookSession : IDisposable
         // Remove only our own hook. Never mutate Explorer's window procedure,
         // taskbar visibility, registry, or another application's hook chain.
         if (target != 0 && hook != 0)
-            SystemTrayInterop.SendMessageTimeoutW(target, SystemTrayInterop.RegisterWindowMessage("WinDock.TrayHook.Disconnect.v2"),
+            SystemTrayInterop.SendMessageTimeoutW(target, SystemTrayInterop.RegisterWindowMessage("WinDock.TrayHook.Disconnect.v3"),
                 (nuint)Environment.ProcessId, (nint)nonce, 0x3, 150, out _);
         if (hook != 0) { SystemTrayInterop.UnhookWindowsHookEx(hook); hook = 0; }
         pipe?.Dispose(); pipe = null;

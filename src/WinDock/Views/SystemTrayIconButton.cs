@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
@@ -36,10 +37,11 @@ public sealed class SystemTrayIconButton : Border
         Width = showName ? Math.Max(78, iconSize + 44) : Math.Max(36, iconSize + 16);
         Height = showName ? iconSize + 46 : Math.Max(36, iconSize + 16);
         Margin = new Thickness(2); UseLayoutRounding = true; SnapsToDevicePixels = true;
-        Focusable = true; Cursor = Cursors.Hand;
-        if (!editing) SetBinding(IsEnabledProperty, new Binding(nameof(SystemTrayItem.CanInvoke)));
+        Focusable = true; Cursor = editing || item.CanInvoke ? Cursors.Hand : Cursors.Arrow;
+        if (!editing) PropertyChangedEventManager.AddHandler(item, ItemChanged, "");
         SetBinding(ToolTipProperty, new Binding(editing ? nameof(SystemTrayItem.AccessibleName) : nameof(SystemTrayItem.HoverTip)));
         SetBinding(AutomationProperties.NameProperty, new Binding(nameof(SystemTrayItem.AccessibleName)));
+        SetBinding(AutomationProperties.HelpTextProperty, new Binding(nameof(SystemTrayItem.Tip)));
         ToolTipService.SetShowOnDisabled(this, true);
         ToolTipService.SetInitialShowDelay(this, Math.Max(250, (int)SystemParameters.MouseHoverTime.TotalMilliseconds));
         ToolTipService.SetShowDuration(this, 15000);
@@ -91,7 +93,12 @@ public sealed class SystemTrayIconButton : Border
             hover.Stop();
             if (!IsMouseOver || editing || !IsEnabled || pressed is not null || Interaction?.IsBusy == true) return;
             Send(0x2A1); // WM_MOUSEHOVER
-            if (item.Version >= 4 && !item.ShowStandardTip) { Send(0x406); popupOpen = true; }
+            if (item.Version >= 4 && item.CanInvoke && !item.ShowStandardTip)
+            {
+                Interaction?.BeginTrayHover(item);
+                popupOpen = Send(0x406);
+                if (!popupOpen) Interaction?.CompleteTrayHover(item);
+            }
         };
         MouseEnter += (_, _) => { Background = hoverBrush; if (!editing) { Send(0x200); hover.Start(); } };
         MouseLeave += (_, _) =>
@@ -125,10 +132,14 @@ public sealed class SystemTrayIconButton : Border
         var item = new MenuItem { Header = title, IsEnabled = enabled };
         item.Click += (_, _) => action(); menu.Items.Add(item);
     }
+
+    void ItemChanged(object? sender, PropertyChangedEventArgs e) => Cursor = item.CanInvoke ? Cursors.Hand : Cursors.Arrow;
+
     void OnDown(object sender, MouseButtonEventArgs e)
     {
         if (e.ChangedButton is not (MouseButton.Left or MouseButton.Right or MouseButton.Middle) || pressed is not null) return;
         if (editing && e.ChangedButton != MouseButton.Left) return; // WPF edit menu
+        if (!editing && !item.CanInvoke) { e.Handled = true; Focus(); return; }
         e.Handled = true; Focus(); pressed = e.ChangedButton; clicks = e.ClickCount; pressedAt = e.GetPosition(this);
         if (!CaptureMouse()) { pressed = null; EndHover(); return; }
         if (editing) return;
@@ -136,9 +147,9 @@ public sealed class SystemTrayIconButton : Border
         EndHover();
         uint message = e.ChangedButton switch
         {
-            MouseButton.Left => e.ClickCount == 2 ? 0x203u : 0x201u,
-            MouseButton.Right => e.ClickCount == 2 ? 0x206u : 0x204u,
-            MouseButton.Middle => e.ClickCount == 2 ? 0x209u : 0x207u, _ => 0
+            MouseButton.Left => e.ClickCount % 2 == 0 ? 0x203u : 0x201u,
+            MouseButton.Right => e.ClickCount % 2 == 0 ? 0x206u : 0x204u,
+            MouseButton.Middle => e.ClickCount % 2 == 0 ? 0x209u : 0x207u, _ => 0
         };
         if (message != 0 && !Send(message)) Interaction?.CompleteTrayMenu(false);
     }
@@ -179,7 +190,7 @@ public sealed class SystemTrayIconButton : Border
             var sent = false;
             switch (e.ChangedButton)
             {
-                case MouseButton.Left: sent = Send(0x202); if (item.Version >= 3) sent |= Send(0x400); service.MarkSeen(item); break;
+                case MouseButton.Left: sent = Send(0x202); if (item.Version >= 3) sent |= Send(0x400); if (sent) service.MarkSeen(item); break;
                 case MouseButton.Right: sent = Send(0x205); if (item.Version >= 3) sent |= Send(0x7B); break;
                 case MouseButton.Middle: sent = Send(0x208); break;
             }
@@ -196,6 +207,7 @@ public sealed class SystemTrayIconButton : Border
             { e.Handled = true; MoveRequested?.Invoke(item, e.Key == Key.Left ? -1 : 1); }
             return;
         }
+        if (!item.CanInvoke) return;
         if (e.Key is Key.Enter or Key.Space)
         {
             e.Handled = true;
@@ -203,7 +215,7 @@ public sealed class SystemTrayIconButton : Border
             EndHover();
             var sent = item.Version >= 3 ? Send(0x401, true) : Send(0x201, true) & Send(0x202, true);
             Interaction?.CompleteTrayMenu(sent);
-            service.MarkSeen(item);
+            if (sent) service.MarkSeen(item);
         }
         else if (e.Key == Key.Apps || (e.Key == Key.F10 && Keyboard.Modifiers.HasFlag(ModifierKeys.Shift)))
         {
@@ -222,13 +234,18 @@ public sealed class SystemTrayIconButton : Border
         if (!popupOpen) return;
         popupOpen = false;
         Send(0x407);
+        Interaction?.CompleteTrayHover(item);
     }
 
     bool Send(uint message, bool keyboard = false)
     {
         Point point;
         if (keyboard) point = PointToScreen(new Point(0, 0));
-        else { Native.GetCursorPos(out var cursor); point = new Point(cursor.X, cursor.Y); }
+        else
+        {
+            if (!Native.GetCursorPos(out var cursor)) return false;
+            point = new Point(cursor.X, cursor.Y);
+        }
         return service.Invoke(item, message, point);
     }
 }

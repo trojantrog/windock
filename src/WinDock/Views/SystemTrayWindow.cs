@@ -32,6 +32,8 @@ public sealed class SystemTrayWindow : Window
         this.hub = hub; dark = DockTheme.Find(hub.Options.Theme).Dark;
         interaction = PopupInteraction.For(this);
         interaction.Changed += () => { if (renderPending && !interaction.IsBusy) QueueRender(); };
+        interaction.TrayFocusRestored += item => row.Children.OfType<SystemTrayIconButton>()
+            .FirstOrDefault(button => ReferenceEquals(button.Item, item))?.Focus();
         Title = Loc.T("systemTrayTitle"); ShowInTaskbar = false; ShowActivated = false;
         WindowStyle = WindowStyle.None; ResizeMode = ResizeMode.NoResize;
         Background = Brushes.Transparent; Topmost = true; SizeToContent = SizeToContent.WidthAndHeight;
@@ -79,6 +81,7 @@ public sealed class SystemTrayWindow : Window
         };
         hub.Service.Icons.CollectionChanged += IconsChanged; hub.Service.PropertyChanged += StatusChanged;
         hub.Service.LayoutChanged += Render; hub.PresentationChanged += OptionsChanged;
+        hub.Service.FocusRequested += interaction.RequestTrayFocus;
         Loaded += (_, _) => { Render(); Place(); position.Start(); };
         position.Tick += (_, _) => Place();
         Closed += (_, _) =>
@@ -87,6 +90,7 @@ public sealed class SystemTrayWindow : Window
             position.Stop(); panel?.Close(); backdrop?.Dispose();
             hub.Service.Icons.CollectionChanged -= IconsChanged; hub.Service.PropertyChanged -= StatusChanged;
             hub.Service.LayoutChanged -= Render; hub.PresentationChanged -= OptionsChanged;
+            hub.Service.FocusRequested -= interaction.RequestTrayFocus;
         };
     }
     void ApplyTheme()

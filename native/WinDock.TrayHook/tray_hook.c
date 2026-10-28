@@ -13,11 +13,11 @@
 #include <string.h>
 
 #define MAGIC 0x52544457u
-#define PROTOCOL 2u
+#define PROTOCOL 3u
 #define QUEUE_SIZE 128
 #define MAX_ICON 256
-#define START_MESSAGE L"WinDock.TrayHook.Connect.v2"
-#define STOP_MESSAGE L"WinDock.TrayHook.Disconnect.v2"
+#define START_MESSAGE L"WinDock.TrayHook.Connect.v3"
+#define STOP_MESSAGE L"WinDock.TrayHook.Disconnect.v3"
 
 #pragma pack(push, 1)
 // Explorer's Shell_NotifyIcon wire representation is 32-bit on x64 as well.
@@ -154,6 +154,10 @@ static BOOL SendIcon(HANDLE pipe, HANDLE process, QueuedIcon *event) {
     packet->operation = event->operation; packet->ownerPid = event->ownerPid;
     packet->width = width; packet->height = height; packet->pixelBytes = bytes;
     packet->icon = event->data;
+    if (event->operation <= NIM_MODIFY && (packet->icon.flags & NIF_ICON) && event->data.icon && !pixels) {
+        packet->icon.flags &= ~NIF_ICON;
+        InterlockedIncrement(&dropped);
+    }
     // Never send handles belonging to Explorer to the host process.
     packet->icon.icon = 0; packet->icon.balloonIcon = 0;
     if (pixels) { CopyMemory((BYTE *)packet + sizeof(IconPacket), pixels, bytes); HeapFree(GetProcessHeap(), 0, pixels); }
@@ -216,16 +220,26 @@ static void Capture(const COPYDATASTRUCT *copy) {
     if (stopped || !copy || copy->dwData != 1 || !copy->lpData ||
         copy->cbData < 8 + 24 || copy->cbData > 4096) return;
     const ShellTrayData *source = (const ShellTrayData *)copy->lpData;
-    if (source->signature != 0x34753423 || source->operation > NIM_SETVERSION ||
-        source->operation == NIM_SETFOCUS || source->icon.size < 24 ||
+    if (source->signature != 0x34753423 || source->operation > NIM_SETVERSION || source->icon.size < 24 ||
         source->icon.size > sizeof(IconData32) || source->icon.size > copy->cbData - 8) return;
     QueuedIcon event = {0};
     event.operation = source->operation;
     CopyMemory(&event.data, &source->icon, source->icon.size);
+    if (event.operation == NIM_SETVERSION && event.data.size < offsetof(IconData32, version) + sizeof(DWORD)) return;
+    if (event.data.size < offsetof(IconData32, stateMask) + sizeof(DWORD)) event.data.flags &= ~NIF_STATE;
+    if (event.data.size < offsetof(IconData32, infoFlags) + sizeof(DWORD)) event.data.flags &= ~(NIF_INFO | NIF_REALTIME);
+    if (event.data.size < offsetof(IconData32, tip) + 64 * sizeof(WCHAR)) event.data.flags &= ~(NIF_TIP | NIF_SHOWTIP);
+    else {
+        size_t tipLength = (event.data.size - offsetof(IconData32, tip)) / sizeof(WCHAR);
+        event.data.tip[(tipLength < 128 ? tipLength : 128) - 1] = 0;
+    }
+    const GUID emptyGuid = {0};
+    BOOL guidOnly = (event.data.flags & NIF_GUID) != 0;
+    if (guidOnly && (event.data.size < offsetof(IconData32, guid) + sizeof(GUID) ||
+        memcmp(&event.data.guid, &emptyGuid, sizeof(GUID)) == 0)) return;
+    if (!guidOnly) event.data.guid = emptyGuid;
     HWND owner = (HWND)(LONG_PTR)(LONG)event.data.window;
     GetWindowThreadProcessId(owner, &event.ownerPid);
-    const GUID emptyGuid = {0};
-    BOOL guidOnly = memcmp(&event.data.guid, &emptyGuid, sizeof(GUID)) != 0;
     if (!event.ownerPid && event.operation != NIM_DELETE && !guidOnly) return;
     DWORD ownerSession = 0, ownSession = 0;
     if (event.ownerPid && (!ProcessIdToSessionId(event.ownerPid, &ownerSession) ||
@@ -235,7 +249,7 @@ static void Capture(const COPYDATASTRUCT *copy) {
     // pipe I/O happen on Worker. Never wait behind a busy renderer or pipe.
     if (!TryAcquireSRWLockExclusive(&queueLock)) { InterlockedIncrement(&dropped); return; }
     if (stopped || count == QUEUE_SIZE) { ReleaseSRWLockExclusive(&queueLock); InterlockedIncrement(&dropped); return; }
-    if ((event.data.flags & NIF_ICON) && event.data.icon)
+    if (event.operation <= NIM_MODIFY && (event.data.flags & NIF_ICON) && event.data.icon)
         event.icon = CopyIcon((HICON)(LONG_PTR)(LONG)event.data.icon);
     queue[(head + count) % QUEUE_SIZE] = event;
     ++count;

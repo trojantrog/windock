@@ -38,7 +38,7 @@
   "dockTitle": "Dock 设置",
   "showDock": "显示 Dock",
   "replaceTaskbar": "替换 Windows 任务栏",
-  "replaceTaskbarDesc": "由 Dock 提供开始菜单、时钟和快捷设置。关闭 WinDock 后恢复原生任务栏，异常退出时也会尝试恢复。",
+  "replaceTaskbarDesc": "隐藏原生任务栏。输入法和系统面板兼容尚未完成，建议保持关闭。退出 WinDock 后恢复任务栏。",
   "autoHide": "自动隐藏",
   "reserve": "为 Dock 留出屏幕空间",
   "reserveDesc": "窗口最大化时停在 Dock 上方。",

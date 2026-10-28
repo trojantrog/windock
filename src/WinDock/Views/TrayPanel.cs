@@ -46,10 +46,13 @@ public sealed class TrayPanel : Flyout
         icons.AllowDrop = true; icons.DragOver += OnDragOver; icons.Drop += OnDrop;
         PreviewKeyDown += Navigate;
         Interaction.Changed += () => { if (renderPending && !dragging && !Interaction.IsBusy) QueueRender(); };
+        Interaction.TrayFocusRestored += item => icons.Children.OfType<SystemTrayIconButton>()
+            .FirstOrDefault(button => ReferenceEquals(button.Item, item))?.Focus();
         if (hub is not null)
         {
             hub.Service.Icons.CollectionChanged += RefreshIcons; hub.Service.Hints.CollectionChanged += RefreshHints;
             hub.Service.PropertyChanged += RefreshStatus; hub.Service.LayoutChanged += QueueRender;
+            hub.Service.FocusRequested += Interaction.RequestTrayFocus;
             hub.PresentationChanged += QueueRender;
         }
         Loaded += (_, _) => icons.Children.OfType<SystemTrayIconButton>().FirstOrDefault()?.Focus();
@@ -60,6 +63,7 @@ public sealed class TrayPanel : Flyout
             if (hub is null) return;
             hub.Service.Icons.CollectionChanged -= RefreshIcons; hub.Service.Hints.CollectionChanged -= RefreshHints;
             hub.Service.PropertyChanged -= RefreshStatus; hub.Service.LayoutChanged -= QueueRender;
+            hub.Service.FocusRequested -= Interaction.RequestTrayFocus;
             hub.PresentationChanged -= QueueRender;
         };
         Render();

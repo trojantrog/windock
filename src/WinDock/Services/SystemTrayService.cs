@@ -17,6 +17,7 @@ public sealed class SystemTrayItem : INotifyPropertyChanged
     public uint Id { get; internal set; }
     public uint Callback { get; internal set; }
     public uint Version { get; internal set; }
+    internal bool RegistrationObserved { get; set; }
     public Guid Guid { get; internal set; }
     public string Title { get; internal set; } = "";
     public string ProcessPath { get; internal set; } = "";
@@ -26,7 +27,7 @@ public sealed class SystemTrayItem : INotifyPropertyChanged
         : ProcessPath.Length > 0 ? $"exe:{ProcessPath.ToLowerInvariant()}:{OwnerClass}:{Id}" : "";
     public string Tip { get; internal set; } = "";
     public bool ShowStandardTip { get; internal set; }
-    public string? HoverTip => Version >= 4 && !ShowStandardTip ? null :
+    public string? HoverTip => Version >= 4 && CanInvoke && !ShowStandardTip ? null :
         Title.Length == 0 || Tip.Contains(Title, StringComparison.OrdinalIgnoreCase) ? (Tip.Length > 0 ? Tip : null) :
         Tip.Length == 0 ? Title : Title + "\n" + Tip;
     public BitmapSource? Icon { get; internal set; }
@@ -44,6 +45,7 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
 {
     readonly Dispatcher dispatcher = Application.Current.Dispatcher;
     readonly DispatcherTimer prune = new() { Interval = TimeSpan.FromSeconds(10) };
+    readonly DispatcherTimer recovery = new() { Interval = TimeSpan.FromSeconds(1) };
     readonly Dictionary<string, SystemTrayItem> known = [];
     readonly TrayIdentity identities = new();
     readonly Dictionary<nint, (long At, int Attempts)> requestedOwners = [];
@@ -54,7 +56,7 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
     bool scheduled, ready;
     int pendingBytes;
     string status = Loc.T("systemTrayOff");
-    DateTime refreshAt;
+    DateTime refreshAt, recoveryAt;
     public ObservableCollection<SystemTrayItem> Icons { get; } = [];
     public ObservableCollection<TrayHint> Hints { get; } = [];
     public string Status { get => status; private set { status = value; Notify(); } }
@@ -62,10 +64,19 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
     public bool HasStatusNotice { get; private set; }
     public event PropertyChangedEventHandler? PropertyChanged;
     public event Action? LayoutChanged;
+    public event Action<SystemTrayItem>? FocusRequested;
 
     public SystemTrayService()
     {
         Loc.Instance.PropertyChanged += LanguageChanged;
+        recovery.Tick += (_, _) =>
+        {
+            if (!Ready) { recovery.Stop(); return; }
+            var now = DateTime.UtcNow;
+            if (now - refreshAt < TimeSpan.FromSeconds(10) || now - recoveryAt < TimeSpan.FromSeconds(30)) return;
+            recoveryAt = now;
+            RequestRefresh();
+        };
         prune.Tick += (_, _) =>
         {
             foreach (var item in Icons.ToArray())
@@ -75,7 +86,8 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
             }
             identities.Keep(Icons.Select(item => item.ProcessId));
             var owners = Icons.Select(item => item.Window).ToHashSet();
-            foreach (var window in requestedOwners.Keys.Where(window => !owners.Contains(window)).ToArray()) requestedOwners.Remove(window);
+            foreach (var window in requestedOwners.Keys.Where(window => !owners.Contains(window)
+                && (!Native.IsWindow(window) || Environment.TickCount64 - requestedOwners[window].At > 120_000)).ToArray()) requestedOwners.Remove(window);
         };
     }
 
@@ -104,7 +116,8 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
                 await session.ReadAsync((kind, data) => Queue(run, kind, data), () => dispatcher.BeginInvoke(() =>
                 {
                     if (lifetime != run) return;
-                    HasStatusNotice = false; Ready = true; Status = Loc.T("systemTrayConnected"); refreshAt = default; RequestRefresh();
+                    HasStatusNotice = false; Ready = true; Status = Loc.T("systemTrayConnected");
+                    refreshAt = recoveryAt = default; RequestRefresh();
                 }));
             }
             catch (OperationCanceledException) when (token.IsCancellationRequested) { break; }
@@ -114,7 +127,7 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
                 _ = dispatcher.BeginInvoke(() =>
                 {
                     if (lifetime != run) return;
-                    Ready = false; ClearIcons();
+                    Ready = false; recovery.Stop(); ClearIcons();
                     Status = error switch
                     {
                         EndOfStreamException or TimeoutException => Loc.T("systemTrayReconnecting"),
@@ -163,7 +176,10 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
         {
             foreach (var (kind, data) in batch)
             {
-                if (kind == 3) { HasStatusNotice = true; Status = Loc.T("systemTrayUpdatesSkipped"); continue; }
+                if (kind == 3)
+                {
+                    HasStatusNotice = true; Status = Loc.T("systemTrayUpdatesSkipped"); recovery.Start(); continue;
+                }
                 Apply(data);
             }
         }
@@ -176,37 +192,50 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
         if (bytes.Length < 976) throw new InvalidDataException();
         uint Read(int offset) => BitConverter.ToUInt32(bytes, offset);
         var operation = Read(0); var pid = Read(4); var width = Read(8); var height = Read(12); var pixels = Read(16);
-        var rawWindow = Read(24); var window = (nint)(int)rawWindow; var id = Read(28); var flags = Read(32);
+        var size = Read(20); var rawWindow = Read(24); var window = (nint)(int)rawWindow; var id = Read(28); var flags = Read(32);
         var callback = Read(36); var state = Read(300); var stateMask = Read(304); var version = Read(820);
-        var guid = new Guid(bytes.AsSpan(956, 16));
-        if (operation is > 4 or 3 || width > 256 || height > 256 || pixels != width * height * 4 || bytes.Length != 976 + pixels)
+        var useGuid = (flags & 0x20) != 0;
+        var guid = useGuid ? new Guid(bytes.AsSpan(956, 16)) : Guid.Empty;
+        if (operation > 4 || size is < 24 or > 956 || width > 256 || height > 256 || (width == 0) != (height == 0)
+            || pixels != width * height * 4 || bytes.Length != 976 + pixels || (useGuid && (size < 952 || guid == Guid.Empty)))
             throw new InvalidDataException();
-        var item = guid != Guid.Empty ? Icons.FirstOrDefault(i => i.Guid == guid) : null;
-        item ??= Icons.FirstOrDefault(i => i.Window == window && i.Id == id);
+        var item = useGuid ? Icons.FirstOrDefault(i => i.Guid == guid)
+            : Icons.FirstOrDefault(i => i.Guid == Guid.Empty && i.Window == window && i.Id == id);
         if (operation == 2) { if (item is not null && (pid == 0 || item.ProcessId == pid)) Remove(item); return; }
-        if (window == 0 && item is not null && guid != Guid.Empty)
+        if (window == 0 && item is not null && useGuid)
         { window = item.Window; pid = item.ProcessId; id = item.Id; }
         Native.GetWindowThreadProcessId(window, out var actualPid);
         if (pid == 0 || pid != actualPid || !Native.IsWindow(window)) return;
-        if (item is not null && item.ProcessId != pid) { Remove(item); item = null; }
-        if (operation == 4) { if (item is not null && version <= 4) { item.Version = version; item.Refresh(); } return; }
+        if (item is not null && item.ProcessId != pid)
+        {
+            if (operation is 3 or 4) return;
+            Remove(item); item = null;
+        }
+        if (operation == 3) { if (item is not null) FocusRequested?.Invoke(item); return; }
+        if (operation == 4)
+        {
+            if (item is not null && version <= 4 && size >= 804) { item.Version = version; item.Refresh(); }
+            else if (item is null) RequestRegistration(window, pid);
+            return;
+        }
         bool added = item is null;
         if (added)
         {
             if (known.Count >= 512) return;
-            item = new SystemTrayItem { Window = window, ProcessId = pid, Id = id, OwnerClass = Native.ClassOf(window), Guid = (flags & 0x20) != 0 ? guid : Guid.Empty };
+            item = new SystemTrayItem { Window = window, ProcessId = pid, Id = id, OwnerClass = Native.ClassOf(window), Guid = guid };
             item.Key = item.Guid == Guid.Empty ? $"{rawWindow:X8}:{id}:{pid}" : item.Guid.ToString();
             known[item.Key] = item;
         }
         var wasHidden = item!.Hidden;
         item.Window = window; item.Id = id;
-        if (operation == 0) item.Version = 0;
+        if (operation == 0) { item.Version = 0; item.RegistrationObserved = true; }
         if ((flags & 1) != 0) item!.Callback = callback;
         if ((flags & 4) != 0)
         {
             item!.Tip = ReadText(bytes, 44, 128);
             item.ShowStandardTip = (flags & 0x80) != 0;
         }
+        else if ((flags & 0x80) != 0) item.ShowStandardTip = true;
         if ((flags & 8) != 0 && (stateMask & 1) != 0) item!.Hidden = (state & 1) != 0;
         if ((flags & 2) != 0)
         {
@@ -214,7 +243,7 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
                 null, bytes.AsSpan(976).ToArray(), (int)width * 4);
             item.Icon?.Freeze();
         }
-        if ((flags & 0x10) != 0)
+        if ((flags & 0x50) == 0x10)
         {
             var text = ReadText(bytes, 308, 256); var title = ReadText(bytes, 824, 64);
             if (!string.IsNullOrWhiteSpace(text))
@@ -228,11 +257,17 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
         item.Refresh();
         if (added) { Icons.Add(item); _ = ResolveIdentity(item); }
         else if (wasHidden != item.Hidden) LayoutChanged?.Invoke();
-        var requested = requestedOwners.GetValueOrDefault(item.Window, (At: long.MinValue / 2, Attempts: 0));
-        if (operation == 1 && !item.CanInvoke && requested.Attempts < 2 && Environment.TickCount64 - requested.At > 30_000)
+        if (operation == 1 && !item.RegistrationObserved) RequestRegistration(item.Window, item.ProcessId);
+    }
+
+    void RequestRegistration(nint window, uint pid)
+    {
+        if (!requestedOwners.ContainsKey(window) && requestedOwners.Count >= 512) return;
+        var requested = requestedOwners.GetValueOrDefault(window, (At: long.MinValue / 2, Attempts: 0));
+        if (window != 0 && pid != 0 && requested.Attempts < 2 && Environment.TickCount64 - requested.At > 30_000)
         {
-            requestedOwners[item.Window] = (Environment.TickCount64, requested.Attempts + 1);
-            TrayReRegistration.RequestOwner(item.Window, item.ProcessId);
+            requestedOwners[window] = (Environment.TickCount64, requested.Attempts + 1);
+            TrayReRegistration.RequestOwner(window, pid);
         }
     }
 
@@ -257,6 +292,7 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
     public void RequestRefresh()
     {
         if (!Ready || DateTime.UtcNow - refreshAt < TimeSpan.FromSeconds(10)) return;
+        recovery.Stop();
         refreshAt = DateTime.UtcNow;
         HasStatusNotice = false; Status = Loc.T("systemTrayConnected");
         var owners = Icons.Select(icon => (icon.Window, icon.ProcessId)).Distinct().ToArray();
@@ -291,7 +327,7 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
             _ = completing.ContinueWith(_ => run.Dispose(), TaskScheduler.Default);
         runner = null;
         // The runner owns cancellation registrations until it completes.
-        prune.Stop(); Ready = false; ClearIcons(); Hints.Clear(); Status = Loc.T("systemTrayOff");
+        prune.Stop(); recovery.Stop(); Ready = false; ClearIcons(); Hints.Clear(); Status = Loc.T("systemTrayOff");
         lock (pendingLock) { pending.Clear(); pendingBytes = 0; scheduled = false; }
     }
     public void Dispose() { Loc.Instance.PropertyChanged -= LanguageChanged; Stop(); }
