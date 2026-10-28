@@ -14,12 +14,12 @@
 #include "tray_images.h"
 
 #define MAGIC 0x52544457u
-#define PROTOCOL 6u
+#define PROTOCOL 7u
 #define QUEUE_SIZE 128
 #define PENDING_SIZE 32
 #define MAX_ICON 256
-#define START_MESSAGE L"WinDock.TrayHook.Connect.v6"
-#define STOP_MESSAGE L"WinDock.TrayHook.Disconnect.v6"
+#define START_MESSAGE L"WinDock.TrayHook.Connect.v7"
+#define STOP_MESSAGE L"WinDock.TrayHook.Disconnect.v7"
 #define IMAGE_OUTPUT_SIZE 8u
 #define IMAGE_OUTPUT_BYTES (2u * 1024u * 1024u)
 

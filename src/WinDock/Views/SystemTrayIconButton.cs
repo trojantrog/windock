@@ -39,7 +39,7 @@ public sealed class SystemTrayIconButton : Border
         Width = showName ? Math.Max(78, iconSize + 44) : Math.Max(36, iconSize + 16);
         Height = showName ? iconSize + 46 : Math.Max(36, iconSize + 16);
         Margin = new Thickness(2); UseLayoutRounding = true; SnapsToDevicePixels = true;
-        Focusable = true; Cursor = editing || item.CanInvoke || TrayActionRouter.CanAttempt(item) ? Cursors.Hand : Cursors.Arrow;
+        Focusable = true; Cursor = editing || item.CanUseOwnerCallback || TrayActionRouter.CanAttempt(item) ? Cursors.Hand : Cursors.Arrow;
         if (!editing) PropertyChangedEventManager.AddHandler(item, ItemChanged, "");
         SetBinding(ToolTipProperty, new Binding(editing ? nameof(SystemTrayItem.AccessibleName) : nameof(SystemTrayItem.HoverTip)));
         SetBinding(AutomationProperties.NameProperty, new Binding(nameof(SystemTrayItem.AccessibleName)));
@@ -141,11 +141,11 @@ public sealed class SystemTrayIconButton : Border
         item.Click += (_, _) => action(); menu.Items.Add(item);
     }
 
-    bool AppOwnsHover => !item.Hidden && item.CanInvoke && item.ProcessStarted > 0 && item.Version >= 4 && !item.ShowStandardTip;
+    bool AppOwnsHover => !item.Hidden && item.CanUseOwnerCallback && item.Version >= 4 && !item.ShowStandardTip;
 
     void ItemChanged(object? sender, PropertyChangedEventArgs e)
     {
-        Cursor = !item.Hidden && (item.CanInvoke || TrayActionRouter.CanAttempt(item)) ? Cursors.Hand : Cursors.Arrow;
+        Cursor = !item.Hidden && (item.CanUseOwnerCallback || TrayActionRouter.CanAttempt(item)) ? Cursors.Hand : Cursors.Arrow;
         var ownsHover = AppOwnsHover;
         if (!ownsHover && popupOpen) EndHover();
         if (ownsHover == appOwnsHover) return;
@@ -159,11 +159,11 @@ public sealed class SystemTrayIconButton : Border
     {
         if (e.ChangedButton is not (MouseButton.Left or MouseButton.Right or MouseButton.Middle) || pressed is not null) return;
         if (editing && e.ChangedButton != MouseButton.Left) return; // WPF edit menu
-        if (!editing && (nativeActivation is not null || !item.CanInvoke
+        if (!editing && (nativeActivation is not null || !item.CanUseOwnerCallback
             && (e.ChangedButton != MouseButton.Left || !TrayActionRouter.CanAttempt(item))))
         { e.Handled = true; Focus(); return; }
         e.Handled = true; Focus(); pressed = e.ChangedButton; clicks = e.ClickCount; pressedAt = e.GetPosition(this);
-        nativePress = !editing && !item.CanInvoke;
+        nativePress = !editing && !item.CanUseOwnerCallback;
         if (!CaptureMouse()) { pressed = null; nativePress = false; EndHover(); return; }
         if (editing) return;
         if (nativePress) { EndHover(); return; }
@@ -196,7 +196,7 @@ public sealed class SystemTrayIconButton : Border
     {
         if (pressed != e.ChangedButton)
         {
-            if (!editing && (nativeActivation is not null || !item.CanInvoke)
+            if (!editing && (nativeActivation is not null || !item.CanUseOwnerCallback)
                 && e.ChangedButton is MouseButton.Left or MouseButton.Right or MouseButton.Middle) e.Handled = true;
             return;
         }
@@ -244,7 +244,7 @@ public sealed class SystemTrayIconButton : Border
             { e.Handled = true; MoveRequested?.Invoke(item, e.Key == Key.Left ? -1 : 1); }
             return;
         }
-        if (!item.CanInvoke || nativeActivation is not null)
+        if (!item.CanUseOwnerCallback || nativeActivation is not null)
         {
             if (e.Key is Key.Enter or Key.Space)
             {
@@ -300,6 +300,9 @@ public sealed class SystemTrayIconButton : Border
 
     bool Send(uint message, bool keyboard = false, TrayEndpoint? expected = null)
     {
+        // A sequence-only identity authorizes the native default-action route,
+        // never an application callback, including custom hover or popup close.
+        if (!item.CanUseOwnerCallback) return false;
         Point point;
         if (keyboard) point = PointToScreen(new Point(0, 0));
         else

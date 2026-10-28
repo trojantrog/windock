@@ -13,6 +13,7 @@
 #include "tray_image_abi.h"
 #include "tray_image_profile.h"
 #include "tray_image_verify.h"
+#include "tray_process_sequences.h"
 
 #define IMAGE_JOBS 2u
 #define MAX_MODEL_ICONS 512u
@@ -30,6 +31,7 @@ typedef struct {
     DWORD host, nonce;
     uint64_t epoch;
     TrayImageProfile *profile;
+    TrayProcessSequences *processSequences;
     ImageJob jobs[IMAGE_JOBS];
     unsigned int count, cursor;
     uintptr_t lastManager;
@@ -99,43 +101,67 @@ static BOOL BitmapGeometry(WdSoftwareBitmap *bitmap, TrayImageBody *body) {
     return body->pixelBytes && body->pixelBytes <= TRAY_IMAGE_MAX_BYTES;
 }
 
-static BOOL OwnerIdentity(uintptr_t item, TrayImageBody *body) {
+// A denied process query yields only a pending sequence candidate, with a zero
+// instanceValue. It is not an identity until both fresh batch queries agree.
+static BOOL ProbeOwner(uintptr_t item, TrayImageBody *body) {
     uintptr_t window = 0;
     if (!TrayImageReadMemory(item + tray_image_layout.itemWindowOffset, &window, sizeof(window)) ||
         !TrayImageReadMemory(item + tray_image_layout.itemIdOffset, &body->id, sizeof(body->id)) ||
         !TrayImageReadMemory(item + tray_image_layout.itemGuidOffset, &body->guid, sizeof(body->guid))) return FALSE;
     HWND hwnd = (HWND)window;
-    DWORD pid = 0, tid = GetWindowThreadProcessId(hwnd, &pid), ownSession = 0, ownerSession = 0;
-    if (!hwnd || !tid || !pid || !IsWindow(hwnd) ||
-        !ProcessIdToSessionId(GetCurrentProcessId(), &ownSession) ||
-        !ProcessIdToSessionId(pid, &ownerSession) || ownSession != ownerSession) return FALSE;
+    DWORD pid = 0, tid = GetWindowThreadProcessId(hwnd, &pid);
+    if (!hwnd || !tid || !pid || !IsWindow(hwnd)) return FALSE;
+    body->window = (uint64_t)window; body->process = pid; body->thread = tid;
     HANDLE process = pid == GetCurrentProcessId() ? GetCurrentProcess() :
         OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-    if (!process) return FALSE;
+    if (!process) {
+        if (GetLastError() != ERROR_ACCESS_DENIED) return FALSE;
+        // This entry came from the verified current Explorer model, not IPC.
+        // ProcessIdToSessionId also requires owner query permission. Do not
+        // pretend that a sequence result contains an independently read session.
+        body->instanceKind = TRAY_INSTANCE_SYSTEM_SEQUENCE;
+        body->instanceValue = 0;
+        return TRUE;
+    }
+    DWORD ownSession = 0, ownerSession = 0;
     FILETIME started, exited, kernel, user;
-    BOOL ok = GetProcessTimes(process, &started, &exited, &kernel, &user);
+    BOOL ok = ProcessIdToSessionId(GetCurrentProcessId(), &ownSession) &&
+        ProcessIdToSessionId(pid, &ownerSession) && ownSession == ownerSession &&
+        GetProcessTimes(process, &started, &exited, &kernel, &user);
     if (pid != GetCurrentProcessId()) CloseHandle(process);
     if (!ok) return FALSE;
-    body->window = (uint64_t)window; body->process = pid; body->thread = tid;
-    body->processStarted = ((uint64_t)started.dwHighDateTime << 32) | started.dwLowDateTime;
-    return body->processStarted != 0;
+    body->instanceKind = TRAY_INSTANCE_CREATION_TIME;
+    body->instanceValue = ((uint64_t)started.dwHighDateTime << 32) | started.dwLowDateTime;
+    return body->instanceValue != 0;
 }
 
-static BOOL SameIdentity(const TrayImageBody *a, const TrayImageBody *b) {
-    return a->window == b->window && a->process == b->process && a->thread == b->thread &&
-        a->id == b->id && a->processStarted == b->processStarted &&
-        memcmp(&a->guid, &b->guid, sizeof(GUID)) == 0;
+static BOOL SameWindowOwner(const TrayImageBody *body) {
+    DWORD pid = 0;
+    DWORD tid = GetWindowThreadProcessId((HWND)(uintptr_t)body->window, &pid);
+    return tid && tid == body->thread && pid == body->process && IsWindow((HWND)(uintptr_t)body->window);
+}
+
+static BOOL MatchesOwnerProbe(const TrayImageBody *expected, const TrayImageBody *probe) {
+    if (!expected->instanceValue || expected->window != probe->window || expected->process != probe->process ||
+        expected->thread != probe->thread || expected->id != probe->id ||
+        expected->instanceKind != probe->instanceKind || memcmp(&expected->guid, &probe->guid, sizeof(GUID))) return FALSE;
+    if (expected->instanceKind == TRAY_INSTANCE_CREATION_TIME)
+        return expected->instanceValue == probe->instanceValue;
+    // These candidates must still pass a second, independent sequence query
+    // after every getter has finished and before any job reaches the worker.
+    return expected->instanceKind == TRAY_INSTANCE_SYSTEM_SEQUENCE && probe->instanceValue == 0;
 }
 
 // The caller holds imageLock only after a successful TryAcquire on the UI
 // thread. The worker never holds this lock across file, COM or pipe operations.
-static DWORD CaptureItem(ImageEngine *state, uintptr_t item, ImageJob *job) {
+static DWORD CaptureItem(ImageEngine *state, uintptr_t item, const TrayImageBody *expected, ImageJob *job) {
     uintptr_t base = TrayImageProfileBase(state->profile);
     uintptr_t iface = item + tray_image_layout.itemInterfaceOffset;
     if (iface < item || !SameVtable(item, base + tray_image_layout.itemVtableRva) ||
         !SameVtable(iface, base + tray_image_layout.itemInterfaceVtableRva)) return 5;
-    TrayImageBody identity = {0};
-    if (!OwnerIdentity(item, &identity)) return 5;
+    TrayImageBody before = {0};
+    if (!ProbeOwner(item, &before) || !MatchesOwnerProbe(expected, &before)) return 5;
+    TrayImageBody identity = *expected;
     uint64_t mutation = TrayHookCurrentMutation();
     IUnknown *image = NULL, *agile = NULL;
     WdSoftwareBitmap *bitmap = NULL;
@@ -155,7 +181,7 @@ static DWORD CaptureItem(ImageEngine *state, uintptr_t item, ImageJob *job) {
         SUCCEEDED(bitmap->lpVtbl->QueryInterface(bitmap, &WD_IID_AGILE, (void **)&agile)) && agile) {
         status = 6;
         TrayImageBody after = {0};
-        if (BitmapGeometry(bitmap, &identity) && OwnerIdentity(item, &after) && SameIdentity(&identity, &after) &&
+        if (BitmapGeometry(bitmap, &identity) && ProbeOwner(item, &after) && MatchesOwnerProbe(&identity, &after) &&
             Active(state->nonce) && TrayHookImageBoundary(state->nonce) &&
             mutation == TrayHookCurrentMutation() &&
             SameVtable(iface, base + tray_image_layout.itemInterfaceVtableRva)) {
@@ -229,9 +255,11 @@ static DWORD WINAPI ImageWorker(void *parameter) {
     HMODULE held = state->module;
     HRESULT initialized = RoInitialize(RO_INIT_MULTITHREADED);
     TrayImageProfile *profile = TrayImageProfileCreate();
+    TrayProcessSequences *processSequences = TrayProcessSequencesCreate();
     WdBufferFactory *factory = SUCCEEDED(initialized) ? CreateBufferFactory() : NULL;
     AcquireSRWLockExclusive(&imageLock);
     state->profile = profile;
+    state->processSequences = processSequences;
     state->profileRejected = profile == NULL;
     state->pixelsRejected = factory == NULL;
     state->ready = TRUE;
@@ -287,6 +315,7 @@ static DWORD WINAPI ImageWorker(void *parameter) {
     // No private object was ever moved to this thread. All owned bitmaps and
     // factory references are gone before the engine allows a replacement worker.
     if (factory) factory->lpVtbl->Release(factory);
+    TrayProcessSequencesDestroy(processSequences);
     if (profile) TrayImageProfileDestroy(profile);
     if (SUCCEEDED(initialized)) RoUninitialize();
     AcquireSRWLockExclusive(&imageLock);
@@ -368,6 +397,7 @@ void TrayImagesRequest(HWND tray, DWORD host, DWORD nonce) {
     IUnknown *rootReference = NULL;
     IUnknown *candidates[IMAGE_JOBS] = {0};
     uintptr_t candidateItems[IMAGE_JOBS] = {0};
+    TrayImageBody candidateOwners[IMAGE_JOBS] = {0};
     unsigned int candidateCount = 0;
     uint64_t requestMutation = TrayHookCurrentMutation();
     if (ReadPointer(base + tray_image_layout.rootRva, &root) &&
@@ -405,13 +435,60 @@ void TrayImagesRequest(HWND tray, DWORD host, DWORD nonce) {
                 candidates[candidateCount++] = reference;
             }
         }
+        DWORD deniedProcesses[IMAGE_JOBS] = {0};
+        unsigned int deniedIndices[IMAGE_JOBS] = {0}, deniedCount = 0;
+        uint64_t beforeSequences[IMAGE_JOBS] = {0};
+        for (unsigned int i = 0; i < candidateCount; ++i) {
+            if (!ProbeOwner(candidateItems[i], &candidateOwners[i])) {
+                ZeroMemory(&candidateOwners[i], sizeof(candidateOwners[i]));
+                continue;
+            }
+            if (candidateOwners[i].instanceKind == TRAY_INSTANCE_SYSTEM_SEQUENCE) {
+                deniedProcesses[deniedCount] = candidateOwners[i].process;
+                deniedIndices[deniedCount++] = i;
+            }
+        }
+        // Two candidates share one fresh pre-getter snapshot. A failed or
+        // oversized query only excludes denied-owner candidates from this round.
+        if (deniedCount && TrayProcessSequencesRead(state->processSequences,
+            deniedProcesses, beforeSequences, deniedCount)) {
+            for (unsigned int i = 0; i < deniedCount; ++i)
+                candidateOwners[deniedIndices[i]].instanceValue = beforeSequences[i];
+        }
         for (unsigned int i = 0; i < candidateCount; ++i) {
             if (!Active(nonce) || !TrayHookImageBoundary(nonce) || requestMutation != TrayHookCurrentMutation() ||
                 !SameModel(base, root, model, manager)) { status = 3; break; }
+            if (!candidateOwners[i].instanceValue) { lastFailure = 5; continue; }
             ImageJob job = {0};
-            DWORD failure = CaptureItem(state, candidateItems[i], &job);
+            DWORD failure = CaptureItem(state, candidateItems[i], &candidateOwners[i], &job);
             if (!failure) state->jobs[state->count++] = job;
             else lastFailure = failure;
+        }
+        // Re-query after all COM getters. No cached PID result can complete a
+        // sequence identity. The image lock keeps these jobs private until this
+        // check has removed every missing, recycled or changed owner.
+        deniedCount = 0;
+        for (unsigned int i = 0; i < state->count; ++i) {
+            if (state->jobs[i].body.instanceKind == TRAY_INSTANCE_SYSTEM_SEQUENCE) {
+                deniedProcesses[deniedCount] = state->jobs[i].body.process;
+                deniedIndices[deniedCount++] = i;
+            }
+        }
+        if (deniedCount) {
+            uint64_t afterSequences[IMAGE_JOBS] = {0};
+            BOOL verified = TrayProcessSequencesRead(state->processSequences,
+                deniedProcesses, afterSequences, deniedCount);
+            for (unsigned int i = 0; i < deniedCount; ++i) {
+                ImageJob *job = &state->jobs[deniedIndices[i]];
+                if (!verified || afterSequences[i] != job->body.instanceValue || !SameWindowOwner(&job->body)) {
+                    job->bitmap->lpVtbl->Release(job->bitmap);
+                    job->bitmap = NULL; lastFailure = 5;
+                }
+            }
+            unsigned int kept = 0;
+            for (unsigned int i = 0; i < state->count; ++i)
+                if (state->jobs[i].bitmap) state->jobs[kept++] = state->jobs[i];
+            state->count = kept;
         }
         if (!available) status = 0;
         else if (!state->count && !status) status = lastFailure;

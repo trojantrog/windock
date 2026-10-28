@@ -3,13 +3,21 @@ using System.Windows.Threading;
 
 namespace WinDock.Services;
 
-// Confirmed callbacks continue through SystemTrayService.Invoke. This route is
-// only a default action for a real, currently visible native icon whose callback
-// protocol was not observed; it never upgrades CanInvoke or retries a callback.
+// Owners with a verified creation time continue through SystemTrayService.Invoke.
+// This route is only a default action for a real, currently visible native icon
+// whose callback cannot be used. It never upgrades callback knowledge, supplies
+// right/double-click semantics, or retries a submitted callback.
 internal static class TrayActionRouter
 {
-    internal static bool CanAttempt(SystemTrayItem item) => !item.CanInvoke && !item.Hidden
-        && item.Window != 0 && item.ProcessId != 0 && item.ProcessStarted > 0 && (!item.CallbackObserved || !item.VersionObserved)
+    internal static bool CanAttempt(SystemTrayItem item) => !item.CanUseOwnerCallback && !item.Hidden
+        && item.Window != 0 && item.ProcessId != 0 && item.ThreadId != 0 && item.OwnerClass.Length > 0 && item.Instance.IsValid
+        && (item.Instance.Kind switch
+        {
+            ProcessInstanceKind.CreationTime => item.ProcessStarted > 0 && item.Instance.Value == (ulong)item.ProcessStarted
+                && (!item.CallbackObserved || !item.VersionObserved),
+            ProcessInstanceKind.SystemSequence => item.ProcessStarted == 0 && item.NativeModelObserved,
+            _ => false
+        })
         && (item.Guid == Guid.Empty || item.RegistrationObserved || item.NativeModelObserved)
         && (!item.CallbackObserved || item.Callback is >= 0x400 and <= 0xFFFF);
 
@@ -24,20 +32,22 @@ internal static class TrayActionRouter
         // its provider is still occupying the worker and this request is Busy.
         interaction.CancelPendingNativeAction();
         if (!service.Ready || !service.ProtocolCurrent || !CanAttempt(item) || !service.Icons.Contains(item) || cancellation.IsCancellationRequested
-            || !anchor.IsVisible || !window.IsVisible)
+            || !anchor.IsVisible || !window.IsVisible || !service.TryCaptureNativeActionSession(out var explorer))
             return NativeTrayActionResult.Unavailable;
-        var identity = new NativeTrayIdentity(item.Window, item.ProcessId, item.Id, item.Guid, item.ProcessStarted, item.ThreadId, item.OwnerClass);
+        var identity = new NativeTrayIdentity(item.Window, item.ProcessId, item.Id, item.Guid, item.ProcessStarted,
+            item.ThreadId, item.OwnerClass, item.Instance, explorer);
         var generation = service.RegistrationGeneration;
         var protocolSequence = service.ProtocolSequence;
         NativeTrayOperation? operation = null;
 
-        bool ProtocolCurrent() => service.ProtocolCurrent && service.ProtocolSequence == protocolSequence && service.RegistrationGeneration == generation;
+        bool ProtocolCurrent() => service.ProtocolCurrent && service.ProtocolSequence == protocolSequence
+            && service.RegistrationGeneration == generation && service.IsCurrentNativeActionSession(explorer);
 
         bool Current() => !cancellation.IsCancellationRequested && service.Ready && ProtocolCurrent()
             && service.Icons.Contains(item) && CanAttempt(item) && anchor.IsVisible && window.IsVisible
             && Window.GetWindow(anchor) == window && identity.Window == item.Window && identity.ProcessId == item.ProcessId
             && identity.Id == item.Id && identity.Guid == item.Guid && identity.ProcessStarted == item.ProcessStarted
-            && identity.ThreadId == item.ThreadId && identity.OwnerClass == item.OwnerClass;
+            && identity.ThreadId == item.ThreadId && identity.OwnerClass == item.OwnerClass && identity.Instance == item.Instance;
 
         void Changed(object? sender, EventArgs args)
         {

@@ -113,9 +113,15 @@ PDB 下载自[微软符号服务器的精确 GUID/age 路径](https://msdl.micro
 
 [`WaitForSingleObject`](https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-waitforsingleobject) 要求句柄具有 `SYNCHRONIZE` 权限；查询创建时间可使用 [`PROCESS_QUERY_LIMITED_INFORMATION`](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getprocesstimes)。[`GetExitCodeProcess`](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getexitcodeprocess) 返回的 259 也可能是应用实际退出码，不能据此替代存活证明。诊断将其保留为原始数值。
 
-preview.22 正常启动时，两项 NVIDIA 后台进程对上述两种访问均返回错误 5。后续可研究微软公开的 [`SystemBasicProcessInformation`](https://learn.microsoft.com/en-us/windows/win32/api/winternl/nf-winternl-ntquerysysteminformation)：Windows 11 build 26100.4770 起提供用于识别 PID 复用的 `SequenceNumber`，[固定 SDK 头文件](https://github.com/microsoft/win32metadata/blob/64ed9177fb76eb244fc9051c74b8a93fdfe20873/generation/WinSDK/RecompiledIdlHeaders/um/winternl.h#L270) 明确枚举值为 252。本机文件版本符合门槛，但尚未调用验证它是否返回这两个候选进程。
+preview.22 正常启动时，两项 NVIDIA 后台进程对上述两种访问均返回错误 5。preview.23 新增微软公开的 [`SystemBasicProcessInformation`](https://learn.microsoft.com/en-us/windows/win32/api/winternl/nf-winternl-ntquerysysteminformation) 路径：Windows 11 build 26100.4770 起提供用于识别 PID 复用的 `SequenceNumber`，[固定 SDK 头文件](https://github.com/microsoft/win32metadata/blob/64ed9177fb76eb244fc9051c74b8a93fdfe20873/generation/WinSDK/RecompiledIdlHeaders/um/winternl.h#L270) 明确枚举值为 252。仅在严格打开进程返回错误 5 时使用；其他失败不会自动放行。
 
-该方案需要显式区分创建时间与进程序号，按候选 PID 保留最小信息并在读取前后核对；不能将序号填进 `ProcessStarted`，或让未知创建时间落入宽松的窗口存在判断。初期操作应通过同一 Explorer 会话中的真实托盘控件，继续核对控件唯一性、范围、登记代际及提交前身份；这只能覆盖控件实际支持的默认动作。原生图像消息也需同步增加明确的身份类型。上述路径尚未实现，不能据此声称右键、自定义悬停、关闭的溢出区或受限进程已兼容。
+实例标识明确区分 `CreationTime` 和 `SystemSequence`。新路径在模型完整重读前后取得两份序号，核对候选 PID、窗口、线程、窗口类和登记内容；只保留候选的 PID 与序号，不解析进程名称或父进程。序号不会填入 `ProcessStarted`，无法取得的路径和创建时间保持未知。后台读取器最多接受 512 个候选、4 次查询、8 MiB 缓冲和 500 毫秒处理预算；系统同步调用无法强制取消，其返回超过预算时丢弃。单个查询位置忙时不堆积线程，查询失败也不解释为进程已经退出。
+
+`OwnerAccess` 统计最终仍被拒绝的条目，`OwnerAccessRecovered` 统计严格打开失败后由序号验证恢复的条目；原访问错误诊断仍保留。`nativeModelOwnerSequenceStatus` 报告序号读取阶段，图像 v7 同时传输实例类型和值。新路径不持有所属进程的生存期句柄，也不独立证明该进程的会话号，因此不能用于直接发送 owner 回调。
+
+操作只通过同一 Explorer 会话中的真实托盘控件，保留控件唯一性、范围、登记代际以及提交前的新序号校验。界面仅允许默认点击或 Enter/Space；右键、双击第二下和应用自绘悬停不改成默认点击。可操作控件必须实际可见，溢出区已经展开时才能使用其中的控件。源码与编译检查不能证明这些动作在所有应用中正常，Windows 原生任务栏继续保留。
+
+受限条目重新成功登记，或新条目的普通身份读取失败时，会安排一次模型重新核验。请求按当前连接和最新登记代次合并，同时仅执行一次读取，两次开始至少间隔 2 秒，并保留 750 毫秒登记稳定等待。读取期间到达的更新继续排队；失败的尝试回到原周期刷新，不沿用旧模型证明，也不无限新建读取任务。
 
 ## 补充离线取证：当前图像
 

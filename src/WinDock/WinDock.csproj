@@ -11,7 +11,7 @@
     <RootNamespace>WinDock</RootNamespace>
     <ApplicationIcon>Assets\app.ico</ApplicationIcon>
     <StartupObject>WinDock.Program</StartupObject>
-    <Version>0.6.0-preview.22</Version>
+    <Version>0.6.0-preview.23</Version>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <Product>WinDock</Product>
@@ -53,9 +53,9 @@
     <EmbeddedResource Include="Profiles\NativeTray\*.json" LogicalName="NativeTrayProfiles.%(Filename)%(Extension)" />
   </ItemGroup>
 
-  <ItemGroup Condition="Exists('..\..\native\WinDock.TrayHook\bin\win-x64\WinDock.TrayHook.v6.x64.dll')">
-    <Content Include="..\..\native\WinDock.TrayHook\bin\win-x64\WinDock.TrayHook.v6.x64.dll" Link="WinDock.TrayHook.v6.x64.dll" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
-    <Content Include="..\..\native\WinDock.TrayHook\bin\win-x64\WinDock.TrayHook.v6.x64.dll.sha256" Link="WinDock.TrayHook.v6.x64.dll.sha256" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
+  <ItemGroup Condition="Exists('..\..\native\WinDock.TrayHook\bin\win-x64\WinDock.TrayHook.v7.x64.dll')">
+    <Content Include="..\..\native\WinDock.TrayHook\bin\win-x64\WinDock.TrayHook.v7.x64.dll" Link="WinDock.TrayHook.v7.x64.dll" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
+    <Content Include="..\..\native\WinDock.TrayHook\bin\win-x64\WinDock.TrayHook.v7.x64.dll.sha256" Link="WinDock.TrayHook.v7.x64.dll.sha256" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
     <Content Include="..\..\third_party\YASB-LICENSE.txt" Link="licenses\YASB-LICENSE.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
   </ItemGroup>
 
@@ -71,7 +71,7 @@
   </Target>
 
   <Target Name="RequireNativeTrayForRelease" BeforeTargets="PrepareForPublish" Condition="'$(Configuration)' == 'Release' And '$(RuntimeIdentifier)' == 'win-x64'">
-    <Error Condition="!Exists('..\..\native\WinDock.TrayHook\bin\win-x64\WinDock.TrayHook.v6.x64.dll') Or !Exists('..\..\native\WinDock.TrayHook\bin\win-x64\WinDock.TrayHook.v6.x64.dll.sha256')" Text="Build native/WinDock.TrayHook with build.ps1 before publishing." />
+    <Error Condition="!Exists('..\..\native\WinDock.TrayHook\bin\win-x64\WinDock.TrayHook.v7.x64.dll') Or !Exists('..\..\native\WinDock.TrayHook\bin\win-x64\WinDock.TrayHook.v7.x64.dll.sha256')" Text="Build native/WinDock.TrayHook with build.ps1 before publishing." />
   </Target>
 
 </Project>

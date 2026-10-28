@@ -8,7 +8,11 @@ namespace WinDock.Services;
 
 internal enum NativeTrayActionResult { Requested, Unavailable, Busy, Cancelled, TimedOut, Pending }
 
-internal sealed record NativeTrayIdentity(nint Window, uint ProcessId, uint Id, Guid Guid, long ProcessStarted, uint ThreadId, string OwnerClass);
+internal sealed record NativeTrayExplorerSession(TrayHookSession Session, nint Window, uint Process, uint Thread,
+    long ProcessStarted, uint Nonce);
+
+internal sealed record NativeTrayIdentity(nint Window, uint ProcessId, uint Id, Guid Guid, long ProcessStarted,
+    uint ThreadId, string OwnerClass, ProcessInstanceKey Instance, NativeTrayExplorerSession Explorer);
 
 internal sealed record NativeTraySurface(nint Window, uint ProcessId, Native.Rect IconBounds)
 {
@@ -33,6 +37,7 @@ internal sealed class NativeTrayOperation
     bool expired, cancelled, submitted;
     internal NativeTrayIdentity Identity { get; }
     internal Func<NativeTraySurface, bool> Prepare { get; }
+    internal CancellationToken Cancellation => cancellation;
 
     internal NativeTrayOperation(NativeTrayIdentity identity, Func<NativeTraySurface, bool> prepare,
         Func<bool> protocolCurrent, CancellationToken cancellation)
@@ -154,38 +159,59 @@ internal static class NativeTrayAction
     {
         if (operation.Stopped) return NativeTrayActionResult.Cancelled;
         var identity = operation.Identity;
-        var explorer = SystemTrayInterop.ExplorerTray();
-        if (explorer.Window == 0 || explorer.Process == 0) return NativeTrayActionResult.Unavailable;
-        var owner = Native.OpenProcess(0x101000, false, (int)identity.ProcessId);
+        // The UIA provider must belong to the Explorer instance that supplied
+        // this registration. Never discover a replacement shell mid-operation.
+        var explorer = identity.Explorer;
+        var sequenceOwner = identity.Instance.Kind == ProcessInstanceKind.SystemSequence;
+        if (explorer.Window == 0 || explorer.Process == 0 || explorer.Thread == 0 || explorer.ProcessStarted <= 0
+            || explorer.Nonce == 0 || !identity.Instance.IsValid
+            || (sequenceOwner ? identity.ProcessStarted != 0
+                : identity.Instance.Kind != ProcessInstanceKind.CreationTime || identity.ProcessStarted <= 0
+                    || identity.Instance.Value != (ulong)identity.ProcessStarted))
+            return NativeTrayActionResult.Unavailable;
+        // Protected owners cannot supply a query/synchronize handle. Only that
+        // path uses the OS's fresh process sequence; the creation-time route
+        // retains its original pinned owner handle and strict lifetime check.
+        var owner = sequenceOwner ? 0 : Native.OpenProcess(0x101000, false, (int)identity.ProcessId);
         var shell = Native.OpenProcess(0x101000, false, (int)explorer.Process);
         try
         {
-            if (owner == 0 || shell == 0 || !IsExplorerProcess(shell) || identity.ProcessStarted <= 0
-                || !GetProcessTimes(owner, out var created, out _, out _, out _) || identity.ProcessStarted != created)
+            if (shell == 0 || !IsExplorerProcess(shell)
+                || !GetProcessTimes(shell, out var shellCreated, out _, out _, out _) || explorer.ProcessStarted != shellCreated
+                || (!sequenceOwner && (owner == 0 || !GetProcessTimes(owner, out var created, out _, out _, out _)
+                    || identity.ProcessStarted != created)))
                 return NativeTrayActionResult.Unavailable;
 
             bool Current()
             {
                 var ownerThread = Native.GetWindowThreadProcessId(identity.Window, out var pid);
-                Native.GetWindowThreadProcessId(explorer.Window, out var shellPid);
+                var shellThread = Native.GetWindowThreadProcessId(explorer.Window, out var shellPid);
                 return !operation.Stopped && pid == identity.ProcessId && ownerThread == identity.ThreadId
                     && Native.ClassOf(identity.Window) == identity.OwnerClass && Native.IsWindow(identity.Window)
-                    && shellPid == explorer.Process && Native.FindWindow("Shell_TrayWnd", null) == explorer.Window
-                    && WaitForSingleObject(owner, 0) == 258 && WaitForSingleObject(shell, 0) == 258;
+                    && shellPid == explorer.Process && shellThread == explorer.Thread
+                    && Native.FindWindow("Shell_TrayWnd", null) == explorer.Window
+                    && (sequenceOwner || WaitForSingleObject(owner, 0) == 258) && WaitForSingleObject(shell, 0) == 258;
             }
 
+            bool FreshOwner() => Current() && (!sequenceOwner
+                || ProcessInstanceSnapshot.IsCurrent(identity.ProcessId, identity.Instance, operation.Cancellation)) && Current();
+
+            // A process-list query is bounded but may still enter the kernel.
+            // Recheck it at resolution/commit boundaries, never once for every
+            // UIA descendant. No cached sequence or PID alone authorizes Invoke.
+            if (!FreshOwner()) return NativeTrayActionResult.Unavailable;
             var first = Resolve(identity, explorer.Process, Current);
-            if (first is null || !Current()) return NativeTrayActionResult.Unavailable;
+            if (first is null || !FreshOwner()) return NativeTrayActionResult.Unavailable;
             // Resolve again from the real native rectangle, without reusing an
             // icon name, sibling index, cached RuntimeId or former screen slot.
             var second = Resolve(identity, explorer.Process, Current);
             if (second is null || first.Surface != second.Surface || first.Bounds != second.Bounds
-                || !Automation.Compare(first.Element, second.Element) || !Current()) return NativeTrayActionResult.Unavailable;
+                || !Automation.Compare(first.Element, second.Element) || !FreshOwner()) return NativeTrayActionResult.Unavailable;
             if (!operation.Prepare(second.Surface) || !Current()) return NativeTrayActionResult.Unavailable;
             // UI handoff may yield to other user input. Recheck geometry and the
             // hit target once more before committing the single Invoke call.
             if (!TryRectangle(identity, out var finalRect) || !finalRect.Equals(second.Surface.IconBounds)
-                || !ValidTarget(second, explorer.Process, Current) || !Current() || !operation.TrySubmit())
+                || !ValidTarget(second, explorer.Process, Current) || !FreshOwner() || !operation.TrySubmit())
                 return NativeTrayActionResult.Unavailable;
             // The explicit user action may hand foreground permission to this
             // verified shell process. Do not activate/reposition a window here.

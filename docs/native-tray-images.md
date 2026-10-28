@@ -4,7 +4,7 @@
 
 当前图像路径采用“Explorer 图标线程取得有效引用 → 后台复制 SoftwareBitmap 像素 → 现有管道传输”。已有钩子提供了进入 Explorer 的消息线程的条件；直接将远程对象指针交给 Dock、读取初始 HICON 缓存或使用程序 EXE 图标，都不能取得应用当前绘制的数字和文字。
 
-本页记录源码检查、微软公开接口和本机 PE/PDB 的离线证据。图像采集、后台像素复制和版本校验已实现并通过离线编译，精确版本资料由离线生成器生成。尚未运行图像接入或 UI 验证；当前 Explorer 的实际线程值、像素输出、刷新速度和退出行为均待验证。
+本页记录源码检查、微软公开接口和本机 PE/PDB 的离线证据。图像采集、后台像素复制和版本校验已实现并通过离线编译，精确版本资料由离线生成器生成。preview.22 正常启动时已收到当前图像，记录见文末；持续刷新和桌面交互仍未完成验证。新增 v7 进程实例路径仅完成源码与编译检查，尚未安装运行。
 
 ## 图像来源与版本范围
 
@@ -64,11 +64,25 @@ C ABI 声明还对照同一提交的 [streams.idl](https://github.com/microsoft/
 
 像素线程与现有协议写入线程分开，避免一次图像复制阻塞应用登记、菜单协议及断线消息。只把已经拥有的像素数组交给现有 IPC 写入线程。每次最多取得两个图标引用，单个像素线程仍忙时不积压新请求；完成后下一次请求沿游标继续。像素发送队列最多 8 项、合计最多 2 MiB，容量不足时丢弃本次图像并报告状态，不挤占应用登记或菜单事件。模块引用持续到后台退出和全部 COM 引用释放为止。
 
-v6 的图像包使用独立 kind 5，状态包使用 kind 6，结构见 [`tray_images.h`](../native/WinDock.TrayHook/tray_images.h) 和[协议说明](tray-capture-protocol.md)。图像包包含连接标识、登记身份、图像修订号、尺寸、格式及长度。修订号在图标线程取得当前引用时登记，并与成功的 ADD、DELETE、NIF_ICON 更新共用顺序来源，后台像素复制完成时不重新编号。接收方只对仍然存在且代际、身份与修订号都有效的登记项更新图像；旧任务晚完成、窗口句柄复用、GUID 重新登记或丢包后的旧结果均须丢弃。图像包不能伪装为 NIM_MODIFY，也不能据此重新确认回调消息、协议版本或 owner。
+v7 的图像包使用独立 kind 5，状态包使用 kind 6，结构见 [`tray_images.h`](../native/WinDock.TrayHook/tray_images.h) 和[协议说明](tray-capture-protocol.md)。图像包包含连接标识、登记身份、图像修订号、尺寸、格式及长度。修订号在图标线程取得当前引用时登记，并与成功的 ADD、DELETE、NIF_ICON 更新共用顺序来源，后台像素复制完成时不重新编号。接收方只对仍然存在且代际、身份与修订号都有效的登记项更新图像；旧任务晚完成、窗口句柄复用、GUID 重新登记或丢包后的旧结果均须丢弃。图像包不能伪装为 NIM_MODIFY，也不能据此重新确认回调消息、协议版本或 owner。
 
 状态中的 `sampled` 表示本连接累计取得有效引用并入队的数量，`published` 表示累计成功交给发送队列的数量。它们均不表示 Dock 已完成绘制。取消连接不会强行终止 COM 调用：旧任务返回后释放引用，连接标识和内部代际不符的结果不能进入新会话。像素调用长时间未完成时保留一个工作线程，不反复创建替代线程。
 
 启动接入、断线恢复、队列丢失、托盘面板打开可触发有界重取；实时 NIF_ICON 继续驱动更新。仅做启动快照并不能覆盖所有图像变化。PDB 另有 `INotificationAreaIcon4::add_Changed`（`0xB78C0`）和 `remove_Changed`（`0x1488E0`），但其 IID、事件参数、撤销与对象寿命尚未形成完整证据，当前不能直接调用。完整事件接入完成前，可用受限的低频重取补充，并在开发记录中保留这一刷新限制。
+
+## v7 进程实例证据
+
+v7 使用独立的 `WinDock.TrayHook.v7.x64.dll`，三个注册消息分别为 `Connect.v7`、`Disconnect.v7`、`Images.v7`。旧 DLL 保留原文件名，避免覆盖 Explorer 已加载的映像。kind 5 的正文仍为 80 字节：偏移 36 改为 `instanceKind:uint32`，偏移 56 改为 `instanceValue:uint64`。类型 1 表示创建时间，类型 2 表示系统进程序号；类型与值共同参与身份比较，两者不能互换。其他消息结构保持不变。
+
+优先使用 `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` 与 `GetProcessTimes` 取得创建时间，并保留原有进程会话检查。只有打开进程明确返回 `ERROR_ACCESS_DENIED`，才允许尝试系统序号。其他失败不会进入该路径，失败帧不会改变现有图像。
+
+微软公开的 [SystemBasicProcessInformation](https://learn.microsoft.com/en-us/windows/win32/api/winternl/nf-winternl-ntquerysysteminformation) 从 Windows 11 build 26100.4770 提供识别 PID 复用的 `SequenceNumber`。[固定 SDK 头文件](https://github.com/microsoft/win32metadata/blob/64ed9177fb76eb244fc9051c74b8a93fdfe20873/generation/WinSDK/RecompiledIdlHeaders/um/winternl.h#L270) 定义枚举值 252；x64 记录为 48 字节，下一项偏移、PID、父 PID、序号和名称结构分别位于 0、8、16、24、32。实现对这些大小与偏移执行编译期断言，仅解析链、PID、序号。
+
+[`tray_process_sequences.c`](../native/WinDock.TrayHook/tray_process_sequences.c) 在像素线程初始化时解析已加载 ntdll 的公开导出，并一次分配 1 MiB 查询区和 64 KiB PID 去重表。退出时清零释放。图标线程每轮最多进行两次同步内核查询：先为最多两个候选取得新序号，完成全部图像 getter 和尺寸检查后再次查询。只有前后序号非零且相同、窗口归属未变的帧，才交给后台复制。该限制约束查询次数与数据规模，不提供硬执行时限。
+
+每次查询要求返回成功、长度在容量内、链偏移按 8 字节对齐且不越界，并以零偏移结束。记录最多 8192 条；任意 PID 重复、候选序号为零、去重探测超过 64 次或响应超限都拒绝本轮序号证据。UI 线程不分配、扩容、重试或等待后台。未找到的候选不发帧，具有有效创建时间的候选仍可继续。系统响应中的名称既不解析，也不进入日志或 IPC；整个查询区在每次成功或失败后清零。
+
+[ProcessIdToSessionId](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-processidtosessionid) 也要求查询目标进程的权限。序号路径不调用该函数，也没有独立取得 owner 的 SessionId；其来源限定为当前已核实 Explorer 模型中的真实登记项，并检查窗口 PID/TID、两次新序号、图标身份、UI 线程、模型、连接和消息代际。它不接受外部自报登记，也不单凭序号授予回调调用能力。
 
 ## 线程不匹配时
 

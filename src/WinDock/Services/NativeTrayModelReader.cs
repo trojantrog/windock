@@ -19,32 +19,34 @@ internal static class NativeTrayModelReader
     internal enum Placement { Unknown, Promoted, Overflow, NotVisible }
     internal sealed record Record(nint Window, uint ProcessId, uint ThreadId, uint Id, Guid Guid,
         uint Callback, uint Version, long ProcessStarted, string ProcessPath, string OwnerClass,
-        string? Tip, BitmapSource? Icon, bool? Hidden, Placement Placement, bool? ShowStandardTip);
+        string? Tip, BitmapSource? Icon, bool? Hidden, Placement Placement, bool? ShowStandardTip, ProcessInstanceKey Instance);
     internal sealed record FilterCounts(int InvalidProtocol, int InvalidWindow, int OwnerAccess, int OwnerIdentity,
         int OwnerChanged, int PlacementUnavailable, int TipUnavailable, int PlacementEvidenceRejected, int TipEvidenceRejected,
-        int TooltipModeUnavailable, int TooltipModeEvidenceRejected);
+        int TooltipModeUnavailable, int TooltipModeEvidenceRejected, int OwnerAccessRecovered);
     internal sealed record OwnerAccessFailure(uint ProcessId, uint ThreadId, long Window, string OwnerClass,
         uint RequestedAccess, int OpenError, uint QueryOnlyAccess, bool QueryOnlyOpened, int QueryOnlyOpenError,
         bool QueryIdentityReadable, string? QueryFailedApi, int QueryError, uint? ExitCode, bool WindowMatches);
     sealed class FiltersBuilder
     {
         internal int InvalidProtocol, InvalidWindow, OwnerAccess, OwnerIdentity, OwnerChanged, PlacementUnavailable, TipUnavailable,
-            PlacementEvidenceRejected, TipEvidenceRejected, TooltipModeUnavailable, TooltipModeEvidenceRejected;
+            PlacementEvidenceRejected, TipEvidenceRejected, TooltipModeUnavailable, TooltipModeEvidenceRejected, OwnerAccessRecovered;
         internal FilterCounts Snapshot() => new(InvalidProtocol, InvalidWindow, OwnerAccess, OwnerIdentity,
             OwnerChanged, PlacementUnavailable, TipUnavailable, PlacementEvidenceRejected, TipEvidenceRejected,
-            TooltipModeUnavailable, TooltipModeEvidenceRejected);
+            TooltipModeUnavailable, TooltipModeEvidenceRejected, OwnerAccessRecovered);
     }
 
     static readonly SemaphoreSlim worker = new(1, 1);
-    static FilterCounts filters = new(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    static FilterCounts filters = new(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     static IReadOnlyList<OwnerAccessFailure> ownerAccessFailures = Array.Empty<OwnerAccessFailure>();
     static volatile string status = "not_started";
+    static volatile string ownerSequenceStatus = "not_needed";
     static int candidateCount, validatedCount;
     internal static string Status => status;
     internal static int CandidateCount => Volatile.Read(ref candidateCount);
     internal static int ValidatedCount => Volatile.Read(ref validatedCount);
     internal static FilterCounts Filters => Volatile.Read(ref filters);
     internal static IReadOnlyList<OwnerAccessFailure> OwnerAccessFailures => Volatile.Read(ref ownerAccessFailures);
+    internal static string OwnerSequenceStatus => ownerSequenceStatus;
     const int MaximumItems = 512;
     const ulong LastUserAddress = 0x0000800000000000;
 
@@ -56,8 +58,9 @@ internal static class NativeTrayModelReader
         var completion = new TaskCompletionSource<IReadOnlyList<Record>>(TaskCreationOptions.RunContinuationsAsynchronously);
         Interlocked.Exchange(ref candidateCount, 0);
         Interlocked.Exchange(ref validatedCount, 0);
-        Volatile.Write(ref filters, new(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0));
+        Volatile.Write(ref filters, new(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0));
         Volatile.Write(ref ownerAccessFailures, Array.Empty<OwnerAccessFailure>());
+        ownerSequenceStatus = "not_needed";
         try
         {
             var thread = new Thread(() =>
@@ -126,7 +129,7 @@ internal static class NativeTrayModelReader
 
         var results = new List<Record>();
         var owners = new Dictionary<uint, Owner>();
-        var windows = new List<(nint Window, uint Process, uint Thread)>();
+        var denied = new List<SequenceCandidate>();
         var identities = new HashSet<string>(StringComparer.Ordinal);
         var objects = new HashSet<ulong>();
         var addresses = new List<ulong>();
@@ -152,27 +155,63 @@ internal static class NativeTrayModelReader
                 { ++reasons.InvalidProtocol; continue; }
                 var thread = Native.GetWindowThreadProcessId(window, out var pid);
                 if (thread == 0 || pid <= 0 || !Native.IsWindow(window)) { ++reasons.InvalidWindow; continue; }
+                var windowClass = Native.ClassOf(window);
+                if (!WindowMatches(window, (uint)pid, thread, windowClass))
+                { ++reasons.OwnerChanged; throw new ReadRejected("owner_changed"); }
                 if (!owners.TryGetValue((uint)pid, out var owner))
                 {
-                    owner = Owner.TryOpen((uint)pid, window, thread, reasons, accessDiagnostics);
-                    if (owner is null) continue;
+                    owner = Owner.TryOpen((uint)pid, window, thread, reasons, accessDiagnostics, out var openError);
+                    if (owner is null)
+                    {
+                        // Only an actual access-denied OpenProcess result can
+                        // use the independent system-sequence observation.
+                        if (openError == 5)
+                            denied.Add(new(address, window, (uint)pid, thread, id, guid, callback, version, windowClass));
+                        continue;
+                    }
                     owners.Add((uint)pid, owner);
                 }
                 if (!owner.Alive) { ++reasons.OwnerChanged; throw new ReadRejected("owner_changed"); }
-                var windowClass = Native.ClassOf(window);
-                if (windowClass.Length == 0 || Native.GetWindowThreadProcessId(window, out var afterPid) != thread || afterPid != pid)
+                if (!WindowMatches(window, (uint)pid, thread, windowClass))
                 { ++reasons.OwnerChanged; throw new ReadRejected("owner_changed"); }
                 var key = guid == Guid.Empty ? $"{window:X}:{id}:{pid}" : guid.ToString("D");
                 if (!identities.Add(key)) throw new ReadRejected("identity_ambiguous");
                 // Placement never establishes NIS_HIDDEN. The current image
                 // stores a COM image object, not an HICON; it remains untouched.
                 results.Add(new(window, (uint)pid, thread, id, guid, callback, version, owner.Started,
-                    owner.Path, windowClass, null, null, null, Placement.Unknown, null));
+                    owner.Path, windowClass, null, null, null, Placement.Unknown, null,
+                    new(ProcessInstanceKind.CreationTime, (ulong)owner.Started)));
                 addresses.Add(address);
                 tips.Add(evidence.Tip is not null && profile.Metadata?.Tip is { } tip ? ObserveTip(remote, address, tip) : null);
                 tooltipModes.Add(evidence.TooltipMode is not null && profile.Metadata?.TooltipMode is { } mode
                     ? ObserveTooltipMode(remote, address, mode) : null);
-                windows.Add((window, (uint)pid, thread));
+            }
+            if (denied.Count > 0)
+            {
+                remote.Check();
+                var before = ProcessInstanceSnapshot.Read(denied.Select(item => item.ProcessId).Distinct().ToArray(), cancellation);
+                ownerSequenceStatus = "before:" + before.Status;
+                remote.Check();
+                // Re-read the entire observed model after the first instance
+                // snapshot. The initial preflight only identified candidate PIDs;
+                // it cannot be treated as a process-lifetime observation.
+                if (before.Instances.Count > 0) remote.VerifyReads();
+                foreach (var item in denied)
+                {
+                    if (!before.Instances.TryGetValue(item.ProcessId, out var instance) || !instance.IsValid) continue;
+                    if (!WindowMatches(item.Window, item.ProcessId, item.ThreadId, item.OwnerClass))
+                    { ++reasons.OwnerChanged; continue; }
+                    var key = item.Guid == Guid.Empty ? $"{item.Window:X}:{item.Id}:{item.ProcessId}" : item.Guid.ToString("D");
+                    if (!identities.Add(key)) throw new ReadRejected("identity_ambiguous");
+                    // Keep unknown creation time/path unknown. Consumers must
+                    // route this evidence through the real Explorer control.
+                    results.Add(new(item.Window, item.ProcessId, item.ThreadId, item.Id, item.Guid,
+                        item.Callback, item.Version, 0, "", item.OwnerClass, null, null, null, Placement.Unknown, null, instance));
+                    addresses.Add(item.Address);
+                    tips.Add(evidence.Tip is not null && profile.Metadata?.Tip is { } tip ? ObserveTip(remote, item.Address, tip) : null);
+                    tooltipModes.Add(evidence.TooltipMode is not null && profile.Metadata?.TooltipMode is { } mode
+                        ? ObserveTooltipMode(remote, item.Address, mode) : null);
+                }
             }
             var placements = evidence.Placement is not null && profile.Metadata?.Placement is { } placement
                 ? ObservePlacement(remote, manager, module.Address, profile, placement, objects) : null;
@@ -208,18 +247,50 @@ internal static class NativeTrayModelReader
             remote.VerifyReads();
             foreach (var owner in owners.Values)
                 if (!owner.Alive) { ++reasons.OwnerChanged; throw new ReadRejected("owner_changed"); }
-            foreach (var window in windows)
-                if (Native.GetWindowThreadProcessId(window.Window, out var pid) != window.Thread || pid != window.Process)
-                { ++reasons.OwnerChanged; throw new ReadRejected("owner_changed"); }
+            var rejectedSequence = new HashSet<Record>();
+            foreach (var item in results)
+            {
+                if (WindowMatches(item.Window, item.ProcessId, item.ThreadId, item.OwnerClass)) continue;
+                ++reasons.OwnerChanged;
+                if (item.Instance.Kind != ProcessInstanceKind.SystemSequence) throw new ReadRejected("owner_changed");
+                rejectedSequence.Add(item);
+            }
+            var sequenceRecords = results.Where(item => item.Instance.Kind == ProcessInstanceKind.SystemSequence).ToArray();
+            if (sequenceRecords.Length > 0)
+            {
+                // A second real query brackets model and window observations.
+                // Busy/unsupported/missing/changed instances remain rejected;
+                // no earlier snapshot can substitute for this closing proof.
+                var after = ProcessInstanceSnapshot.Read(sequenceRecords.Select(item => item.ProcessId).Distinct().ToArray(), cancellation);
+                ownerSequenceStatus = "after:" + after.Status;
+                foreach (var item in sequenceRecords)
+                {
+                    if (!after.Instances.TryGetValue(item.ProcessId, out var instance) || instance != item.Instance)
+                    {
+                        if (rejectedSequence.Add(item)) ++reasons.OwnerChanged;
+                    }
+                }
+                results.RemoveAll(rejectedSequence.Contains);
+            }
             if (Native.GetWindowThreadProcessId(shellWindow, out var currentPid) != shellThread || currentPid != shellProcess)
                 throw new ReadRejected("explorer_changed");
             remote.Check();
+            reasons.OwnerAccessRecovered = results.Count(item => item.Instance.Kind == ProcessInstanceKind.SystemSequence);
+            reasons.OwnerAccess -= reasons.OwnerAccessRecovered;
             Interlocked.Exchange(ref validatedCount, results.Count);
             status = results.Count != 0 ? "available" : entries.Length == 0 ? "empty" : "filtered";
             return results.AsReadOnly();
         }
         finally { foreach (var owner in owners.Values) owner.Dispose(); }
     }
+
+    sealed record SequenceCandidate(ulong Address, nint Window, uint ProcessId, uint ThreadId, uint Id,
+        Guid Guid, uint Callback, uint Version, string OwnerClass);
+
+    static bool WindowMatches(nint window, uint process, uint thread, string windowClass) =>
+        window != 0 && process != 0 && thread != 0 && windowClass.Length != 0 && Native.IsWindow(window)
+        && Native.GetWindowThreadProcessId(window, out var current) == thread && current == process
+        && Native.ClassOf(window) == windowClass;
 
     sealed record Observed<T>(T Value, OptionalReads Reads);
     sealed record LoadedEvidence(OptionalReads? Placement, OptionalReads? Tip, OptionalReads? TooltipMode);
@@ -376,14 +447,17 @@ internal static class NativeTrayModelReader
         internal string Path { get; }
         internal bool Alive => WaitForSingleObject(Handle, 0) == 258;
         Owner(nint handle, long started, string path) { Handle = handle; Started = started; Path = path; }
-        internal static Owner? TryOpen(uint pid, nint window, uint thread, FiltersBuilder reasons, OwnerAccessDiagnostics diagnostics)
+        internal static Owner? TryOpen(uint pid, nint window, uint thread, FiltersBuilder reasons, OwnerAccessDiagnostics diagnostics,
+            out int openError)
         {
+            openError = 0;
             if (pid == 0 || pid > int.MaxValue) { ++reasons.OwnerIdentity; return null; }
             const uint access = 0x101000;
             var handle = OpenOwnerProcess(access, false, pid);
             if (handle == 0)
             {
                 var error = Marshal.GetLastPInvokeError();
+                openError = error;
                 ++reasons.OwnerAccess;
                 diagnostics.Capture(pid, window, thread, access, error);
                 return null;
@@ -392,7 +466,7 @@ internal static class NativeTrayModelReader
             {
                 var path = ProcessPath(handle);
                 if (WaitForSingleObject(handle, 0) != 258) { ++reasons.OwnerChanged; return null; }
-                if (path is null || !GetProcessTimes(handle, out var started, out _, out _, out _) || started == 0)
+                if (path is null || !GetProcessTimes(handle, out var started, out _, out _, out _) || started <= 0)
                 { ++reasons.OwnerIdentity; return null; }
                 var result = new Owner(handle, started, path); handle = 0; return result;
             }
