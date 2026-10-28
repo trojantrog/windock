@@ -6,4 +6,6 @@
 
 Windows 提供的窗口画面、源程序的绘制质量和缩略图的缩放方式会影响结果，放大预览不能补回源画面缺少的细节。部分程序可能为 Windows 任务栏提供专门的标签页预览，而 WinDock 目前显示的是窗口本身；受保护内容和某些最小化窗口也可能无法提供有效画面。
 
+点击预览中的关闭按钮后，窗口仍会保留在预览中，直到应用实际关闭或隐藏窗口。如果应用弹出保存确认，取消关闭后仍可继续使用原来的预览。预览会更新窗口标题，并在点击和关闭前核对窗口所属的进程、线程和窗口类型。
+
 可参考微软的 [DWM 缩略图说明](https://learn.microsoft.com/en-us/windows/win32/dwm/thumbnail-ovw)、[源尺寸查询](https://learn.microsoft.com/en-us/windows/win32/api/dwmapi/nf-dwmapi-dwmquerythumbnailsourcesize)和 [缩略图属性](https://learn.microsoft.com/en-us/windows/win32/api/dwmapi/ns-dwmapi-dwm_thumbnail_properties)。[AppSwitcherBar](https://github.com/adamecr/AppSwitcherBar) 的 WPF 预览实现也使用源尺寸计算居中比例。当前更改尚未进行桌面视觉验证。

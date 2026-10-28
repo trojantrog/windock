@@ -76,11 +76,13 @@ internal static class SystemTrayInterop
 
 internal sealed class TrayHookSession : IDisposable
 {
-    const uint Magic = 0x52544457, Version = 4;
+    const uint Magic = 0x52544457, Version = 5;
     readonly CancellationToken token;
     readonly uint nonce = BitConverter.ToUInt32(RandomNumberGenerator.GetBytes(4)) | 1;
     NamedPipeServerStream? pipe;
-    nint module, hook, target;
+    nint module, hook, returnHook, target;
+    internal nint ExplorerWindow => target;
+    internal uint ExplorerProcess { get; private set; }
     public TrayHookSession(CancellationToken token) => this.token = token;
 
     public async Task ReadAsync(Action<uint, byte[]> receive, Action connected)
@@ -98,14 +100,17 @@ internal sealed class TrayHookSession : IDisposable
         var explorer = SystemTrayInterop.ExplorerTray();
         if (explorer.Window == 0 || explorer.Thread == 0) throw new IOException(Loc.T("systemTrayExplorerMissing"));
         target = explorer.Window;
+        ExplorerProcess = explorer.Process;
         pipe = SystemTrayInterop.CreateTrayPipe($"WinDock.Tray.{Environment.ProcessId}.{nonce:X8}");
         var connection = pipe.WaitForConnectionAsync(token);
         module = NativeLibrary.Load(path);
         var protocol = Marshal.GetDelegateForFunctionPointer<SystemTrayInterop.ProtocolVersion>(NativeLibrary.GetExport(module, "WinDockTrayProtocol"));
         if (protocol() != Version) throw new InvalidDataException(Loc.T("systemTrayVersionFailed"));
+        returnHook = SystemTrayInterop.SetWindowsHookExW(12, NativeLibrary.GetExport(module, "WinDockTrayReturnHook"), module, explorer.Thread);
+        if (returnHook == 0) throw new IOException(Loc.T("systemTrayHookFailed"));
         hook = SystemTrayInterop.SetWindowsHookExW(4, NativeLibrary.GetExport(module, "WinDockTrayHook"), module, explorer.Thread);
         if (hook == 0) throw new IOException(Loc.T("systemTrayHookFailed"));
-        var connectMessage = SystemTrayInterop.RegisterWindowMessage("WinDock.TrayHook.Connect.v4");
+        var connectMessage = SystemTrayInterop.RegisterWindowMessage("WinDock.TrayHook.Connect.v5");
         if (SystemTrayInterop.SendMessageTimeoutW(target, connectMessage, (nuint)Environment.ProcessId, (nint)nonce, 0x3, 250, out _) == 0)
             throw new IOException(Loc.T("systemTrayHookFailed"));
         await connection.WaitAsync(TimeSpan.FromSeconds(4), token);
@@ -118,7 +123,7 @@ internal sealed class TrayHookSession : IDisposable
             await pipe.ReadExactlyAsync(header, token);
             var magic = BitConverter.ToUInt32(header, 0); var version = BitConverter.ToUInt32(header, 4);
             var kind = BitConverter.ToUInt32(header, 8); var length = BitConverter.ToUInt32(header, 12);
-            if (magic != Magic || version != Version || length < 16 || length > 36 + 956 + 256 * 256 * 4 || kind is < 1 or > 3)
+            if (magic != Magic || version != Version || length < 16 || length > 36 + 956 + 256 * 256 * 4 || kind is < 1 or > 4)
                 throw new InvalidDataException(Loc.T("systemTrayDataFailed"));
             byte[] body = new byte[length - 16];
             if (body.Length > 0) await pipe.ReadExactlyAsync(body, token);
@@ -140,11 +145,13 @@ internal sealed class TrayHookSession : IDisposable
         // Remove only our own hook. Never mutate Explorer's window procedure,
         // taskbar visibility, registry, or another application's hook chain.
         if (target != 0 && hook != 0)
-            SystemTrayInterop.SendMessageTimeoutW(target, SystemTrayInterop.RegisterWindowMessage("WinDock.TrayHook.Disconnect.v4"),
+            SystemTrayInterop.SendMessageTimeoutW(target, SystemTrayInterop.RegisterWindowMessage("WinDock.TrayHook.Disconnect.v5"),
                 (nuint)Environment.ProcessId, (nint)nonce, 0x3, 150, out _);
         if (hook != 0) { SystemTrayInterop.UnhookWindowsHookEx(hook); hook = 0; }
+        if (returnHook != 0) { SystemTrayInterop.UnhookWindowsHookEx(returnHook); returnHook = 0; }
         pipe?.Dispose(); pipe = null;
         if (module != 0) { NativeLibrary.Free(module); module = 0; }
         target = 0;
+        ExplorerProcess = 0;
     }
 }

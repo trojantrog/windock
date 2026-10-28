@@ -233,6 +233,11 @@ int Run(const wchar_t* nonce, const std::wstring& user) {
         const auto error = !copied ? GetLastError() : ERROR_PARTIAL_COPY;
         VirtualFreeEx(process.value, address, 0, MEM_RELEASE); return activation.Finish(21, error);
     }
+    // Package verification and protected-cache preparation may outlive the
+    // user's request. Do not load after Dock exits or disables animations.
+    if (!RequestReady(session, user)) {
+        VirtualFreeEx(process.value, address, 0, MEM_RELEASE); return activation.Finish(12);
+    }
     activation.Stage(22);
     Handle thread(CreateRemoteThread(process.value, nullptr, 0, remoteLoad, address, 0, nullptr));
     if (!thread.value) {

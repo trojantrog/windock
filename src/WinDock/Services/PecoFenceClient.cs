@@ -53,21 +53,29 @@ public sealed class PecoProcessRunner(string executable) : IPecoCommandRunner
             if (!process.Start()) throw new PecoFenceException(Loc.T("pecoUnavailable"));
         }
         catch (Win32Exception) { throw new PecoFenceException(Loc.T("pecoUnavailable")); }
-        var output = process.StandardOutput.ReadToEndAsync(cancellation);
-        var error = process.StandardError.ReadToEndAsync(cancellation);
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
         timeout.CancelAfter(TimeSpan.FromSeconds(13));
-        try { await process.WaitForExitAsync(timeout.Token); }
+        var readOnly = arguments.Count >= 2 && arguments[1] == "list" && arguments[0] is "fence" or "item" or "snapshot";
+        PecoFenceException TimeoutFailure() => new(Loc.T(readOnly ? "pecoReadTimeout" : "pecoTimeout"), uncertain: !readOnly);
+        var output = process.StandardOutput.ReadToEndAsync(timeout.Token);
+        var error = process.StandardError.ReadToEndAsync(timeout.Token);
+        var finished = Task.WhenAll(process.WaitForExitAsync(timeout.Token), output, error);
+        try { await finished.WaitAsync(timeout.Token); }
         catch (OperationCanceledException)
         {
-            try { if (!process.HasExited) process.Kill(); } catch (InvalidOperationException) { }
+            try { if (!process.HasExited) process.Kill(); }
+            catch (Exception e) when (e is InvalidOperationException or Win32Exception) { }
+            // Observe reader failures even if a child kept a redirected pipe open
+            // after the CLI exited and the overall timeout won the race.
+            _ = finished.ContinueWith(task => _ = task.Exception, CancellationToken.None,
+                TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
             if (cancellation.IsCancellationRequested) throw;
-            throw new PecoFenceException(Loc.T("pecoTimeout"), uncertain: true);
+            throw TimeoutFailure();
         }
         var stdout = await output;
         var stderr = await error;
         if (process.ExitCode == 3) throw new PecoFenceException(Loc.T("pecoNotRunning"));
-        if (process.ExitCode == 4) throw new PecoFenceException(Loc.T("pecoTimeout"), uncertain: true);
+        if (process.ExitCode == 4) throw TimeoutFailure();
         if (process.ExitCode != 0)
         {
             var message = Loc.T("pecoOperationFailed");
@@ -80,7 +88,7 @@ public sealed class PecoProcessRunner(string executable) : IPecoCommandRunner
             throw new PecoFenceException(message);
         }
         try { using var document = JsonDocument.Parse(stdout); return document.RootElement.Clone(); }
-        catch (JsonException) { throw new PecoFenceException(Loc.T("pecoInvalidReply")); }
+        catch (JsonException) { throw new PecoFenceException(Loc.T("pecoInvalidReply"), uncertain: !readOnly); }
     }
 }
 

@@ -106,21 +106,28 @@ double Current(void* window, unsigned index, double fallback) {
     return track ? Field<double>(track, abi::Current) : fallback;
 }
 
-void Remember(void* window) {
-    if (!OwnsWindowState()) return;
+Active* CapturePose(void* window, Active& captured) {
+    if (!OwnsWindowState()) return nullptr;
     auto* item = Find(window);
     if (!item || !item->master || item->master != Field<void*>(window, abi::Master)
-        || item->data != Field<void*>(window, abi::WindowData)) return;
+        || item->data != Field<void*>(window, abi::WindowData)) return nullptr;
+    captured = *item;
     const double sx = Current(window, 6, 1), sy = Current(window, 7, 1);
-    item->last = {
+    captured.last = {
         item->base.x + Current(window, 0, 0) + item->base.width * (item->ox * (1 - sx) + sx * .5),
         item->base.y + Current(window, 1, 0) + item->base.height * (item->oy * (1 - sy) + sy * .5),
         sx, Current(window, 9, 1)
     };
-    item->interrupted = !Field<BYTE>(item->master, abi::Finished)
+    captured.interrupted = !Field<BYTE>(item->master, abi::Finished)
         && Field<double>(item->master, abi::Current) < .999 && std::abs(sx - sy) < .001;
-    item->stopped = GetTickCount64();
-    item->master = nullptr;
+    captured.stopped = GetTickCount64();
+    captured.master = nullptr;
+    return item;
+}
+
+void Remember(void* window) {
+    Active captured{};
+    if (auto* item = CapturePose(window, captured)) *item = captured;
 }
 
 bool Candidate(void* window, const Config& config, HWND& handle, DWORD& pid, TransitionReason& reason) {
@@ -217,7 +224,7 @@ double BaseAlpha(void* window) {
     return Finite(value) ? std::clamp(value, 0., 1.) : 1.;
 }
 
-bool ReplaceTracks(void* window, const Config& config, int kind) {
+bool ReplaceTracks(void* window, const Config& config, int kind, const Active* before) {
     if (!OwnsWindowState()) return Skip(TransitionReason::WindowLockNotOwned);
     if (advancing) return Skip(TransitionReason::TimelineTraversal);
     HWND handle; DWORD pid; Rect base;
@@ -243,7 +250,7 @@ bool ReplaceTracks(void* window, const Config& config, int kind) {
         to.alpha = 0;
         milliseconds = config.closeMs;
     }
-    Active* previous = Find(window);
+    const Active* previous = before && before->interrupted ? before : Find(window);
     if (previous && previous->data == Field<void*>(window, abi::WindowData) && previous->handle == handle
         && previous->interrupted && GetTickCount64() - previous->stopped < 500
         && (previous->kind == 1 || previous->kind == 3 || previous->kind == 5 || previous->kind == 8)
@@ -314,11 +321,16 @@ uint32_t FlagFor(int kind) {
 }
 
 HRESULT StartHook(void* window, int kind) {
+    // StartAnimation can replace child tracks and restart the existing master
+    // without calling StopAnimation first (pinned image: 0xcdd5..0xcded).
+    // Capture before that call, while the old tracks still describe the pose.
+    Active before{};
+    if (depth == 0 && FlagFor(kind)) CapturePose(window, before);
     ++depth;
     const HRESULT result = startOriginal(window, kind);
     if (depth == 1 && SUCCEEDED(result) && FlagFor(kind)) {
         Config config;
-        if (ReadConfig(config) && (config.flags & FlagFor(kind)) && !ReplaceTracks(window, config, kind))
+        if (ReadConfig(config) && (config.flags & FlagFor(kind)) && !ReplaceTracks(window, config, kind, &before))
             InterlockedIncrement64(&status->skipped);
     }
     --depth;

@@ -14,12 +14,12 @@ public static class Autostart
         get
         {
             using var key = Registry.CurrentUser.OpenSubKey(RunKey);
-            return key?.GetValue(Name) is not null;
+            return Environment.ProcessPath is { } exe && key?.GetValue(Name) is string command
+                && command.Equals(Command(exe), StringComparison.OrdinalIgnoreCase);
         }
         set
         {
-            using var key = Registry.CurrentUser.OpenSubKey(RunKey, writable: true);
-            if (key is null) return;
+            using var key = Registry.CurrentUser.CreateSubKey(RunKey);
             if (value && Environment.ProcessPath is { } exe) key.SetValue(Name, Command(exe));
             else if (!value) key.DeleteValue(Name, throwOnMissingValue: false);
         }

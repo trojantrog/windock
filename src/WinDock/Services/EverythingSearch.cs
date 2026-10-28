@@ -14,6 +14,7 @@ public sealed record EverythingBatch(IReadOnlyList<SearchHit> Hits, int Total);
 public static class EverythingSearch
 {
     const int CopyDataMessage = 0x4A, QueryUnicode = 18, FullPath = 4;
+    static readonly SemaphoreSlim Worker = new(1, 1);
     [StructLayout(LayoutKind.Sequential)]
     struct CopyData { public nuint Id; public int Size; public nint Data; }
     [DllImport("user32.dll", SetLastError = true)]
@@ -22,14 +23,24 @@ public static class EverythingSearch
     [return: MarshalAs(UnmanagedType.Bool)]
     static extern bool ChangeWindowMessageFilterEx(nint window, uint message, uint action, nint filter);
 
-    public static Task<EverythingBatch> QueryAsync(string query, string? instance, CancellationToken cancellation)
+    public static async Task<EverythingBatch> QueryAsync(string query, string? instance, CancellationToken cancellation)
     {
-        cancellation.ThrowIfCancellationRequested();
+        // A cancelled send can still be inside user32 until its timeout expires. Keep
+        // the slot until that thread and its message window have actually exited.
+        await Worker.WaitAsync(cancellation).ConfigureAwait(false);
         var completion = new TaskCompletionSource<EverythingBatch>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var thread = new Thread(() => Query(query, instance, cancellation, completion)) { IsBackground = true, Name = "Everything search" };
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        return completion.Task;
+        try
+        {
+            var thread = new Thread(() =>
+            {
+                try { Query(query, instance, cancellation, completion); }
+                finally { Worker.Release(); }
+            }) { IsBackground = true, Name = "Everything search" };
+            thread.SetApartmentState(ApartmentState.STA);
+            thread.Start();
+        }
+        catch { Worker.Release(); throw; }
+        return await completion.Task.ConfigureAwait(false);
     }
 
     static void Query(string query, string? instance, CancellationToken cancellation, TaskCompletionSource<EverythingBatch> completion)
@@ -37,12 +48,17 @@ public static class EverythingSearch
         var dispatcher = Dispatcher.CurrentDispatcher;
         try
         {
+            using var registration = cancellation.Register(() =>
+            {
+                completion.TrySetCanceled(cancellation);
+                RequestShutdown(dispatcher);
+            });
             cancellation.ThrowIfCancellationRequested();
             var name = string.IsNullOrWhiteSpace(instance) ? "EVERYTHING_TASKBAR_NOTIFICATION" : "EVERYTHING_TASKBAR_NOTIFICATION_(" + instance.Trim() + ")";
             var target = Native.FindWindow(name, null);
-            if (target == 0) throw new InvalidOperationException(Loc.T("everythingUnavailable"));
+            if (target == 0) throw new InvalidOperationException(Loc.T("everythingConnectionUnavailable"));
             Native.GetWindowThreadProcessId(target, out var targetProcess);
-            if (targetProcess == 0) throw new InvalidOperationException(Loc.T("everythingUnavailable"));
+            if (targetProcess == 0) throw new InvalidOperationException(Loc.T("everythingConnectionUnavailable"));
             using var receiver = new HwndSource(new HwndSourceParameters("WinDock Everything reply")
             { ParentWindow = new nint(-3), WindowStyle = 0, Width = 0, Height = 0 });
             if (!ChangeWindowMessageFilterEx(receiver.Handle, CopyDataMessage, 1, 0))
@@ -76,17 +92,13 @@ public static class EverythingSearch
             var allocated = Marshal.AllocHGlobal(payload.Length);
             try
             {
+                cancellation.ThrowIfCancellationRequested();
                 Marshal.Copy(payload, 0, allocated, payload.Length);
                 var request = new CopyData { Id = QueryUnicode, Size = payload.Length, Data = allocated };
                 if (SendMessageTimeout(target, CopyDataMessage, receiver.Handle, ref request, 2, 1500, out var accepted) == 0 || accepted == 0)
-                    throw new InvalidOperationException(Loc.T("everythingUnavailable"));
+                    throw new InvalidOperationException(Loc.T("everythingConnectionUnavailable"));
             }
             finally { Marshal.FreeHGlobal(allocated); }
-            using var registration = cancellation.Register(() =>
-            {
-                completion.TrySetCanceled(cancellation);
-                if (!dispatcher.HasShutdownStarted) dispatcher.BeginInvokeShutdown(DispatcherPriority.Send);
-            });
             var timer = new DispatcherTimer(TimeSpan.FromSeconds(4), DispatcherPriority.Normal, (_, _) =>
             {
                 completion.TrySetException(new TimeoutException(Loc.T("everythingTimeout")));
@@ -98,6 +110,12 @@ public static class EverythingSearch
         catch (OperationCanceledException) { completion.TrySetCanceled(cancellation); }
         catch (Exception e) { completion.TrySetException(e); }
         finally { if (!dispatcher.HasShutdownStarted) dispatcher.InvokeShutdown(); }
+    }
+
+    static void RequestShutdown(Dispatcher dispatcher)
+    {
+        try { if (!dispatcher.HasShutdownStarted) dispatcher.BeginInvokeShutdown(DispatcherPriority.Send); }
+        catch (InvalidOperationException) { } // The reply can finish while cancellation is queued.
     }
 
     public static EverythingBatch ParseResponse(ReadOnlySpan<byte> data)

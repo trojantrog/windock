@@ -49,11 +49,11 @@ public sealed class PreviewWindow : Window
         };
         IsVisibleChanged += (_, _) =>
         {
-            if (!IsVisible) { generation++; refresh.Stop(); Release(); }
+            if (!IsVisible) { generation++; refresh.Stop(); Release(); WindowCloseRequest.Prune(); }
         };
         MouseEnter += (_, _) => PointerEntered?.Invoke();
         MouseLeave += (_, _) => PointerLeft?.Invoke();
-        refresh.Tick += (_, _) => Reposition();
+        refresh.Tick += (_, _) => { RefreshCards(); Reposition(); };
         DpiChanged += (_, _) => Dispatcher.BeginInvoke(() =>
         {
             if (!IsVisible) return;
@@ -82,9 +82,9 @@ public sealed class PreviewWindow : Window
         anchor = (centerX, top, screen);
         var monitor = Native.MonitorFromPoint(new Native.Point { X = (int)centerX, Y = (int)top }, 2);
         var dpiScale = Native.GetDpiForMonitor(monitor, 0, out var dpi, out _) == 0 && dpi > 0 ? dpi / 96.0 : 1;
-        var count = Math.Min(6, tile.Windows.Count);
-        SetBoxSize(screen, dpiScale, count);
-        foreach (var window in tile.Windows.Take(6)) cards.Children.Add(Card(tile, window));
+        var windows = tile.Windows.Where(window => window.IsCurrent).Take(6).ToArray();
+        SetBoxSize(screen, dpiScale, windows.Length);
+        foreach (var window in windows) cards.Children.Add(Card(tile, window));
         if (cards.Children.Count == 0)
         {
             Hide();
@@ -191,31 +191,29 @@ public sealed class PreviewWindow : Window
             Cursor = Cursors.Hand,
             Child = new StackPanel { Children = { header, box } }
         };
+        var preview = new PreviewCard(window, title, box, close);
+        card.Tag = preview;
+        UpdateCloseButton(preview);
         var hoverBrush = new SolidColorBrush(dark ? Color.FromArgb(0x1F, 0xFF, 0xFF, 0xFF) : Color.FromArgb(0x12, 0, 0, 0));
         card.MouseEnter += (_, _) => card.Background = hoverBrush;
         card.MouseLeave += (_, _) => card.Background = Brushes.Transparent;
         card.MouseLeftButtonUp += (_, e) =>
         {
             e.Handled = true;
-            Picked?.Invoke(window.Handle);
+            // A disabled close control must not become a click on the preview.
+            var atClose = e.GetPosition(close);
+            if (atClose.X >= 0 && atClose.Y >= 0 && atClose.X < close.ActualWidth && atClose.Y < close.ActualHeight) return;
+            if (window.IsCurrent) Picked?.Invoke(window.Handle);
+            else RefreshCards();
         };
         close.MouseLeftButtonUp += (_, e) =>
         {
             e.Handled = true;
-            WindowTracker.Close(window.Handle);
-            Unregister(box);
-            cards.Children.Remove(card);
-            if (cards.Children.Count == 0) Hide();
-            else
-            {
-                var closingGeneration = generation;
-                Dispatcher.BeginInvoke(() =>
-                {
-                    if (!IsVisible || generation != closingGeneration) return;
-                    SizeCards(VisualTreeHelper.GetDpi(this).DpiScaleX);
-                    UpdateLayout(); Position(); Reposition();
-                }, DispatcherPriority.Loaded);
-            }
+            // A close request may open a save prompt or be refused. Keep the
+            // live preview until the source window actually leaves the screen.
+            WindowCloseRequest.TryClose(window);
+            UpdateCloseButton(preview);
+            RefreshCards();
         };
         return card;
     }
@@ -226,12 +224,48 @@ public sealed class PreviewWindow : Window
         Release();
         foreach (var card in cards.Children.OfType<Border>())
         {
-            if (card.Child is not StackPanel { Children.Count: 2 } stackPanel || stackPanel.Children[1] is not Border box || box.Tag is not nint source) continue;
+            if (card.Tag is not PreviewCard preview || !preview.Window.IsCurrent) continue;
+            var box = preview.Box;
+            var source = preview.Window.Handle;
             if (Native.DwmRegisterThumbnail(hwnd, source, out var thumb) != 0) continue;
             thumbs.Add(new Thumbnail(thumb, box));
         }
         Reposition();
-        if (thumbs.Count > 0) refresh.Start();
+        if (cards.Children.Count > 0) refresh.Start();
+    }
+
+    void RefreshCards()
+    {
+        if (!IsVisible) return;
+        WindowCloseRequest.Prune();
+        var removed = false;
+        foreach (var card in cards.Children.OfType<Border>().ToArray())
+        {
+            if (card.Tag is not PreviewCard preview) continue;
+            if (!preview.Window.IsCurrent || !Native.IsWindowVisible(preview.Window.Handle))
+            {
+                Unregister(preview.Box);
+                cards.Children.Remove(card);
+                removed = true;
+                continue;
+            }
+            var title = Native.TitleOf(preview.Window.Handle);
+            if (title.Length > 0 && title != preview.Title.Text) preview.Title.Text = title;
+            UpdateCloseButton(preview);
+        }
+        if (cards.Children.Count == 0) { Hide(); return; }
+        if (!removed) return;
+        SizeCards(VisualTreeHelper.GetDpi(this).DpiScaleX);
+        UpdateLayout();
+        Position();
+    }
+
+    static void UpdateCloseButton(PreviewCard preview)
+    {
+        var enabled = WindowCloseRequest.CanClose(preview.Window);
+        preview.Close.IsEnabled = enabled;
+        preview.Close.Opacity = enabled ? 1 : 0.4;
+        if (!enabled) preview.Close.Background = Brushes.Transparent;
     }
 
     void Reposition()
@@ -306,4 +340,6 @@ public sealed class PreviewWindow : Window
         public Native.Rect Destination { get; set; }
         public bool Visible { get; set; }
     }
+
+    sealed record PreviewCard(AppWindow Window, TextBlock Title, Border Box, Border Close);
 }

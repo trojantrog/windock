@@ -7,6 +7,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- Preserve the current window pose when a native animation reverses or restarts without a stop event.
+- Recover the animation connection after a confirmed compositor restart, with bounded retries through the registered login task.
+- Apply tray registration changes only after Explorer accepts them, and keep unknown callback protocols separate from confirmed registrations.
+- Cancel superseded Everything queries and fence loads, preserve selections, and distinguish loading failures from empty results.
+- Include executable product names when searching installed application shortcuts.
+- Keep previews until an application actually closes or hides its window, including when closing opens a save prompt.
+- Save settings and environments by replacing a completed file and retaining a recoverable previous copy.
 - Keep icon layout stable while the magnifier animates and reduce repeated hover transitions at its edges.
 - Show the selected option's name in settings dropdowns.
 - Find running and tray-hidden applications by window title and localized product names, and keep search open when activation fails.
@@ -17,6 +24,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Preserve animation communication when Dock restarts, and identify components that need the next Windows login.
 
 ### Added
+- Enable tray integration and window animation preferences by default for new settings, and reuse the current protected animation login task during installation.
 - Enable window animations at login through a protected helper, with a setting to remove the login task.
 
 ## [0.5.0] - 2026-10-14

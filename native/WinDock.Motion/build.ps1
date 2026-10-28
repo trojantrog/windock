@@ -57,7 +57,7 @@ try {
     Assert-NativeImage $hostExe $false
     $manifest = [ordered]@{
         protocol = 1
-        build = 12
+        build = 13
         supportedImage = '10.0.26100.9949'
         supportedImageSha256 = 'de3a7bacdcbb49a98bfff41010e772d18a329b77d9bc6b2416e1bc9f5b415863'
         payload = [ordered]@{ name = [IO.Path]::GetFileName($nativeDll); sha256 = $payloadHash }

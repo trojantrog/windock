@@ -3,7 +3,16 @@ using System.Windows.Threading;
 
 namespace WinDock.Services;
 
-public sealed record AppWindow(nint Handle, string Title, string? Exe, string? AppId, bool Minimized);
+public sealed record AppWindow(nint Handle, string Title, string? Exe, string? AppId, bool Minimized)
+{
+    public int ProcessId { get; init; }
+    public uint ThreadId { get; init; }
+    public string WindowClass { get; init; } = "";
+
+    public bool IsCurrent => ProcessId != 0 && ThreadId != 0 && Native.IsWindow(Handle)
+        && Native.GetWindowThreadProcessId(Handle, out var pid) == ThreadId && pid == ProcessId
+        && Native.ClassOf(Handle) == WindowClass;
+}
 
 public sealed class WindowTracker : IDisposable
 {
@@ -188,7 +197,7 @@ public sealed class WindowTracker : IDisposable
         if (!appWindow && (Native.GetWindow(h, Native.GW_OWNER) != 0 || (ex & hiddenStyle) != 0)) return null;
         var cls = Native.ClassOf(h);
         if (SkipClasses.Contains(cls)) return null;
-        Native.GetWindowThreadProcessId(h, out var pid);
+        var thread = Native.GetWindowThreadProcessId(h, out var pid);
         if (pid == ownPid) return null;
         if (Native.DwmGetWindowAttribute(h, DwmCloaked, out var cloaked, 4) == 0 && cloaked != 0) return null;
         var title = Native.TitleOf(h);
@@ -197,7 +206,8 @@ public sealed class WindowTracker : IDisposable
 
         var exe = ExeOf(pid);
         var appId = cls == "CabinetWClass" ? ExplorerId : AppIdOf(h, pid, exe);
-        return new AppWindow(h, title, exe, appId, Native.IsIconic(h));
+        return new AppWindow(h, title, exe, appId, Native.IsIconic(h))
+            { ProcessId = pid, ThreadId = thread, WindowClass = cls };
     }
 
     string? ExeOf(int pid)

@@ -18,6 +18,10 @@ public sealed class SystemTrayItem : INotifyPropertyChanged
     public uint Callback { get; internal set; }
     public uint Version { get; internal set; }
     internal bool RegistrationObserved { get; set; }
+    internal bool CallbackObserved { get; set; }
+    internal bool VersionObserved { get; set; }
+    internal bool IconObserved { get; set; }
+    internal bool TipObserved { get; set; }
     internal long ProcessStarted { get; set; }
     public Guid Guid { get; internal set; }
     public string Title { get; internal set; } = "";
@@ -34,7 +38,7 @@ public sealed class SystemTrayItem : INotifyPropertyChanged
     public BitmapSource? Icon { get; internal set; }
     public bool Hidden { get; internal set; }
     public bool HasHint { get; internal set; }
-    public bool CanInvoke => Callback >= 0x400 && Callback <= 0xFFFF && Window != 0;
+    public bool CanInvoke => CallbackObserved && VersionObserved && Callback >= 0x400 && Callback <= 0xFFFF && Window != 0;
     public string AccessibleName => Title.Length > 0 ? Title : Loc.T("systemTrayUnnamed");
     public event PropertyChangedEventHandler? PropertyChanged;
     internal void Refresh() => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(null));
@@ -54,6 +58,8 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
     readonly TrayIdentity identities = new();
     readonly Dictionary<nint, (long At, int Attempts)> requestedOwners = [];
     readonly Dictionary<uint, long> requestedProcesses = [];
+    readonly Dictionary<string, byte[]> bootstrapCandidates = [];
+    readonly Dictionary<string, uint> pendingVersions = [];
     readonly object pendingLock = new();
     readonly Queue<(uint Kind, byte[] Data)> pending = [];
     volatile CancellationTokenSource? lifetime;
@@ -62,7 +68,7 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
     bool scheduled, ready;
     int pendingBytes;
     int sessionNumber;
-    long receivedPackets, nativeLossReports, interfaceLossReports, rejectedOwners;
+    long receivedPackets, nativeLossReports, interfaceLossReports, rejectedOwners, rejectedRegistrations, confirmedCandidates;
     string? connectionError;
     string status = Loc.T("systemTrayOff");
     DateTime refreshAt, recoveryAt;
@@ -181,6 +187,7 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
         Interlocked.Exchange(ref nativeLossReports, 0);
         Interlocked.Exchange(ref interfaceLossReports, 0);
         rejectedOwners = 0;
+        rejectedRegistrations = confirmedCandidates = 0;
         return true;
     }
 
@@ -194,7 +201,7 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
         lock (pendingLock)
         {
             if (lifetime != run || !ReferenceEquals(activeSession, session)) return;
-            if (kind == 1) Interlocked.Increment(ref receivedPackets);
+            if (kind is 1 or 4) Interlocked.Increment(ref receivedPackets);
             else if (kind == 3) Interlocked.Increment(ref nativeLossReports);
             if (pending.Count >= 256 || pendingBytes + data.Length > 8 * 1024 * 1024)
             { Interlocked.Increment(ref interfaceLossReports); pending.Clear(); pendingBytes = 0; pending.Enqueue((3, [])); }
@@ -223,13 +230,13 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
                 {
                     HasStatusNotice = true; Status = Loc.T("systemTrayUpdatesSkipped"); recovery.Start(); continue;
                 }
-                Apply(data);
+                Apply(data, candidate: kind == 4);
             }
         }
         catch (InvalidDataException) { Stop(); Status = Loc.T("systemTrayDataFailed"); }
     }
 
-    void Apply(byte[] bytes)
+    void Apply(byte[] bytes, bool candidate = false, bool presenceConfirmed = false)
     {
         // Header is 20 bytes followed by the fixed 956-byte Explorer payload.
         if (bytes.Length < 976) throw new InvalidDataException();
@@ -239,26 +246,53 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
         var callback = Read(36); var state = Read(300); var stateMask = Read(304); var version = Read(820);
         var useGuid = (flags & 0x20) != 0;
         var guid = useGuid ? new Guid(bytes.AsSpan(956, 16)) : Guid.Empty;
-        if (operation > 4 || size is < 24 or > 956 || width > 256 || height > 256 || (width == 0) != (height == 0)
+        if (operation > 4 || (candidate && operation != 0) || size is < 24 or > 956 || width > 256 || height > 256 || (width == 0) != (height == 0)
             || pixels != width * height * 4 || bytes.Length != 976 + pixels || (useGuid && (size < 952 || guid == Guid.Empty)))
             throw new InvalidDataException();
         var item = useGuid ? Icons.FirstOrDefault(i => i.Guid == guid)
             : Icons.FirstOrDefault(i => i.Guid == Guid.Empty && i.Window == window && i.Id == id);
+        var key = item?.Key ?? (useGuid ? guid.ToString() : $"{rawWindow:X8}:{id}:{pid}");
+        if (!candidate && operation is 0 or 2)
+        { bootstrapCandidates.Remove(key); pendingVersions.Remove(key); }
         if (operation == 2) { if (item is not null && (pid == 0 || item.ProcessId == pid)) Remove(item); return; }
         if (window == 0 && item is not null && useGuid)
         { window = item.Window; pid = item.ProcessId; id = item.Id; }
         Native.GetWindowThreadProcessId(window, out var actualPid);
         if (pid == 0 || pid != actualPid || !Native.IsWindow(window)) { ++rejectedOwners; return; }
+        if (candidate && !presenceConfirmed)
+        {
+            ++rejectedRegistrations;
+            // A GUID-only GetRect lookup proves that GUID exists, not that it
+            // belongs to the rejected request's HWND/PID. Require an already
+            // accepted owner association before using such a candidate.
+            if (useGuid && (item is null || item.Window != window || item.ProcessId != pid || item.Id != id)) return;
+            // A failed ADD does not establish that an icon exists. Confirm it
+            // through the shell before using any of its missing display fields.
+            if (item is null || (!item.IconObserved && item.Icon is null) || (!item.TipObserved && item.Tip.Length == 0)
+                || (!item.CallbackObserved && item.Callback == 0))
+                QueueBootstrap(key, bytes, window, pid, id, guid);
+            return;
+        }
         if (item is not null && item.ProcessId != pid)
         {
-            if (operation is 3 or 4) return;
+            if (candidate || operation is 3 or 4) return;
             Remove(item); item = null;
         }
+        if (candidate && item is not null && (item.Window != window || item.Id != id)) return;
         if (operation == 3) { if (item is not null) FocusRequested?.Invoke(item); return; }
         if (operation == 4)
         {
-            if (item is not null && version <= 4 && size >= 804) { item.Version = version; item.Refresh(); }
-            else if (item is null) RequestRegistration(window, pid);
+            if (version <= 4 && size >= 804)
+            {
+                if (item is not null) { item.Version = version; item.VersionObserved = true; item.Refresh(); }
+                else
+                {
+                    // An app may acceptably set its existing icon's version
+                    // before our delayed presence probe has produced its row.
+                    if (pendingVersions.Count < 512) pendingVersions[key] = version;
+                    RequestRegistration(window, pid);
+                }
+            }
             return;
         }
         if (useGuid && item is not null && operation == 1) id = item.Id;
@@ -269,25 +303,41 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
             item = new SystemTrayItem { Window = window, ProcessId = pid, Id = id, OwnerClass = Native.ClassOf(window), Guid = guid };
             item.Key = item.Guid == Guid.Empty ? $"{rawWindow:X8}:{id}:{pid}" : item.Guid.ToString();
             known[item.Key] = item;
+            if (pendingVersions.Remove(item.Key, out var observedVersion))
+            { item.Version = observedVersion; item.VersionObserved = true; }
         }
         var wasHidden = item!.Hidden;
         item.Window = window; item.Id = id;
-        if (operation == 0) { item.Version = 0; item.RegistrationObserved = true; }
-        if ((flags & 1) != 0) item!.Callback = callback;
-        if ((flags & 4) != 0)
+        if (operation == 0 && !candidate)
+        {
+            // Only an accepted ADD creates a new registration and resets its
+            // protocol. Stale fields from an earlier registration cannot leak in.
+            item.Version = 0; item.RegistrationObserved = true; item.VersionObserved = true;
+            item.Callback = 0; item.CallbackObserved = true;
+            item.Tip = ""; item.TipObserved = true; item.ShowStandardTip = false; item.Hidden = false;
+            item.Icon = null; item.IconObserved = true;
+        }
+        if ((flags & 1) != 0 && (!candidate || (item.Callback == 0 && !item.CallbackObserved)))
+        {
+            item.Callback = callback;
+            if (!candidate) item.CallbackObserved = true;
+        }
+        if ((flags & 4) != 0 && (!candidate || (!item.TipObserved && item.Tip.Length == 0)))
         {
             item!.Tip = ReadText(bytes, 44, 128);
             item.ShowStandardTip = (flags & 0x80) != 0;
+            if (!candidate) item.TipObserved = true;
         }
-        else if ((flags & 0x80) != 0) item.ShowStandardTip = true;
-        if ((flags & 8) != 0 && (stateMask & 1) != 0) item!.Hidden = (state & 1) != 0;
-        if ((flags & 2) != 0)
+        else if (!candidate && (flags & 0x80) != 0) item.ShowStandardTip = true;
+        if (!candidate && (flags & 8) != 0 && (stateMask & 1) != 0) item!.Hidden = (state & 1) != 0;
+        if ((flags & 2) != 0 && (!candidate || (!item.IconObserved && item.Icon is null)))
         {
             item!.Icon = pixels == 0 ? null : BitmapSource.Create((int)width, (int)height, 96, 96, PixelFormats.Pbgra32,
                 null, bytes.AsSpan(976).ToArray(), (int)width * 4);
             item.Icon?.Freeze();
+            if (!candidate) item.IconObserved = true;
         }
-        if ((flags & 0x50) == 0x10)
+        if (!candidate && (flags & 0x50) == 0x10)
         {
             var text = ReadText(bytes, 308, 256); var title = ReadText(bytes, 824, 64);
             if (!string.IsNullOrWhiteSpace(text))
@@ -301,7 +351,39 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
         item.Refresh();
         if (added) { Icons.Add(item); _ = ResolveIdentity(item); }
         else if (wasHidden != item.Hidden) LayoutChanged?.Invoke();
-        if (operation == 1 && !item.RegistrationObserved) RequestRegistration(item.Window, item.ProcessId);
+        if (operation == 1 && !item.RegistrationObserved && (!item.CallbackObserved || !item.VersionObserved))
+            RequestRegistration(item.Window, item.ProcessId);
+    }
+
+    void QueueBootstrap(string key, byte[] bytes, nint window, uint pid, uint id, Guid guid)
+    {
+        if (lifetime is not { } run || activeSession is not { } session || bootstrapCandidates.ContainsKey(key)
+            || bootstrapCandidates.Count >= 32) return;
+        bootstrapCandidates[key] = bytes;
+        _ = ResolveBootstrap();
+
+        async Task ResolveBootstrap()
+        {
+            bool exists = false;
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(run.Token);
+            timeout.CancelAfter(TimeSpan.FromSeconds(2));
+            try
+            {
+                exists = await TrayRegistrationProbe.ExistsAsync(window, pid, id, guid,
+                    session.ExplorerWindow, session.ExplorerProcess, timeout.Token).WaitAsync(timeout.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) { }
+            if (run.IsCancellationRequested || dispatcher.HasShutdownStarted) return;
+            await dispatcher.InvokeAsync(() =>
+            {
+                if (!IsCurrent(run, session) || !bootstrapCandidates.TryGetValue(key, out var pending)
+                    || !ReferenceEquals(pending, bytes)) return;
+                bootstrapCandidates.Remove(key);
+                if (!Ready || !exists) return;
+                ++confirmedCandidates;
+                Apply(bytes, candidate: true, presenceConfirmed: true);
+            });
+        }
     }
 
     void RequestRegistration(nint window, uint pid)
@@ -344,13 +426,14 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
     }
 
     static string ReadText(byte[] data, int offset, int characters) => Encoding.Unicode.GetString(data, offset, characters * 2).Split('\0')[0];
-    void Remove(SystemTrayItem item) { Icons.Remove(item); known.Remove(item.Key); }
+    void Remove(SystemTrayItem item)
+    { bootstrapCandidates.Remove(item.Key); pendingVersions.Remove(item.Key); Icons.Remove(item); known.Remove(item.Key); }
     void ClearIcons()
     {
         retainedHints.RemoveWhere(old => !Hints.Any(hint => ReferenceEquals(hint.Icon, old)));
         foreach (var item in Icons)
             if (item.HasHint && item.ProcessStarted != 0 && Hints.Any(hint => ReferenceEquals(hint.Icon, item))) retainedHints.Add(item);
-        Icons.Clear(); known.Clear(); identities.Clear(); requestedOwners.Clear(); requestedProcesses.Clear();
+        Icons.Clear(); known.Clear(); identities.Clear(); requestedOwners.Clear(); requestedProcesses.Clear(); bootstrapCandidates.Clear(); pendingVersions.Clear();
     }
 
     public void MarkSeen(SystemTrayItem item) { item.HasHint = false; item.Refresh(); }
@@ -409,6 +492,8 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
         nativeLossReports = Interlocked.Read(ref nativeLossReports),
         interfaceLossReports = Interlocked.Read(ref interfaceLossReports),
         rejectedOwners,
+        rejectedRegistrations,
+        confirmedCandidates,
         icons = Icons.Select(item => new
         {
             window = item.Window.ToInt64(),
@@ -421,6 +506,8 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
             callback = item.Callback,
             version = item.Version,
             registrationObserved = item.RegistrationObserved,
+            callbackObserved = item.CallbackObserved,
+            versionObserved = item.VersionObserved,
             hidden = item.Hidden,
             hasIcon = item.Icon is not null,
             canInvoke = item.CanInvoke

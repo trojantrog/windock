@@ -22,32 +22,34 @@ public sealed class Settings
 
     static string FilePath => Path.Combine(Dir, "settings.json");
 
-    public static bool Exists => File.Exists(FilePath);
+    public static bool Exists => File.Exists(FilePath) || File.Exists(FilePath + ".bak");
 
     public static Settings Load()
     {
-        try { return Parse(File.ReadAllText(FilePath)); }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return new(); }
+        return Normalize(JsonFile.Read<Settings>(FilePath) ?? new());
     }
 
     public static Settings Parse(string json)
     {
         try
         {
-            var settings = JsonSerializer.Deserialize<Settings>(json, Json.Options) ?? new();
-            settings.Dock ??= new();
-            settings.Desktop ??= new();
-            settings.Dock.Clamp();
-            return settings;
+            return Normalize(JsonSerializer.Deserialize<Settings>(json, Json.Options) ?? new());
         }
         catch (JsonException) { return new(); }
     }
 
-    public void Save()
+    static Settings Normalize(Settings settings)
     {
-        Directory.CreateDirectory(Dir);
-        File.WriteAllText(FilePath, JsonSerializer.Serialize(this, Json.Options));
+        settings.AlwaysPinned ??= [];
+        settings.FolderSeen ??= [];
+        settings.Dock ??= new();
+        settings.Desktop ??= new();
+        settings.Dock.ScreenEnvironments ??= [];
+        settings.Dock.Clamp();
+        return settings;
     }
+
+    public void Save() => JsonFile.Write(FilePath, this);
 }
 
 public sealed class DockSettings
@@ -92,7 +94,7 @@ public sealed class DockSettings
     public int WindowMotionDuration { get; set; } = 320;
     public bool WindowOpenAnimation { get; set; } = true;
     public int WindowOpenDuration { get; set; } = 240;
-    public bool NativeWindowAnimations { get; set; }
+    public bool NativeWindowAnimations { get; set; } = true;
     public bool WindowCloseAnimation { get; set; } = true;
     public int WindowCloseDuration { get; set; } = 180;
     public bool WindowRestoreAnimation { get; set; } = true;
@@ -104,7 +106,7 @@ public sealed class DockSettings
     public string WindowMotionCurve { get; set; } = "smooth";
     public bool SearchEnabled { get; set; } = true;
     public bool OrganizerEnabled { get; set; } = true;
-    public bool SystemTrayEnabled { get; set; }
+    public bool SystemTrayEnabled { get; set; } = true;
     public bool TrayPinned { get; set; } = true;
     public double TrayIconSize { get; set; } = 22;
     public int TrayColumns { get; set; } = 5;

@@ -15,14 +15,15 @@ namespace WinDock.Services;
 
 sealed class NativeWindowMotion : IDisposable
 {
-    const int ConfigBytes = 12384, StatusBytes = 96, ActivationBytes = 64, Capacity = 256, Build = 12;
+    const int ConfigBytes = 12384, StatusBytes = 96, ActivationBytes = 64, Capacity = 256, Build = 13;
     const uint Magic = 0x4d444e57;
     const string SystemHash = "de3a7bacdcbb49a98bfff41010e772d18a329b77d9bc6b2416e1bc9f5b415863";
     public static NativeWindowMotion Shared { get; } = new();
     public readonly record struct Anchor(nint Window, uint Pid, string? Exe, Rect Bounds, uint Flags = 0, int Screen = 0);
     sealed record Remembered(Anchor Anchor, long Until);
     sealed record Request(uint Pid, bool Minimized, long Until);
-    sealed record PreviousComponent(int Pid, int Build);
+    sealed record PreviousComponent(int Pid, int Build, DateTimeOffset ObservedAt);
+    readonly record struct StatusIdentity(int Pid, int Build, long Heartbeat);
     sealed record MotionDiagnostic(bool Connected, bool StatusHeaderValid, bool LoginEnabled, uint PublishedFlags, int ComponentPid, int ComponentBuild,
         int ComponentState, int ComponentError, long Opened, long Closed, long Minimized, long Restored,
         long Hidden, long Skipped, long Failed, int PreviousComponentPid, int PreviousComponentBuild);
@@ -36,8 +37,9 @@ sealed class NativeWindowMotion : IDisposable
     SharedMap? config;
     SharedMap? status;
     bool activating, disposed, suspended;
-    bool configuringLogin, refreshingLogin, inspectingPrevious = true;
-    int sequence;
+    bool configuringLogin, refreshingLogin, inspectingConnection, inspectingPrevious = true;
+    int sequence, session, recoveryAttempts;
+    long nextConnectionInspection, nextRecovery, nextLoginInspection;
     string? errorKey;
     string? failureCode;
     long started;
@@ -45,6 +47,7 @@ sealed class NativeWindowMotion : IDisposable
     Task? diagnosticWrite;
     long diagnosticWrittenAt;
     PreviousComponent? previousComponent;
+    StatusIdentity? retiredStatus;
 
     public void Initialize(DockOptions value)
     {
@@ -53,6 +56,7 @@ sealed class NativeWindowMotion : IDisposable
         try
         {
             using var process = Process.GetCurrentProcess();
+            session = process.SessionId;
             started = process.StartTime.ToUniversalTime().ToFileTimeUtc();
             config = new($"Local\\WinDock.Motion.Config.v1.{process.SessionId}", ConfigBytes, false);
             status = new($"Local\\WinDock.Motion.Status.v1.{process.SessionId}", StatusBytes, true);
@@ -72,7 +76,27 @@ sealed class NativeWindowMotion : IDisposable
     }
 
     void LanguageChanged(object? sender, PropertyChangedEventArgs e) => UpdateStatus();
-    void Tick(object? sender, EventArgs e) => Publish();
+    void Tick(object? sender, EventArgs e)
+    {
+        Publish();
+        if (Connected)
+        {
+            previousComponent = null;
+            recoveryAttempts = 0;
+            nextRecovery = 0;
+            if (Marshal.ReadInt32(status!.View, 24) == Build && Marshal.ReadInt32(status.View, 16) == 1
+                && errorKey is "nativeMotionSignOut" or "nativeMotionNoResponse" or "nativeMotionCompositorUnavailable"
+                    or "nativeMotionActivationTimeout" or "nativeMotionLoadFailed")
+            {
+                errorKey = failureCode = null;
+                UpdateStatus();
+            }
+            if (!inspectingPrevious && !configuringLogin && Environment.TickCount64 >= nextLoginInspection)
+                _ = RefreshLoginAsync(false);
+        }
+        else if (!inspectingPrevious && Environment.TickCount64 >= nextConnectionInspection)
+            _ = RestoreDisconnectedComponentAsync();
+    }
     void Changed(string name)
     {
         if (name == nameof(DockOptions.NativeWindowAnimations))
@@ -82,8 +106,12 @@ sealed class NativeWindowMotion : IDisposable
             failureCode = null;
         }
         Publish();
-        if (!configuringLogin && (name is nameof(DockOptions.NativeWindowAnimations) or nameof(DockOptions.Enabled)))
-            _ = RefreshLoginAsync(true);
+        if (name is nameof(DockOptions.NativeWindowAnimations) or nameof(DockOptions.Enabled))
+        {
+            recoveryAttempts = 0;
+            nextRecovery = nextConnectionInspection = 0;
+            if (!configuringLogin) _ = RestoreDisconnectedComponentAsync();
+        }
     }
 
     public void Register(object owner, Func<IEnumerable<Anchor>> source) { providers[owner] = source; Publish(); }
@@ -194,8 +222,15 @@ sealed class NativeWindowMotion : IDisposable
     void Float(int offset, double value) => BinaryPrimitives.WriteSingleLittleEndian(packet.AsSpan(offset, 4), (float)value);
     void Bounds(int offset, Rect rect) { Float(offset, rect.X); Float(offset + 4, rect.Y); Float(offset + 8, rect.Width); Float(offset + 12, rect.Height); }
 
-    bool StatusHeaderValid => status is not null && unchecked((uint)Marshal.ReadInt32(status.View)) == Magic
-        && Marshal.ReadInt32(status.View, 4) == 1 && Marshal.ReadInt32(status.View, 8) == StatusBytes;
+    StatusIdentity? ReadStatusIdentity()
+    {
+        if (status is null || unchecked((uint)Marshal.ReadInt32(status.View)) != Magic
+            || Marshal.ReadInt32(status.View, 4) != 1 || Marshal.ReadInt32(status.View, 8) != StatusBytes) return null;
+        var result = new StatusIdentity(Marshal.ReadInt32(status.View, 12), Marshal.ReadInt32(status.View, 24), Marshal.ReadInt64(status.View, 32));
+        return result.Pid > 4 && result.Build > 0 ? result : null;
+    }
+
+    bool StatusHeaderValid => ReadStatusIdentity() is { } identity && identity != retiredStatus;
 
     bool Connected => StatusHeaderValid
         && Environment.TickCount64 - Marshal.ReadInt64(status!.View, 32) is >= 0 and < 1500;
@@ -209,7 +244,59 @@ sealed class NativeWindowMotion : IDisposable
         inspectingPrevious = false;
         if (disposed) return;
         Publish();
-        await RefreshLoginAsync(true);
+        await RefreshLoginAsync(false);
+        await RestoreDisconnectedComponentAsync();
+    }
+
+    async Task RestoreDisconnectedComponentAsync()
+    {
+        if (disposed || inspectingPrevious || inspectingConnection || activating || configuringLogin || Connected
+            || options is null || config is null || status is null) return;
+        inspectingConnection = true;
+        nextConnectionInspection = Environment.TickCount64 + 10000;
+        try
+        {
+            // Installation can register the task after this Dock has started.
+            // Refresh even when a still-loaded old DWM prevents reconnection.
+            if (Environment.TickCount64 >= nextLoginInspection) await RefreshLoginAsync(false);
+            if (disposed || Connected || activating || configuringLogin) return;
+            var header = ReadStatusIdentity();
+            if (header is { } identity && identity != retiredStatus)
+            {
+                // A stale heartbeat alone cannot prove that an injected module has
+                // unloaded. Confirm the owning DWM generation before retiring it.
+                if (identity.Heartbeat <= 0 || identity.Heartbeat > Environment.TickCount64) return;
+                var age = Environment.TickCount64 - identity.Heartbeat;
+                var observed = DateTimeOffset.UtcNow - TimeSpan.FromMilliseconds(age);
+                var same = await Task.Run(() => SameCompositor(identity.Pid, session, observed));
+                if (disposed || Connected) return;
+                if (same != false || ReadStatusIdentity() != header) return;
+                // Do not zero a section that a new DWM may already be publishing.
+                // Its first new heartbeat or identity makes it visible again.
+                retiredStatus = identity;
+                if (previousComponent?.Pid == identity.Pid) previousComponent = null;
+                recoveryAttempts = 0;
+                nextRecovery = 0;
+                requests.Clear();
+            }
+            if (previousComponent is { } previous)
+            {
+                var same = await Task.Run(() => SameCompositor(previous.Pid, session, previous.ObservedAt));
+                if (disposed || Connected) return;
+                if (same != false || previousComponent != previous) return;
+                previousComponent = null;
+                recoveryAttempts = 0;
+                nextRecovery = 0;
+                requests.Clear();
+            }
+            Publish();
+            if (Flags == 0 || recoveryAttempts >= 3 || Environment.TickCount64 < nextRecovery) return;
+            // The task checks its protected package and current compositor again.
+            // Retry login ordering failures without repeatedly starting a broken task.
+            nextRecovery = Environment.TickCount64 + (++recoveryAttempts == 1 ? 10000 : 30000);
+            await RefreshLoginAsync(true);
+        }
+        finally { inspectingConnection = false; }
     }
 
     static PreviousComponent? ReadPreviousComponent()
@@ -226,17 +313,15 @@ sealed class NativeWindowMotion : IDisposable
             var pid = root.GetProperty("compositorPid").GetInt32();
             var build = root.GetProperty("componentBuild").GetInt32();
             if (pid <= 4 || build <= 0) return null;
-            using var current = Process.GetCurrentProcess();
-            if (!SameCompositor(pid, current.SessionId, at)) return null;
             // A successful activation is historical evidence, not a live heartbeat.
-            // Keep it separate so a lost mapping cannot be displayed as a never-loaded component.
-            return new(pid, build);
+            // Recheck it after startup and after later compositor replacements.
+            return new(pid, build, at);
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException or JsonException or KeyNotFoundException
             or InvalidOperationException or ArgumentException or Win32Exception or FormatException) { return null; }
     }
 
-    static bool SameCompositor(int pid, int session, DateTimeOffset observed)
+    static bool? SameCompositor(int pid, int session, DateTimeOffset observed)
     {
         var objects = new List<object>();
         object Keep(object value) { objects.Add(value); return value; }
@@ -244,6 +329,11 @@ sealed class NativeWindowMotion : IDisposable
             target.GetType().InvokeMember(name, flags, null, target, args)!;
         try
         {
+            // WMI failures also occur when the provider is unavailable. Only a
+            // successful process snapshot can establish that a missing PID exited.
+            var processes = Process.GetProcesses();
+            try { if (!processes.Any(candidate => candidate.Id == pid)) return false; }
+            finally { foreach (var candidate in processes) candidate.Dispose(); }
             var process = Keep(Marshal.BindToMoniker(
                 @"winmgmts:{impersonationLevel=impersonate}!\\.\root\cimv2:Win32_Process.Handle='" + pid + "'"));
             var properties = Keep(Read(process, "Properties_", BindingFlags.GetProperty));
@@ -256,13 +346,13 @@ sealed class NativeWindowMotion : IDisposable
                 || Convert.ToInt32(Property("SessionId"), CultureInfo.InvariantCulture) != session
                 || !string.Equals(Convert.ToString(Property("Name"), CultureInfo.InvariantCulture), "dwm.exe", StringComparison.OrdinalIgnoreCase)) return false;
             var value = Convert.ToString(Property("CreationDate"), CultureInfo.InvariantCulture);
-            if (value is not { Length: 25 } || value[21] is not ('+' or '-')) return false;
+            if (value is not { Length: 25 } || value[21] is not ('+' or '-')) return null;
             var created = DateTime.ParseExact(value[..21], "yyyyMMddHHmmss.ffffff", CultureInfo.InvariantCulture);
             var minutes = int.Parse(value[22..], CultureInfo.InvariantCulture) * (value[21] == '-' ? -1 : 1);
             return new DateTimeOffset(created, TimeSpan.FromMinutes(minutes)) <= observed;
         }
         catch (Exception e) when (e is COMException or InvalidOperationException or ArgumentException or FormatException
-            or OverflowException or InvalidCastException or TargetInvocationException) { return false; }
+            or OverflowException or InvalidCastException or TargetInvocationException or Win32Exception or UnauthorizedAccessException) { return null; }
         finally
         {
             for (var i = objects.Count - 1; i >= 0; --i)
@@ -359,11 +449,23 @@ sealed class NativeWindowMotion : IDisposable
     {
         if (refreshingLogin || disposed || options is null) return;
         refreshingLogin = true;
+        nextLoginInspection = Environment.TickCount64 + 30000;
         try
         {
             var run = startIfReady && Flags != 0 && !Connected;
             var enabled = await Task.Run(() => InspectLoginTask(run));
-            if (!disposed && options is not null) options.WindowAnimationLoginEnabled = enabled;
+            if (!disposed && options is not null)
+            {
+                var newlyRegistered = enabled && !options.WindowAnimationLoginEnabled;
+                options.WindowAnimationLoginEnabled = enabled;
+                if (newlyRegistered)
+                {
+                    // A launch in this inspection already consumes the first try.
+                    recoveryAttempts = run ? 1 : 0;
+                    nextRecovery = run ? Environment.TickCount64 + 10000 : 0;
+                    nextConnectionInspection = 0;
+                }
+            }
         }
         finally { refreshingLogin = false; }
     }
@@ -403,7 +505,14 @@ sealed class NativeWindowMotion : IDisposable
                 || !expected.Equals((string)action.Path, StringComparison.OrdinalIgnoreCase)
                 || !directory.Equals((string)action.WorkingDirectory, StringComparison.OrdinalIgnoreCase)
                 || (string)action.Arguments != "--login " + sid) return false;
-            if (run) Keep((object)task.Run(null));
+            if (run)
+            {
+                // A demand-start failure does not remove the validated task.
+                // Reporting it as unregistered would reset the retry budget
+                // on the next read-only inspection and retry without a bound.
+                try { Keep((object)task.Run(null)); }
+                catch (COMException) { }
+            }
             return true;
         }
         catch (Exception e) when (e is COMException or InvalidOperationException or IOException or UnauthorizedAccessException
@@ -467,6 +576,8 @@ sealed class NativeWindowMotion : IDisposable
         {
             configuringLogin = false;
             await RefreshLoginAsync(false);
+            recoveryAttempts = 0;
+            nextRecovery = nextConnectionInspection = 0;
             UpdateStatus();
         }
     }

@@ -7,6 +7,9 @@ namespace WinDock.Services;
 public sealed record SearchHit(string Name, string Detail, string Kind, string Path, PinItem? Application = null,
     nint Window = 0, int ProcessId = 0, string? WindowClass = null, uint WindowThreadId = 0)
 {
+    public string Identity => Window != 0 ? $"window:{Window}:{ProcessId}:{WindowThreadId}"
+        : Kind == "app" ? $"app:{Application?.AppId ?? Application?.Target}|{Application?.Args}" : $"path:{Path}";
+
     public async Task<bool> OpenAsync(CancellationToken cancellation = default)
     {
         if (Window == 0) return Application is null ? Launcher.OpenFile(Path) : Launcher.Open(Application);
@@ -73,24 +76,49 @@ public sealed class DesktopSearch
 
     static List<SearchEntry> LoadApplications()
     {
-        var entries = Catalog.Load().Select(entry => new SearchEntry(entry, [entry.Name])).ToList();
+        var metadata = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase);
+        string[] ExecutableAliases(string executable)
+        {
+            if (metadata.TryGetValue(executable, out var cached)) return cached;
+            string[] aliases = [];
+            try
+            {
+                if (Path.IsPathFullyQualified(executable) && executable.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) && File.Exists(executable))
+                {
+                    var info = FileVersionInfo.GetVersionInfo(executable);
+                    aliases = new[] { info.ProductName, info.FileDescription, Path.GetFileNameWithoutExtension(executable) }
+                        .Where(name => !string.IsNullOrWhiteSpace(name)).Select(name => name!.Trim())
+                        .Distinct(StringComparer.CurrentCultureIgnoreCase).ToArray();
+                }
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException or Win32Exception or System.Security.SecurityException) { }
+            return metadata[executable] = aliases;
+        }
+
+        var entries = new List<SearchEntry>();
+        foreach (var entry in Catalog.Load())
+        {
+            var aliases = new List<string> { entry.Name };
+            // Keep the original shortcut as the launch target: its arguments and
+            // working directory can be essential even when metadata supplies a name.
+            try
+            {
+                if (entry.Category == Catalog.Programs && entry.IconSource is { } shortcut
+                    && ShellLinks.ReadTarget(shortcut) is { } target)
+                    aliases.AddRange(ExecutableAliases(Environment.ExpandEnvironmentVariables(target)));
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.Security.SecurityException) { }
+            entries.Add(new SearchEntry(entry, aliases.Distinct(StringComparer.CurrentCultureIgnoreCase).ToArray()));
+        }
         try
         {
             foreach (var exe in TrayApps.Registered())
             {
-                if (!File.Exists(exe)) continue;
-                try
-                {
-                    var info = FileVersionInfo.GetVersionInfo(exe);
-                    var aliases = new[] { info.ProductName, info.FileDescription, Path.GetFileNameWithoutExtension(exe) }
-                        .Where(name => !string.IsNullOrWhiteSpace(name)).Select(name => name!.Trim())
-                        .Distinct(StringComparer.CurrentCultureIgnoreCase).ToArray();
-                    if (aliases.Length == 0) continue;
-                    var name = aliases[0];
-                    var entry = new CatalogEntry(name, Loc.T("catPrograms"), exe, () => new PinItem { Name = name, Target = exe });
-                    entries.Add(new SearchEntry(entry, aliases));
-                }
-                catch (Exception e) when (e is IOException or UnauthorizedAccessException or Win32Exception or System.Security.SecurityException) { }
+                var aliases = ExecutableAliases(exe);
+                if (aliases.Length == 0) continue;
+                var name = aliases[0];
+                var entry = new CatalogEntry(name, Loc.T("catPrograms"), exe, () => new PinItem { Name = name, Target = exe });
+                entries.Add(new SearchEntry(entry, aliases));
             }
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.Security.SecurityException) { }
@@ -165,8 +193,7 @@ public sealed class DesktopSearch
             .Select(h => h.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var all = apps.Concat(indexed.Hits).Where(filter.Accepts)
             .Where(h => h.Window != 0 || h.Kind != "app" || h.Application is not { Args: null, ResolvedTarget: { } target } || !runningPaths.Contains(target))
-            .DistinctBy(h => h.Window != 0 ? $"window:{h.Window}:{h.ProcessId}"
-                : h.Kind == "app" ? $"app:{h.Application?.AppId ?? h.Application?.Target}|{h.Application?.Args}" : h.Path, StringComparer.OrdinalIgnoreCase)
+            .DistinctBy(h => h.Identity, StringComparer.OrdinalIgnoreCase)
             .OrderByDescending(h => MatchScore(query, h.Name) + (h.Kind == "app" ? 200 : 0) + (h.Window != 0 ? 10 : 0))
             .ThenBy(h => h.Name, StringComparer.CurrentCultureIgnoreCase).Take(100).ToList();
         var limited = filter.Category == SearchCategory.Applications ? apps.Count >= 30

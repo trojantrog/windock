@@ -10,10 +10,10 @@ Windows 输入法、语言栏和系统面板入口尚未完整替代，当前应
 
 | 功能或应用类型 | 当前实现 | 仍需明确的范围 |
 | --- | --- | --- |
-| 标准图标注册、修改和删除 | 已实现 `NIM_ADD / MODIFY / DELETE`，更新图标、文字、回调和隐藏状态；发送回调前复核窗口及进程。 | 观察到的是发送给 Explorer 的请求，当前未读取 Explorer 的处理返回值，不能逐条确认请求被系统接受。[微软协议](https://learn.microsoft.com/en-us/windows/win32/api/shellapi/nf-shellapi-shell_notifyiconw) |
+| 标准图标注册、修改和删除 | 先复制请求，再读取 Explorer 的实际返回值；成功的 `NIM_ADD / MODIFY / DELETE` 才改变注册状态。发送回调前复核窗口及进程。 | 成功判定已对本机 `shell32.dll` 做静态核对；Explorer 私有传输格式仍可能随系统更新改变。失败 ADD 的显示补全有独立存在性检查，不能当作成功注册。[采集协议](tray-capture-protocol.md)、[微软协议](https://learn.microsoft.com/en-us/windows/win32/api/shellapi/nf-shellapi-shell_notifyiconw) |
 | 按有效字段更新 | 已按 `NIF_MESSAGE / ICON / TIP / STATE / INFO` 处理，隐藏状态使用 `dwStateMask`；旧结构按 `cbSize` 屏蔽不存在的字段，并截断旧版提示文字。 | 未设置有效标志的字段保留已有信息；不同历史结构的实际应用覆盖仍待确认。[字段约定](https://learn.microsoft.com/en-us/windows/win32/api/shellapi/ns-shellapi-notifyicondataw) |
 | GUID 标识及仅携 GUID 的后续操作 | 已要求 `NIF_GUID` 有效后才使用 GUID，拒绝字段不完整或空 GUID；已知 GUID 可复用原有窗口及进程归属，不再退回可能冲突的窗口标识查找。 | 首次收到未知 GUID、没有有效窗口及回调时，不能凭 GUID 生成可点击图标。[GUID 约定](https://learn.microsoft.com/en-us/windows/win32/api/shellapi/ns-shellapi-notifyicondataw) |
-| 协议版本与重新注册 | 已处理 `NIM_SETVERSION`，每次 ADD 重置版本；回调分别按旧版、版本 3、版本 4 打包。 | 版本设置请求的成功与否尚未从 Explorer 返回值确认。丢失版本事件也会影响后续回调。[版本约定](https://learn.microsoft.com/en-us/windows/win32/api/shellapi/nf-shellapi-shell_notifyiconw) |
+| 协议版本与重新注册 | 仅成功 ADD 重置默认版本，仅成功 `NIM_SETVERSION` 更新版本；重复失败 ADD 保留既知版本。回调消息和版本均已确认时才直接交互。 | 晚接入时未重新发送版本的应用可能只显示图标，暂时需要使用 Windows 原生托盘操作；不会按窗口类名或 ADD 中的超时字段猜测版本。丢失版本事件仍会影响后续回调。[版本约定](https://learn.microsoft.com/en-us/windows/win32/api/shellapi/nf-shellapi-shell_notifyiconw) |
 | 菜单结束后归还焦点 | 已接入 `NIM_SETFOCUS`；仅匹配当前图标及其原窗口、进程的活动菜单会话，等待菜单结束后按当前焦点状态归还焦点。 | 用户已切到其他程序时不强制抢回焦点；实际归焦仍受 Windows 前台规则限制。[焦点约定](https://learn.microsoft.com/en-us/windows/win32/api/shellapi/nf-shellapi-shell_notifyiconw) |
 | 左键、右键、中键和双击 | 已发送原应用回调；版本 3/4 保留鼠标抬起与语义事件的兼容顺序，连续点击中的第 2、4 等偶数次按双击发送。拖出图标后松开时继续跟踪按下动作可能已打开的菜单。取得鼠标坐标失败时不发送伪造坐标。 | 在按下时打开菜单和拖出图标后松开等情况仍需逐类确认；不能把一次回调发送成功视为应用已经处理。 |
 | 键盘选择与菜单键 | 已支持 Enter、Space、菜单键及 Shift+F10；版本 4 的键盘锚点使用图标左上角屏幕坐标。 | 原应用是否接收、是否正确聚焦其菜单仍待实测。[回调参数](https://learn.microsoft.com/en-us/windows/win32/api/shellapi/ns-shellapi-notifyicondataw) |
@@ -29,7 +29,7 @@ Windows 输入法、语言栏和系统面板入口尚未完整替代，当前应
 | 使用 `Shell_NotifyIconGetRect` 定位的菜单 | 保留 Windows 原有的图标矩形查询。可选的菜单定位功能默认关闭；启用后，仅在点击 WinDock 图标后短时间内出现、且能确认线程和窗口归属的单个标准菜单靠近原生图标时，尝试将其移到 Dock 图标附近。 | 没有改写系统查询；自绘窗口、跨进程菜单和无法确认来源的窗口仍可能出现在原任务栏附近。移动请求异步发送，目标程序卡住时可能稍后才执行；该功能尚未进行桌面验证。[矩形接口](https://learn.microsoft.com/en-us/windows/win32/api/shellapi/nf-shellapi-shell_notifyicongetrect) |
 | 由系统或辅助进程显示的面板 | 原始应用回调继续发送，有可确认窗口所有者关系的面板参与会话处理。 | 只凭图标进程无法证明另一个进程的面板归属；快速设置等系统界面也不能按普通应用菜单承诺完整复制。 |
 | Windows 输入法和语言栏入口 | 可尝试从 WinDock 打开 Windows 原生输入法入口，继续保留原生任务栏；该操作不切换输入模式或修改输入法配置。 | WinDock 尚未完整替代输入法切换和语言栏入口；无法识别系统控件时应使用原任务栏。快捷键兼容仍待确认。 |
-| 初始连接、Explorer 重建和断线重连 | 已重连并请求重新注册，覆盖普通隐藏窗口和部分仅消息窗口；缺少初始注册时，对所属进程的窗口限频请求补登。连接重建时隔离旧连接的队列及界面回调。损坏或不匹配组件停止自动重试。 | 忽略请求、权限阻止或不再主动发完整注册的应用可能暂时缺失。重新注册请求不构成完整图标快照，应用可能因此重建原生图标。[任务栏重建](https://learn.microsoft.com/en-us/windows/win32/shell/taskbar#taskbar-creation-notification)、[仅消息窗口](https://learn.microsoft.com/en-us/windows/win32/winmsg/window-features#message-only-windows) |
+| 初始连接、Explorer 重建和断线重连 | 已重连并请求重新注册，覆盖普通隐藏窗口和部分仅消息窗口；缺少初始注册时，对所属进程的窗口限频请求补登。失败 ADD 的候选信息经 `Shell_NotifyIconGetRect` 确认图标存在后可补显示；异步补全与连接、删除、新注册隔离。 | 存在性查询不提供回调版本；未知 GUID 的所属窗口也不能仅凭 GUID 查询确认，因此这类首次失败注册不会直接补成图标。忽略请求、权限阻止或不再发完整注册的应用仍可能缺失。[任务栏重建](https://learn.microsoft.com/en-us/windows/win32/shell/taskbar#taskbar-creation-notification)、[仅消息窗口](https://learn.microsoft.com/en-us/windows/win32/winmsg/window-features#message-only-windows) |
 | 丢事件后的恢复 | 已识别采集队列和界面队列丢失更新，显示状态提示，并限频请求 `TaskbarCreated` 重新注册；刷新间隔至少 10 秒，自动恢复间隔至少 30 秒。 | 忽略重新注册请求的应用仍可能缺失；丢失 DELETE 时，仍存活的接收窗口可能留下旧图标。不能仅凭应用没有重发图标就认定它已经删除图标。 |
 | 高低权限应用 | 已校验窗口归属，保留 Windows 的消息和前台限制。 | 普通权限 WinDock 可能无法操作更高权限窗口；允许获得前台不等于解除消息权限限制。[UIPI](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-changewindowmessagefilterex) |
 | 32/64 位应用与系统架构 | 当前组件面向 x64 Windows 10 19041 及更新系统的 x64 Explorer；采集点位于 Explorer。 | 这不等于仅支持 64 位应用，32 位应用也会向 Explorer 注册；实际跨架构覆盖未测。32 位系统与 ARM64 系统当前不支持。[钩子架构要求](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowshookexw) |

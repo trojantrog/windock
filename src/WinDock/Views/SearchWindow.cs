@@ -18,6 +18,7 @@ public sealed class SearchWindow : DesktopToolWindow
     IReadOnlyList<SearchHit> hits = [];
     SearchCategory filter;
     string? scopeFolder;
+    string? resultError;
     string scopeName = Loc.T("searchScopeAll");
     CancellationTokenSource? pending;
     int version;
@@ -99,6 +100,7 @@ public sealed class SearchWindow : DesktopToolWindow
         pending = CancellationTokenSource.CreateLinkedTokenSource(LifetimeToken);
         var token = pending.Token;
         var text = query.Text;
+        resultError = null;
         if (string.IsNullOrWhiteSpace(text)) { hits = []; RenderResults(); Status.Text = "Everything"; return; }
         hits = []; RenderResults();
         empty.Visibility = Visibility.Collapsed;
@@ -120,6 +122,7 @@ public sealed class SearchWindow : DesktopToolWindow
             if (current == version && !token.IsCancellationRequested)
             {
                 hits = [];
+                resultError = e.Message;
                 RenderResults();
                 Status.Text = Loc.F("failed", e.Message);
             }
@@ -128,7 +131,9 @@ public sealed class SearchWindow : DesktopToolWindow
 
     void ShowBatch(SearchBatch batch, bool partial)
     {
-        hits = batch.Hits; RenderResults();
+        hits = batch.Hits;
+        resultError = partial ? null : batch.Error;
+        RenderResults();
         if (partial && hits.Count == 0) empty.Visibility = Visibility.Collapsed;
         Status.Text = (filter == SearchCategory.Applications ? Loc.T("catPrograms") + " · " : batch.EverythingAvailable ? "Everything · " : "") + Loc.F("searchCount", batch.Hits.Count)
             + (partial ? " · " + Loc.T("searching") : "")
@@ -165,12 +170,13 @@ public sealed class SearchWindow : DesktopToolWindow
         if (results.Items.Count > 0)
         {
             var index = previous is null ? -1 : results.Items.Cast<ListBoxItem>().ToList()
-                .FindIndex(item => ReferenceEquals(item.Tag, previous));
+                .FindIndex(item => item.Tag is SearchHit hit && string.Equals(hit.Identity, previous.Identity, StringComparison.OrdinalIgnoreCase));
             results.SelectedIndex = index >= 0 ? index : 0;
         }
         empty.Visibility = results.Items.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-        ((TextBlock)empty.Children[1]).Text = Loc.T(string.IsNullOrWhiteSpace(query.Text) ? "searchEmptyTitle" : "searchNoResults");
-        ((TextBlock)empty.Children[2]).Text = Loc.T(string.IsNullOrWhiteSpace(query.Text) ? "searchEmptyHint" : "searchTryAnother");
+        ((TextBlock)empty.Children[1]).Text = Loc.T(resultError is not null ? "searchUnavailableTitle"
+            : string.IsNullOrWhiteSpace(query.Text) ? "searchEmptyTitle" : "searchNoResults");
+        ((TextBlock)empty.Children[2]).Text = resultError ?? Loc.T(string.IsNullOrWhiteSpace(query.Text) ? "searchEmptyHint" : "searchTryAnother");
     }
 
     void UpdateScopeLabel()

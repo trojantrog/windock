@@ -13,11 +13,12 @@
 #include <string.h>
 
 #define MAGIC 0x52544457u
-#define PROTOCOL 4u
+#define PROTOCOL 5u
 #define QUEUE_SIZE 128
+#define PENDING_SIZE 32
 #define MAX_ICON 256
-#define START_MESSAGE L"WinDock.TrayHook.Connect.v4"
-#define STOP_MESSAGE L"WinDock.TrayHook.Disconnect.v4"
+#define START_MESSAGE L"WinDock.TrayHook.Connect.v5"
+#define STOP_MESSAGE L"WinDock.TrayHook.Disconnect.v5"
 
 #pragma pack(push, 1)
 // Explorer's Shell_NotifyIcon wire representation is 32-bit on x64 as well.
@@ -42,17 +43,54 @@ typedef struct {
 #pragma pack(pop)
 _Static_assert(sizeof(IconData32) == 956, "Explorer notification wire layout changed");
 _Static_assert(sizeof(IconPacket) == 992, "WinDock tray protocol layout changed");
-typedef struct { DWORD operation, ownerPid; IconData32 data; HICON icon; } QueuedIcon;
+typedef struct { DWORD kind, operation, ownerPid; IconData32 data; HICON icon; } QueuedIcon;
+typedef struct {
+    HWND window;
+    WPARAM wParam;
+    LPARAM lParam;
+    unsigned int depth;
+    BOOL completed;
+    QueuedIcon event;
+} PendingMessage;
 
 static HMODULE module;
 static SRWLOCK queueLock = SRWLOCK_INIT;
 static QueuedIcon queue[QUEUE_SIZE];
 static unsigned int head, count;
+// Both hooks run on the selected Explorer thread. The worker only clears the
+// owned snapshots under queueLock; it never accesses the message pointers.
+static PendingMessage pending[PENDING_SIZE];
+static unsigned int pendingCount, copyDepth;
 static volatile LONG stopped = 1, initialized, dropped;
 static HANDLE wakeEvent;
 static DWORD hostPid, sessionNonce;
 static UINT startMessage, stopMessage;
 static HWND verifiedTray;
+
+static void DiscardPending(unsigned int first) {
+    while (pendingCount > first) {
+        PendingMessage *message = &pending[--pendingCount];
+        if (message->event.icon) DestroyIcon(message->event.icon);
+        message->event.icon = NULL;
+    }
+}
+
+// Keep the original request order when Explorer pumps nested messages before
+// returning from an outer operation. A nested SETVERSION must not overtake the
+// ADD that caused it. Called only while holding queueLock.
+static unsigned int TakeCompleted(QueuedIcon *events) {
+    unsigned int consumed = 0, length = 0;
+    while (consumed < pendingCount && pending[consumed].completed) {
+        QueuedIcon *event = &pending[consumed++].event;
+        if (event->kind) events[length++] = *event;
+        else if (event->icon) DestroyIcon(event->icon);
+    }
+    if (consumed) {
+        pendingCount -= consumed;
+        MoveMemory(pending, pending + consumed, pendingCount * sizeof(PendingMessage));
+    }
+    return length;
+}
 
 static BOOL ExplorerTray(HWND window) {
     if (window == verifiedTray) return TRUE;
@@ -150,7 +188,7 @@ static BOOL SendIcon(HANDLE pipe, HANDLE process, QueuedIcon *event) {
     DWORD bytes = width * height * 4, length = sizeof(IconPacket) + bytes;
     IconPacket *packet = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, length);
     if (!packet) { if (pixels) HeapFree(GetProcessHeap(), 0, pixels); return FALSE; }
-    packet->header = (Header){MAGIC, PROTOCOL, 1, length};
+    packet->header = (Header){MAGIC, PROTOCOL, event->kind, length};
     packet->operation = event->operation; packet->ownerPid = event->ownerPid;
     packet->width = width; packet->height = height; packet->pixelBytes = bytes;
     packet->icon = event->data;
@@ -203,6 +241,7 @@ static DWORD WINAPI Worker(void *unused) {
 finish:
     AcquireSRWLockExclusive(&queueLock);
     InterlockedExchange(&stopped, 1);
+    DiscardPending(0);
     while (count) { if (queue[head].icon) DestroyIcon(queue[head].icon); head = (head + 1) % QUEUE_SIZE; --count; }
     head = 0;
     InterlockedExchange(&dropped, 0);
@@ -239,16 +278,16 @@ static BOOL SameIconUpdate(const QueuedIcon *left, const QueuedIcon *right) {
     return TRUE;
 }
 
-static void Capture(const COPYDATASTRUCT *copy) {
+static BOOL Capture(const COPYDATASTRUCT *copy, QueuedIcon *captured) {
     if (stopped || !copy || copy->dwData != 1 || !copy->lpData ||
-        copy->cbData < 8 + 24 || copy->cbData > 4096) return;
+        copy->cbData < 8 + 24 || copy->cbData > 4096) return FALSE;
     const ShellTrayData *source = (const ShellTrayData *)copy->lpData;
     if (source->signature != 0x34753423 || source->operation > NIM_SETVERSION || source->icon.size < 24 ||
-        source->icon.size > sizeof(IconData32) || source->icon.size > copy->cbData - 8) return;
+        source->icon.size > sizeof(IconData32) || source->icon.size > copy->cbData - 8) return FALSE;
     QueuedIcon event = {0};
     event.operation = source->operation;
     CopyMemory(&event.data, &source->icon, source->icon.size);
-    if (event.operation == NIM_SETVERSION && event.data.size < offsetof(IconData32, version) + sizeof(DWORD)) return;
+    if (event.operation == NIM_SETVERSION && event.data.size < offsetof(IconData32, version) + sizeof(DWORD)) return FALSE;
     if (event.data.size < offsetof(IconData32, stateMask) + sizeof(DWORD)) event.data.flags &= ~NIF_STATE;
     if (event.data.size < offsetof(IconData32, infoFlags) + sizeof(DWORD)) event.data.flags &= ~(NIF_INFO | NIF_REALTIME);
     if (event.data.size < offsetof(IconData32, tip) + 64 * sizeof(WCHAR)) event.data.flags &= ~(NIF_TIP | NIF_SHOWTIP);
@@ -259,32 +298,41 @@ static void Capture(const COPYDATASTRUCT *copy) {
     const GUID emptyGuid = {0};
     BOOL guidOnly = (event.data.flags & NIF_GUID) != 0;
     if (guidOnly && (event.data.size < offsetof(IconData32, guid) + sizeof(GUID) ||
-        memcmp(&event.data.guid, &emptyGuid, sizeof(GUID)) == 0)) return;
+        memcmp(&event.data.guid, &emptyGuid, sizeof(GUID)) == 0)) return FALSE;
     if (!guidOnly) event.data.guid = emptyGuid;
     HWND owner = (HWND)(LONG_PTR)(LONG)event.data.window;
     GetWindowThreadProcessId(owner, &event.ownerPid);
-    if (!event.ownerPid && event.operation != NIM_DELETE && !guidOnly) return;
+    if (!event.ownerPid && event.operation != NIM_DELETE && !guidOnly) return FALSE;
     DWORD ownerSession = 0, ownSession = 0;
     if (event.ownerPid && (!ProcessIdToSessionId(event.ownerPid, &ownerSession) ||
-        !ProcessIdToSessionId(GetCurrentProcessId(), &ownSession) || ownerSession != ownSession)) return;
+        !ProcessIdToSessionId(GetCurrentProcessId(), &ownSession) || ownerSession != ownSession)) return FALSE;
     event.data.tip[127] = 0; event.data.info[255] = 0; event.data.infoTitle[63] = 0;
-    // CopyIcon is the only image work on Explorer's thread; bitmap conversion and
-    // pipe I/O happen on Worker. Never wait behind a busy renderer or pipe.
+    // The sender may destroy its HICON immediately after Shell_NotifyIcon
+    // returns. Copy it while WM_COPYDATA is being processed, never in the return
+    // hook or worker. Do not retain or later dereference the message payload.
+    if (event.operation <= NIM_MODIFY && (event.data.flags & NIF_ICON) && event.data.icon)
+        event.icon = CopyIcon((HICON)(LONG_PTR)(LONG)event.data.icon);
+    *captured = event;
+    return TRUE;
+}
+
+static void Enqueue(QueuedIcon *event) {
+    // The caller owns event->icon until the successful ownership transfer below.
+    // Never wait behind the worker's queue access on Explorer's window thread.
     if (!TryAcquireSRWLockExclusive(&queueLock)) { InterlockedIncrement(&dropped); return; }
     if (stopped) { ReleaseSRWLockExclusive(&queueLock); return; }
-    if (IconUpdate(&event)) {
+    if (IconUpdate(event)) {
         for (unsigned int i = count; i > 0; --i) {
-            QueuedIcon *pending = &queue[(head + i - 1) % QUEUE_SIZE];
-            if (!SameIcon(pending, &event)) continue;
-            if (!SameIconUpdate(pending, &event)) break;
-            HICON copied = event.data.icon ? CopyIcon((HICON)(LONG_PTR)(LONG)event.data.icon) : NULL;
-            if (event.data.icon && !copied) InterlockedIncrement(&dropped);
+            QueuedIcon *prior = &queue[(head + i - 1) % QUEUE_SIZE];
+            if (!SameIcon(prior, event)) continue;
+            if (!SameIconUpdate(prior, event)) break;
+            if (event->data.icon && !event->icon) InterlockedIncrement(&dropped);
             else {
-                if (pending->icon) DestroyIcon(pending->icon);
-                event.icon = copied;
+                if (prior->icon) DestroyIcon(prior->icon);
                 for (unsigned int position = i - 1; position + 1 < count; ++position)
                     queue[(head + position) % QUEUE_SIZE] = queue[(head + position + 1) % QUEUE_SIZE];
-                queue[(head + count - 1) % QUEUE_SIZE] = event;
+                queue[(head + count - 1) % QUEUE_SIZE] = *event;
+                event->icon = NULL;
                 if (wakeEvent) SetEvent(wakeEvent);
             }
             ReleaseSRWLockExclusive(&queueLock);
@@ -292,12 +340,70 @@ static void Capture(const COPYDATASTRUCT *copy) {
         }
     }
     if (count == QUEUE_SIZE) { ReleaseSRWLockExclusive(&queueLock); InterlockedIncrement(&dropped); return; }
-    if (event.operation <= NIM_MODIFY && (event.data.flags & NIF_ICON) && event.data.icon)
-        event.icon = CopyIcon((HICON)(LONG_PTR)(LONG)event.data.icon);
-    queue[(head + count) % QUEUE_SIZE] = event;
+    queue[(head + count) % QUEUE_SIZE] = *event;
+    event->icon = NULL;
     ++count;
     if (wakeEvent) SetEvent(wakeEvent);
     ReleaseSRWLockExclusive(&queueLock);
+}
+
+static void BeginCopyData(const CWPSTRUCT *message) {
+    // Count all WM_COPYDATA calls, including unrelated shell payloads, so nested
+    // dispatch cannot associate an inner result with an outer registration.
+    unsigned int depth = ++copyDepth;
+    QueuedIcon event = {0};
+    if (!Capture((const COPYDATASTRUCT *)message->lParam, &event)) return;
+    QueuedIcon completed[PENDING_SIZE];
+    unsigned int length = 0;
+    if (TryAcquireSRWLockExclusive(&queueLock)) {
+        // A previous return hook may have skipped a busy queue. Its snapshot is
+        // stale once the thread re-enters at the same or an outer call depth.
+        for (unsigned int i = 0; i < pendingCount; ++i) {
+            if (!pending[i].completed && pending[i].depth >= depth) {
+                pending[i].completed = TRUE;
+                pending[i].event.kind = 0;
+                InterlockedIncrement(&dropped);
+            }
+        }
+        length = TakeCompleted(completed);
+        if (!stopped && pendingCount < PENDING_SIZE) {
+            pending[pendingCount++] = (PendingMessage){message->hwnd, message->wParam, message->lParam, depth, FALSE, event};
+            event.icon = NULL;
+        } else if (!stopped) InterlockedIncrement(&dropped);
+        ReleaseSRWLockExclusive(&queueLock);
+    } else InterlockedIncrement(&dropped);
+    if (event.icon) DestroyIcon(event.icon);
+    for (unsigned int i = 0; i < length; ++i) {
+        Enqueue(&completed[i]);
+        if (completed[i].icon) DestroyIcon(completed[i].icon);
+    }
+}
+
+static void CompleteCopyData(const CWPRETSTRUCT *message) {
+    unsigned int depth = copyDepth;
+    if (copyDepth) --copyDepth;
+    if (!TryAcquireSRWLockExclusive(&queueLock)) { if (!stopped) InterlockedIncrement(&dropped); return; }
+    for (unsigned int i = 0; i < pendingCount; ++i) {
+        PendingMessage *saved = &pending[i];
+        if (saved->completed || saved->depth < depth) continue;
+        saved->completed = TRUE;
+        // Local shell32 analysis confirms that only the exact result TRUE is a
+        // successful Shell_NotifyIcon operation. A rejected ADD is a bootstrap
+        // candidate, never an accepted update or a protocol-version reset.
+        if (saved->depth == depth && saved->window == message->hwnd && saved->wParam == message->wParam && saved->lParam == message->lParam)
+            saved->event.kind = message->lResult == TRUE ? 1 : saved->event.operation == NIM_ADD ? 4 : 0;
+        else {
+            saved->event.kind = 0;
+            InterlockedIncrement(&dropped);
+        }
+    }
+    QueuedIcon completed[PENDING_SIZE];
+    unsigned int length = TakeCompleted(completed);
+    ReleaseSRWLockExclusive(&queueLock);
+    for (unsigned int i = 0; i < length; ++i) {
+        Enqueue(&completed[i]);
+        if (completed[i].icon) DestroyIcon(completed[i].icon);
+    }
 }
 
 __declspec(dllexport) DWORD WINAPI WinDockTrayProtocol(void) { return PROTOCOL; }
@@ -331,17 +437,27 @@ __declspec(dllexport) LRESULT CALLBACK WinDockTrayHook(int code, WPARAM wParam, 
             } else if (message->message == stopMessage && message->wParam == hostPid && (DWORD)message->lParam == sessionNonce) {
                 AcquireSRWLockExclusive(&queueLock);
                 InterlockedExchange(&stopped, 1);
+                DiscardPending(0);
                 if (wakeEvent) SetEvent(wakeEvent);
                 ReleaseSRWLockExclusive(&queueLock);
-            } else if (message->message == WM_COPYDATA) Capture((const COPYDATASTRUCT *)message->lParam);
+            } else if (message->message == WM_COPYDATA) BeginCopyData(message);
             else if (message->message == WM_NCDESTROY) {
                 AcquireSRWLockExclusive(&queueLock);
                 InterlockedExchange(&stopped, 1);
+                DiscardPending(0);
                 if (wakeEvent) SetEvent(wakeEvent);
                 ReleaseSRWLockExclusive(&queueLock);
                 verifiedTray = NULL;
             }
         }
+    }
+    return CallNextHookEx(NULL, code, wParam, lParam);
+}
+
+__declspec(dllexport) LRESULT CALLBACK WinDockTrayReturnHook(int code, WPARAM wParam, LPARAM lParam) {
+    if (code >= 0 && lParam) {
+        const CWPRETSTRUCT *message = (const CWPRETSTRUCT *)lParam;
+        if (message->message == WM_COPYDATA && ExplorerTray(message->hwnd)) CompleteCopyData(message);
     }
     return CallNextHookEx(NULL, code, wParam, lParam);
 }

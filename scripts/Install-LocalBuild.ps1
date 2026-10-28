@@ -1,7 +1,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$PackagePath,
     [Parameter(Mandatory = $true)][string]$DestinationPath,
-    [switch]$EnableAnimationStartup,
+    [switch]$EnableAnimationStartup = $true,
     [string]$BackupRoot = (Join-Path (Split-Path -Parent $PSScriptRoot) 'publish\backups')
 )
 $ErrorActionPreference = 'Stop'
@@ -98,10 +98,21 @@ if (Test-Path -LiteralPath $destination) {
 }
 [ordered]@{ previousExecutable = $previousExe; startupCommand = $startupBefore; destination = $destination } |
     ConvertTo-Json | Set-Content -LiteralPath (Join-Path $backup 'before.json') -Encoding utf8
+$backupIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
+try {
+    $previousTaskName = 'WinDock.NativeMotion.' + $backupIdentity.User.Value
+    $previousTask = Get-ScheduledTask -TaskName $previousTaskName -ErrorAction SilentlyContinue
+    if ($previousTask) {
+        $taskXml = Export-ScheduledTask -TaskName $previousTaskName -ErrorAction Stop
+        [IO.File]::WriteAllText((Join-Path $backup 'animation-login.xml'), $taskXml, [Text.Encoding]::Unicode)
+    }
+}
+finally { $backupIdentity.Dispose() }
 $settingsFile = Join-Path $env:APPDATA 'WinDock\settings.json'
 $copied = [Collections.Generic.List[object]]::new()
 $stopped = $false
 $startupChanged = $false
+$deploymentVerified = $false
 $launched = $null
 $settingsRaw = $null
 function Save-SettingsWithNativeTaskbar([string]$Raw, [bool]$EnableNativeAnimations = $false) {
@@ -131,6 +142,33 @@ function Save-SettingsWithNativeTaskbar([string]$Raw, [bool]$EnableNativeAnimati
         if ($replaced -and (Test-Path -LiteralPath $previous)) { Remove-Item -LiteralPath $previous }
     }
 }
+function Test-CurrentAnimationLogin([string]$UserSid) {
+    try {
+        $motion = Get-Content -LiteralPath (Join-Path $destination 'WinDock.Motion.manifest.json') -Raw | ConvertFrom-Json
+        if ($motion.payload.sha256 -notmatch '^[a-fA-F0-9]{64}$' -or
+            $motion.loginHost.sha256 -notmatch '^[a-fA-F0-9]{64}$') { return $false }
+        $protectedDirectory = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) ('WinDock.NativeMotion\' + $motion.payload.sha256)
+        $protectedHost = Join-Path $protectedDirectory ('WinDock.MotionLogin.' + $motion.loginHost.sha256 + '.exe')
+        # The cache intentionally denies file access to an ordinary Dock process.
+        # Match the protected task's fixed action to the verified release instead;
+        # its elevated helper checks cache ownership and embedded hashes when run.
+        $task = Get-ScheduledTask -TaskName ('WinDock.NativeMotion.' + $UserSid) -ErrorAction Stop
+        $actions = @($task.Actions)
+        $triggers = @($task.Triggers)
+        if (-not $task.Settings.Enabled -or $actions.Count -ne 1 -or $triggers.Count -ne 1 -or
+            [int]$task.Principal.RunLevel -ne 1 -or [int]$task.Principal.LogonType -ne 3) { return $false }
+        function AccountSid([string]$Account) {
+            if ($Account.StartsWith('S-1-', [StringComparison]::OrdinalIgnoreCase)) { return $Account }
+            return ([Security.Principal.NTAccount]::new($Account)).Translate([Security.Principal.SecurityIdentifier]).Value
+        }
+        return (AccountSid $task.Principal.UserId) -eq $UserSid -and
+            (AccountSid $triggers[0].UserId) -eq $UserSid -and $triggers[0].Enabled -and
+            $triggers[0].CimClass.CimClassName -eq 'MSFT_TaskLogonTrigger' -and
+            $actions[0].Execute -ieq $protectedHost -and $actions[0].WorkingDirectory -ieq $protectedDirectory -and
+            $actions[0].Arguments -ceq ('--login ' + $UserSid)
+    }
+    catch { return $false }
+}
 try {
     if ($running.Count) {
         $signal = [Threading.EventWaitHandle]::OpenExisting('WinDock.Exit')
@@ -148,7 +186,7 @@ try {
     Copy-Item -LiteralPath $settingsFile -Destination (Join-Path $backup 'settings.json')
     if ((Get-FileHash -LiteralPath $settingsFile).Hash -ne
         (Get-FileHash -LiteralPath (Join-Path $backup 'settings.json')).Hash) { throw 'Settings backup checksum mismatch.' }
-    Save-SettingsWithNativeTaskbar $settingsRaw
+    Save-SettingsWithNativeTaskbar $settingsRaw ([bool]$EnableAnimationStartup)
     New-Item -ItemType Directory -Path $destination -Force | Out-Null
     foreach ($entry in $entries) {
         $parent = Split-Path -Parent $entry.Target
@@ -167,25 +205,6 @@ try {
     New-ItemProperty -LiteralPath $runKey -Name WinDock -Value $startupCommand -PropertyType String -Force | Out-Null
     $startupChanged = $true
     if ((Get-ItemProperty -LiteralPath $runKey -Name WinDock).WinDock -cne $startupCommand) { throw 'Login entry readback failed.' }
-    $animationLogin = [ordered]@{ requested = [bool]$EnableAnimationStartup; registered = $false; exitCode = $null }
-    if ($EnableAnimationStartup) {
-        # Windows presents its normal administrator consent prompt. This entry
-        # only registers the protected login helper; it never starts an animation.
-        $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-        try { $userSid = $identity.User.Value } finally { $identity.Dispose() }
-        try {
-            $registration = Start-Process -FilePath (Join-Path $destination 'WinDock.MotionHost.exe') -ArgumentList @('--register-login', $userSid) -Verb RunAs -WindowStyle Hidden -PassThru
-            $registration.WaitForExit()
-            $animationLogin.exitCode = $registration.ExitCode
-            $animationLogin.registered = $registration.ExitCode -eq 0
-        }
-        catch {
-            $registrationError = $_.Exception
-            if ($registrationError.InnerException -is [System.ComponentModel.Win32Exception]) { $registrationError = $registrationError.InnerException }
-            $animationLogin.exitCode = if ($registrationError -is [System.ComponentModel.Win32Exception]) { $registrationError.NativeErrorCode } else { $registrationError.HResult }
-        }
-        if ($animationLogin.registered) { Save-SettingsWithNativeTaskbar $settingsRaw $true }
-    }
     $launched = Start-Process -FilePath $installedExe -ArgumentList '--tray' -WorkingDirectory $destination -WindowStyle Hidden -PassThru
     Start-Sleep -Seconds 2
     if ($launched.HasExited -or [WinDockDeploymentProbe]::PathFor($launched.Id) -ine $installedExe) {
@@ -196,13 +215,48 @@ try {
                      ($settingsAfter.alwaysPinned | ConvertTo-Json -Depth 20 -Compress)
     if (-not $pinsPreserved -or $settingsAfter.dock.replaceTaskbar) { throw 'Settings readback failed.' }
     $taskbar = [WinDockDeploymentProbe]::FindWindow('Shell_TrayWnd', $null)
+    $nativeTaskbarVisible = [WinDockDeploymentProbe]::IsWindowVisible($taskbar)
+    if (-not $nativeTaskbarVisible) { throw 'The native taskbar is not visible after installation.' }
+    $deploymentVerified = $true
+
+    # Finish normal installation before requesting Windows administrator consent.
+    # The Dock remains available while consent is pending. No settings snapshots
+    # are written after launch, so changes made during that wait stay intact.
+    $animationLogin = [ordered]@{ requested = [bool]$EnableAnimationStartup; registered = $false; reused = $false; exitCode = $null }
+    if ($EnableAnimationStartup) {
+        # Windows presents its normal administrator consent prompt. This entry
+        # only registers the protected login helper; it never starts an animation.
+        $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+        try { $userSid = $identity.User.Value } finally { $identity.Dispose() }
+        if (Test-CurrentAnimationLogin $userSid) {
+            $animationLogin.registered = $true
+            $animationLogin.reused = $true
+            $animationLogin.exitCode = 0
+        }
+        else {
+            try {
+                $registration = Start-Process -FilePath (Join-Path $destination 'WinDock.MotionHost.exe') -ArgumentList @('--register-login', $userSid) -Verb RunAs -WindowStyle Hidden -PassThru
+                try {
+                    $registration.WaitForExit()
+                    $animationLogin.exitCode = $registration.ExitCode
+                    $animationLogin.registered = $registration.ExitCode -eq 0 -and (Test-CurrentAnimationLogin $userSid)
+                }
+                finally { $registration.Dispose() }
+            }
+            catch {
+                $registrationError = $_.Exception
+                if ($registrationError.InnerException -is [System.ComponentModel.Win32Exception]) { $registrationError = $registrationError.InnerException }
+                $animationLogin.exitCode = if ($registrationError -is [System.ComponentModel.Win32Exception]) { $registrationError.NativeErrorCode } else { $registrationError.HResult }
+            }
+        }
+    }
     $report = [ordered]@{
         installedAt = [DateTimeOffset]::Now.ToString('o'); version = $version
         installedExecutable = $installedExe; runningExecutable = [WinDockDeploymentProbe]::PathFor($launched.Id)
         processId = $launched.Id; startupCommand = $startupCommand; backup = $backup
         animationLogin = $animationLogin
         verifiedFiles = $entries.Count; pinsPreserved = $pinsPreserved; replaceTaskbar = $settingsAfter.dock.replaceTaskbar
-        nativeTaskbarWindowVisible = [WinDockDeploymentProbe]::IsWindowVisible($taskbar)
+        nativeTaskbarWindowVisible = $nativeTaskbarVisible
         desktopInteractionTested = $false; loginCycleTested = $false
     }
     $report | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $backup 'install-report.json') -Encoding utf8
@@ -210,6 +264,9 @@ try {
 }
 catch {
     $failure = $_
+    # A later report failure must not roll back the verified application after
+    # Windows has already accepted its new protected login task.
+    if ($deploymentVerified) { throw $failure }
     if ($launched -and -not $launched.HasExited -and
         [WinDockDeploymentProbe]::PathFor($launched.Id) -ieq $installedExe) {
         try {
