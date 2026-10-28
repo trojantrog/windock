@@ -34,7 +34,7 @@ struct Active {
     Rect base{};
     double ox = 0, oy = 0;
     int kind = 0;
-    uint64_t stopped = 0;
+    uint64_t stopped = 0, expires = 0;
     bool interrupted = false;
     Pose last{};
 };
@@ -84,7 +84,12 @@ bool ReadConfig(Config& result) {
 }
 
 Active* Find(void* window) {
-    for (auto& item : active) if (item.window == window) return &item;
+    if (!window) return nullptr;
+    const auto now = GetTickCount64();
+    for (auto& item : active) {
+        if (item.window && item.expires <= now) item = {};
+        if (item.window == window) return &item;
+    }
     return nullptr;
 }
 
@@ -199,7 +204,7 @@ Rect AnchorFor(const Config& config, HWND handle, DWORD pid, const Rect& base) {
 double BaseAlpha(void* window) {
     void* data = Field<void*>(window, abi::WindowData);
     void* original = data ? Field<void*>(data, 0x1b8) : nullptr;
-    double value = original ? Field<double>(original, 0x78) : Field<double>(window, 0x78);
+    double value = original ? Field<double>(original, 0x78) : 1.;
     return Finite(value) ? std::clamp(value, 0., 1.) : 1.;
 }
 
@@ -278,7 +283,8 @@ bool ReplaceTracks(void* window, const Config& config, int kind) {
     constexpr unsigned attributes[]{0, 1, 6, 7, 9};
     for (unsigned i = 0; i < 5; ++i) Field<void*>(window, abi::Tracks + attributes[i] * sizeof(void*)) = prepared[i];
     Field<void*>(window, abi::Master) = prepared[5];
-    *record = {window, Field<void*>(window, abi::WindowData), prepared[5], handle, base, ox, oy, kind, 0, false, from};
+    *record = {window, Field<void*>(window, abi::WindowData), prepared[5], handle, base, ox, oy, kind,
+        0, GetTickCount64() + 4000, false, from};
     for (auto value : retired) if (value) release(value);
     volatile LONG64* counter = kind == 1 ? &status->opened : kind == 3 ? &status->minimized : kind == 5 ? &status->restored
         : kind == 6 ? &status->closed : &status->hidden;

@@ -52,6 +52,7 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
     readonly object pendingLock = new();
     readonly Queue<(uint Kind, byte[] Data)> pending = [];
     volatile CancellationTokenSource? lifetime;
+    TrayHookSession? activeSession;
     Task? runner;
     bool scheduled, ready;
     int pendingBytes;
@@ -110,15 +111,19 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
         var token = run.Token;
         while (!token.IsCancellationRequested)
         {
+            var session = new TrayHookSession(token);
             try
             {
-                using var session = new TrayHookSession(token);
-                await session.ReadAsync((kind, data) => Queue(run, kind, data), () => dispatcher.BeginInvoke(() =>
+                using (session)
                 {
-                    if (lifetime != run) return;
-                    HasStatusNotice = false; Ready = true; Status = Loc.T("systemTrayConnected");
-                    refreshAt = recoveryAt = default; RequestRefresh();
-                }));
+                    if (!await dispatcher.InvokeAsync(() => BeginSession(run, session), DispatcherPriority.Normal, token).Task.ConfigureAwait(false)) break;
+                    await session.ReadAsync((kind, data) => Queue(run, session, kind, data), () => dispatcher.BeginInvoke(() =>
+                    {
+                        if (!IsCurrent(run, session)) return;
+                        HasStatusNotice = false; Ready = true; Status = Loc.T("systemTrayConnected");
+                        refreshAt = recoveryAt = default; RequestRefresh();
+                    }));
+                }
             }
             catch (OperationCanceledException) when (token.IsCancellationRequested) { break; }
             catch (Exception error) when (error is IOException or InvalidDataException or UnauthorizedAccessException or TimeoutException or NotSupportedException or
@@ -126,7 +131,7 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
             {
                 _ = dispatcher.BeginInvoke(() =>
                 {
-                    if (lifetime != run) return;
+                    if (!IsCurrent(run, session)) return;
                     Ready = false; recovery.Stop(); ClearIcons();
                     Status = error switch
                     {
@@ -136,7 +141,7 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
                         UnauthorizedAccessException => Loc.T("systemTrayHookFailed"),
                         _ => error.Message
                     };
-                    lock (pendingLock) { pending.Clear(); pendingBytes = 0; }
+                    lock (pendingLock) { pending.Clear(); pendingBytes = 0; scheduled = false; }
                 });
                 // Missing/untrusted/incompatible components require an explicit
                 // retry after repair; never repeatedly load the same bad DLL.
@@ -148,11 +153,28 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
         }
     }
 
-    void Queue(CancellationTokenSource run, uint kind, byte[] data)
+    bool BeginSession(CancellationTokenSource run, TrayHookSession session)
+    {
+        if (lifetime != run) return false;
+        lock (pendingLock)
+        {
+            activeSession = session;
+            pending.Clear(); pendingBytes = 0; scheduled = false;
+        }
+        Ready = false; recovery.Stop(); ClearIcons();
+        return true;
+    }
+
+    bool IsCurrent(CancellationTokenSource run, TrayHookSession session)
+    {
+        lock (pendingLock) return lifetime == run && ReferenceEquals(activeSession, session);
+    }
+
+    void Queue(CancellationTokenSource run, TrayHookSession session, uint kind, byte[] data)
     {
         lock (pendingLock)
         {
-            if (lifetime != run) return;
+            if (lifetime != run || !ReferenceEquals(activeSession, session)) return;
             if (pending.Count >= 256 || pendingBytes + data.Length > 8 * 1024 * 1024)
             { pending.Clear(); pendingBytes = 0; pending.Enqueue((3, [])); }
             pending.Enqueue((kind, data));
@@ -160,15 +182,15 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
             if (scheduled) return;
             scheduled = true;
         }
-        dispatcher.BeginInvoke(DispatcherPriority.Background, () => Drain(run));
+        dispatcher.BeginInvoke(DispatcherPriority.Background, () => Drain(run, session));
     }
 
-    void Drain(CancellationTokenSource run)
+    void Drain(CancellationTokenSource run, TrayHookSession session)
     {
         (uint Kind, byte[] Data)[] batch;
         lock (pendingLock)
         {
-            if (lifetime != run) return;
+            if (lifetime != run || !ReferenceEquals(activeSession, session)) return;
             batch = pending.ToArray(); pending.Clear(); pendingBytes = 0; scheduled = false;
         }
         if (!Ready) return;
@@ -328,7 +350,7 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
         runner = null;
         // The runner owns cancellation registrations until it completes.
         prune.Stop(); recovery.Stop(); Ready = false; ClearIcons(); Hints.Clear(); Status = Loc.T("systemTrayOff");
-        lock (pendingLock) { pending.Clear(); pendingBytes = 0; scheduled = false; }
+        lock (pendingLock) { activeSession = null; pending.Clear(); pendingBytes = 0; scheduled = false; }
     }
     public void Dispose() { Loc.Instance.PropertyChanged -= LanguageChanged; Stop(); }
     void Notify([CallerMemberName] string? name = null) => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));

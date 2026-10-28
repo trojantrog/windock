@@ -83,7 +83,7 @@ public sealed class OrganizerWindow : DesktopToolWindow
         empty = EmptyState("\uE8B7", "fenceEmptyTitle", "fenceEmptyHint"); content.Children.Add(empty);
         Grid.SetRow(content, 2); main.Children.Add(content);
         selectionBar = new DockPanel { Margin = new Thickness(0, 12, 0, 0), Visibility = Visibility.Collapsed };
-        var move = ActionButton("fenceMove", () => _ = RunAsync(MoveSelectedAsync));
+        var move = ActionButton("fenceMove", () => _ = RunAsync(MoveSelectedAsync)); move.IsEnabled = false;
         DockPanel.SetDock(move, Dock.Right); selectionBar.Children.Add(move);
         destination = new ComboBox { Width = 185, Margin = new Thickness(8, 0, 8, 0) };
         System.Windows.Automation.AutomationProperties.SetName(destination, Loc.T("fenceMoveTo"));
@@ -103,7 +103,9 @@ public sealed class OrganizerWindow : DesktopToolWindow
         {
             selectionBar.Visibility = items.SelectedItems.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
             selectionCount.Text = Loc.F("fenceSelected", items.SelectedItems.Count);
+            move.IsEnabled = items.SelectedItems.Count > 0 && destination.SelectedItem is FenceInfo;
         };
+        destination.SelectionChanged += (_, _) => move.IsEnabled = items.SelectedItems.Count > 0 && destination.SelectedItem is FenceInfo;
         items.MouseDoubleClick += (_, _) => { if ((items.SelectedItem as ListBoxItem)?.Tag is FenceItem item) Launcher.OpenFile(item.Path); };
         items.PreviewDragOver += (_, e) =>
         {
@@ -162,7 +164,8 @@ public sealed class OrganizerWindow : DesktopToolWindow
     {
         var dialog = new ToolDialog(Settings, Loc.T("fenceRestore")) { Owner = this };
         dialog.Body.Children.Add(snapshots);
-        dialog.Body.Children.Add(ActionButton("fenceRestore", () => { dialog.Close(); Restore(); }));
+        var restore = ActionButton("fenceRestore", () => { dialog.Close(); Restore(); });
+        restore.IsEnabled = snapshots.Items.Count > 0; dialog.Body.Children.Add(restore);
         dialog.Closed += (_, _) => dialog.Body.Children.Remove(snapshots);
         dialog.ShowDialog();
     }
@@ -187,7 +190,7 @@ public sealed class OrganizerWindow : DesktopToolWindow
         try
         {
             await operation();
-            if (!Lifetime.IsCancellationRequested) Status.Text = Loc.T("pecoReady");
+            if (!Lifetime.IsCancellationRequested && Status.Text == Loc.T("working")) Status.Text = Loc.T("pecoReady");
         }
         catch (OperationCanceledException) { }
         catch (Exception e) { if (!Lifetime.IsCancellationRequested) Status.Text = e.Message; }
@@ -197,9 +200,13 @@ public sealed class OrganizerWindow : DesktopToolWindow
     async Task RefreshAsync()
     {
         executable = PecoFenceClient.FindExecutable(Settings.Desktop.PecoFencePath);
-        if (executable is null) { client = null; throw new PecoFenceException(Loc.T("pecoUnavailable")); }
-        client = new PecoFenceClient(new PecoProcessRunner(executable));
-        var list = await client.FencesAsync(LifetimeToken);
+        if (executable is null) { ClearConnection(); throw new PecoFenceException(Loc.T("pecoUnavailable")); }
+        var next = new PecoFenceClient(new PecoProcessRunner(executable));
+        List<FenceInfo> list;
+        try { list = await next.FencesAsync(LifetimeToken); }
+        catch (OperationCanceledException) when (LifetimeToken.IsCancellationRequested) { throw; }
+        catch { ClearConnection(); throw; }
+        client = next;
         var previous = SelectedFence?.Id;
         refreshing = true;
         try
@@ -207,7 +214,7 @@ public sealed class OrganizerWindow : DesktopToolWindow
             fences.Items.Clear();
             foreach (var fence in list) fences.Items.Add(Row(fence, fence.Title, Loc.F("fenceItemCount", fence.ItemCount) + (fence.TabHost is not null ? " · " + Loc.T("fenceTab") : "") + (!fence.IsVirtual ? " · " + Loc.T("fencePortal") : "")));
             availableFences = list;
-            fences.SelectedIndex = Math.Max(0, list.FindIndex(f => f.Id == previous));
+            fences.SelectedIndex = list.Count == 0 ? -1 : Math.Max(0, list.FindIndex(f => f.Id == previous));
             connection.Text = "PecoFence";
         }
         finally { refreshing = false; }
@@ -218,11 +225,16 @@ public sealed class OrganizerWindow : DesktopToolWindow
     async Task LoadSelectionAsync()
     {
         var current = ++selectionVersion;
-        if (SelectedFence is not { } selected || client is null) return;
+        currentItems = []; sectionCount.Text = ""; destination.ItemsSource = null;
+        if (SelectedFence is not { } selected || client is null)
+        {
+            sectionTitle.Text = Loc.T("organizerTitle");
+            RenderItems(); return;
+        }
         sectionTitle.Text = selected.Title;
         destination.ItemsSource = availableFences.Where(f => f.IsVirtual && f.Id != selected.Id).ToList();
         destination.SelectedIndex = destination.Items.Count > 0 ? 0 : -1;
-        currentItems = []; RenderItems(); empty.Visibility = Visibility.Collapsed;
+        RenderItems(); empty.Visibility = Visibility.Collapsed;
         try
         {
             var list = await client.ItemsAsync(selected.Id, LifetimeToken);
@@ -230,9 +242,22 @@ public sealed class OrganizerWindow : DesktopToolWindow
             currentItems = list;
             sectionCount.Text = Loc.F("fenceItemCount", list.Count);
             RenderItems();
+            if (!busy) Status.Text = Loc.T("pecoReady");
         }
         catch (OperationCanceledException) { }
         catch (Exception e) { if (current == selectionVersion) Status.Text = e.Message; }
+    }
+
+    void ClearConnection()
+    {
+        client = null;
+        refreshing = true;
+        try { fences.Items.Clear(); availableFences = []; }
+        finally { refreshing = false; }
+        ++selectionVersion;
+        currentItems = []; destination.ItemsSource = null; snapshots.ItemsSource = null;
+        sectionTitle.Text = Loc.T("organizerTitle"); sectionCount.Text = "";
+        RenderItems(); empty.Visibility = Visibility.Collapsed;
     }
 
     async Task RefreshSnapshotsAsync()

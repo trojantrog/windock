@@ -13,7 +13,7 @@ namespace WinDock.Services;
 
 sealed class NativeWindowMotion : IDisposable
 {
-    const int ConfigBytes = 12384, StatusBytes = 96, ActivationBytes = 64, Capacity = 256, Build = 9;
+    const int ConfigBytes = 12384, StatusBytes = 96, ActivationBytes = 64, Capacity = 256, Build = 10;
     const uint Magic = 0x4d444e57;
     const string SystemHash = "de3a7bacdcbb49a98bfff41010e772d18a329b77d9bc6b2416e1bc9f5b415863";
     public static NativeWindowMotion Shared { get; } = new();

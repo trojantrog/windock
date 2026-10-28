@@ -22,7 +22,12 @@ public sealed class BackgroundApps
         refreshing = true; var stamp = generation;
         try
         {
-            var apps = await Task.Run(() => TrayApps.Running().Take(512).ToArray());
+            var tray = SystemTrayHub.Current?.Service;
+            var owners = tray is { Ready: true }
+                ? tray.Icons.Where(icon => icon.ProcessId != 0 && icon.Window != 0)
+                    .Select(icon => (icon.Window, icon.ProcessId)).Distinct().ToArray()
+                : [];
+            var apps = await Task.Run(() => TrayApps.Running(owners).Take(512).ToArray());
             if (consumers == 0 || stamp != generation || dispatcher.HasShutdownStarted) return;
             static string Identity(TrayApp app) => app.Exe + "|" + app.AppId + "|" + string.Join(',', app.Pids.Order());
             if (Apps.Select(Identity).SequenceEqual(apps.Select(Identity), StringComparer.OrdinalIgnoreCase)) return;

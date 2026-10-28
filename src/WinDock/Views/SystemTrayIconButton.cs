@@ -176,7 +176,7 @@ public sealed class SystemTrayIconButton : Border
         ReleaseMouseCapture();
         if (!releasedInside)
         {
-            if (!editing) Interaction?.CompleteTrayMenu(false);
+            if (!editing) Interaction?.CompleteTrayMenu(true);
             return;
         }
         if (editing)

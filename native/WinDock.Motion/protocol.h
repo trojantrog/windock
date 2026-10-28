@@ -6,7 +6,7 @@
 namespace motion {
 constexpr uint32_t Magic = 0x4d444e57;
 constexpr uint32_t Protocol = 1;
-constexpr uint32_t Build = 9;
+constexpr uint32_t Build = 10;
 constexpr uint32_t Capacity = 256;
 constexpr uint32_t Enabled = 1, Opening = 2, Closing = 4, Minimizing = 8, Restoring = 16, Hiding = 32;
 enum class TransitionReason : LONG {

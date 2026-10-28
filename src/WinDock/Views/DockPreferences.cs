@@ -89,7 +89,7 @@ public sealed class DockPreferences : StackPanel
         var behavior = Group("behaviorSettings");
         Toggle(behavior, "showDock", nameof(DockOptions.Enabled));
         Toggle(behavior, "trayStartup", nameof(DockOptions.StartWithWindows));
-        Toggle(behavior, "replaceTaskbar", nameof(DockOptions.ReplaceTaskbar));
+        Toggle(behavior, "replaceTaskbar", nameof(DockOptions.ReplaceTaskbar), "replaceTaskbarDesc");
         Toggle(behavior, "autoHide", nameof(DockOptions.AutoHide));
         Toggle(behavior, "reserve", nameof(DockOptions.Reserve), enabledBy: nameof(DockOptions.CanReserve));
         Toggle(behavior, "followWindows", nameof(DockOptions.FollowWindows), "followWindowsDesc");

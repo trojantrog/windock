@@ -1,6 +1,6 @@
 # Native whole-window transitions
 
-This preview adapts one exact x64 uDWM image. Build 8 was observed connected with zero replaced transitions, 23 skipped transitions and error 7. That error combined thread identity and reentrancy, so the observation does not distinguish those branches. Build 9 corrects the overly restrictive thread check and separates the diagnostics; its runtime and visual behavior have not been verified. User-facing operation and rollback are described in [the animation guide](../../docs/native-window-animation.md).
+This preview adapts one exact x64 uDWM image. Build 8 was observed connected with zero replaced transitions, 23 skipped transitions and error 7. That error combined thread identity and reentrancy, so the observation does not distinguish those branches. Build 9 corrects the overly restrictive thread check and separates the diagnostics. Build 10 corrects the opacity fallback and bounds stale transition tracking; its runtime and visual behavior have not been verified. User-facing operation and rollback are described in [the animation guide](../../docs/native-window-animation.md).
 
 ## Source and build
 
@@ -51,7 +51,15 @@ Hide-to-tray calls the native StartDelayHideAnimation entry, which hides the ori
 
 StopAnimation records the native current values before forwarding. A new action can continue an interrupted opening, minimizing, restoring or hiding transition. This includes minimize/restore and show/hide reversal, as well as closing during another transition. Closing during another transition starts at the recorded center and never increases the previous scale. The cache must match the window object, window-data object, HWND and recent stopped transition; size changes invalidate reuse. This preserves positional continuity in the implemented state model, but screen-level continuity has not been observed. Native StopAnimation is neither a first-frame nor last-frame presentation acknowledgment.
 
+Tracking records expire after four seconds without dereferencing an old window or timeline pointer. Expiry discards only the optional interruption state; it does not free or otherwise alter a native timeline. This bounds stale records when a finished transition is not followed by the observed StopAnimation callback. When the window data has no original visual, the opacity fallback is 1.0, matching the pinned image's StartAnimation branch at RVA `0xd69e`.
+
 The module retains native content and cleanup ownership. It does not prove that every application has supplied a useful first frame or retained its contents until destruction. A successful native allocation or snapshot call alone is not visual validation.
+
+## Related implementations
+
+[Windhawk's genie animation](https://github.com/ramensoftware/windhawk-mods/blob/main/mods/genie-minimize-animation.wh.cpp) uses a captured bitmap and a separate animated window. Its first-frame preparation and scaling choices are useful comparisons, but that approach has different content, stacking and handoff behavior from this native timeline path. No code from it is included here.
+
+[OpenGlass's DWM frame pipeline notes](https://github.com/ALTaleX531/OpenGlass/wiki/DWM-frame-pipeline) describe the distinction between changing animation properties, propagating dirty regions and presenting the resulting frame. Their examples span different Windows builds and do not establish the private layout for this image. In this component, the counters report timeline replacement only; they do not report a presented frame.
 
 ## Shared memory
 

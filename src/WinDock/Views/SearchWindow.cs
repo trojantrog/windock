@@ -69,7 +69,11 @@ public sealed class SearchWindow : DesktopToolWindow
         query.TextChanged += async (_, _) => await SearchAsync();
         query.PreviewKeyDown += OnQueryKey;
         results.MouseDoubleClick += (_, _) => OpenSelection();
-        results.SelectionChanged += (_, _) => reveal.IsEnabled = Selected is not null;
+        results.SelectionChanged += (_, _) =>
+        {
+            var app = Selected?.Application;
+            reveal.IsEnabled = Selected is not null && (app is null || !app.IsRaw && !app.IsLauncher && app.ResolvedTarget is not null);
+        };
         results.KeyDown += (_, e) => { if (e.Key == Key.Enter) { e.Handled = true; OpenSelection(); } };
         Loaded += async (_, _) =>
         {
@@ -98,12 +102,13 @@ public sealed class SearchWindow : DesktopToolWindow
         try
         {
             await Task.Delay(180, token);
-            var batch = await search.SearchAsync(text, Settings.Desktop.EverythingInstance, token, new SearchFilter(filter, scopeFolder));
+            var batch = await search.SearchAsync(text, Settings.Desktop.EverythingInstance, token,
+                new SearchFilter(filter, scopeFolder), partial =>
+                {
+                    if (current == version && !token.IsCancellationRequested) ShowBatch(partial, true);
+                });
             if (current != version || token.IsCancellationRequested) return;
-            hits = batch.Hits; RenderResults();
-            Status.Text = (filter == SearchCategory.Applications ? Loc.T("catPrograms") + " · " : batch.EverythingAvailable ? "Everything · " : "") + Loc.F("searchCount", batch.Hits.Count)
-                + (batch.Error is not null ? " · " + batch.Error : "")
-                + (batch.Limited ? " · " + Loc.T(filter == SearchCategory.Applications ? "searchAppsLimited" : "searchLimited") : "");
+            ShowBatch(batch, false);
         }
         catch (OperationCanceledException) { }
         catch (Exception e)
@@ -117,8 +122,19 @@ public sealed class SearchWindow : DesktopToolWindow
         }
     }
 
+    void ShowBatch(SearchBatch batch, bool partial)
+    {
+        hits = batch.Hits; RenderResults();
+        if (partial && hits.Count == 0) empty.Visibility = Visibility.Collapsed;
+        Status.Text = (filter == SearchCategory.Applications ? Loc.T("catPrograms") + " · " : batch.EverythingAvailable ? "Everything · " : "") + Loc.F("searchCount", batch.Hits.Count)
+            + (partial ? " · " + Loc.T("searching") : "")
+            + (batch.Error is not null ? " · " + batch.Error : "")
+            + (batch.Limited ? " · " + Loc.T(filter == SearchCategory.Applications ? "searchAppsLimited" : "searchLimited") : "");
+    }
+
     void RenderResults()
     {
+        var previous = Selected;
         results.Items.Clear();
         foreach (var button in filters)
         {
@@ -142,7 +158,12 @@ public sealed class SearchWindow : DesktopToolWindow
             var badge = Text(visual.Label, 10, true); badge.Margin = new Thickness(12, 0, 0, 0); Grid.SetColumn(badge, 2); grid.Children.Add(badge);
             results.Items.Add(row);
         }
-        if (results.Items.Count > 0) results.SelectedIndex = 0;
+        if (results.Items.Count > 0)
+        {
+            var index = previous is null ? -1 : results.Items.Cast<ListBoxItem>().ToList()
+                .FindIndex(item => ReferenceEquals(item.Tag, previous));
+            results.SelectedIndex = index >= 0 ? index : 0;
+        }
         empty.Visibility = results.Items.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         ((TextBlock)empty.Children[1]).Text = Loc.T(string.IsNullOrWhiteSpace(query.Text) ? "searchEmptyTitle" : "searchNoResults");
         ((TextBlock)empty.Children[2]).Text = Loc.T(string.IsNullOrWhiteSpace(query.Text) ? "searchEmptyHint" : "searchTryAnother");

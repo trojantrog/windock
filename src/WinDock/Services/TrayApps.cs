@@ -18,10 +18,14 @@ public static class TrayApps
     [DllImport("shell32.dll")]
     static extern int SHGetKnownFolderPath(ref Guid id, uint flags, nint token, out nint path);
 
-    public static List<TrayApp> Running()
+    public static List<TrayApp> Running(IReadOnlyCollection<(nint Window, uint ProcessId)>? owners = null)
     {
         var known = Registered();
-        if (known.Count == 0) return [];
+        var live = new HashSet<int>();
+        foreach (var (window, pid) in owners ?? [])
+            if (pid != 0 && Native.IsWindow(window) && Native.GetWindowThreadProcessId(window, out var actual) != 0 && actual == pid)
+                live.Add((int)pid);
+        if (known.Count == 0 && live.Count == 0) return [];
         var windowed = new HashSet<int>();
         Native.EnumWindows((h, _) =>
         {
@@ -36,7 +40,9 @@ public static class TrayApps
         {
             using (process)
             {
-                if (!windowed.Contains(process.Id) || Path(process.Id) is not { } exe || !known.Contains(exe)) continue;
+                if (!windowed.Contains(process.Id) && !live.Contains(process.Id)) continue;
+                if (Path(process.Id) is not { } exe || (!live.Contains(process.Id) && !known.Contains(exe))) continue;
+                if (Skip.Contains(System.IO.Path.GetFileName(exe))) continue;
                 if (string.Equals(exe, ownExe, StringComparison.OrdinalIgnoreCase)) continue;
                 if (!byExe.TryGetValue(exe, out var pids)) byExe[exe] = pids = [];
                 pids.Add(process.Id);
