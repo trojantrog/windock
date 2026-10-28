@@ -43,8 +43,9 @@ sealed class TrayMenuSession : IDisposable
     public bool CanRestoreFocus()
     {
         var foreground = Native.GetForegroundWindow();
+        if (IsSystemTray(foreground)) return false;
         return foreground == 0 || foreground == new WindowInteropHelper(source).Handle || !Native.IsWindowVisible(foreground)
-            || foreground == callback || foreground == menuOwner || popups.Contains(foreground) || IsSystemTray(foreground);
+            || foreground == callback || foreground == menuOwner || popups.Contains(foreground);
     }
 
     public void Observe(uint ev, nint window, uint thread)
@@ -60,8 +61,9 @@ sealed class TrayMenuSession : IDisposable
     public bool AllowsForeground(nint window)
     {
         if (window == 0 || window == new WindowInteropHelper(source).Handle) return true;
+        if (IsSystemTray(window)) return false;
         Native.GetWindowThreadProcessId(window, out var pid);
-        return RelatedWindow(window) || IsSystemTray(window) || (pid == Environment.ProcessId && PopupInteraction.For(source).HasMenu);
+        return RelatedWindow(window) || (pid == Environment.ProcessId && PopupInteraction.For(source).HasMenu);
     }
 
     public bool Update(bool managedMenu)

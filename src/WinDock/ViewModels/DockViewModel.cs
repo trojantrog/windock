@@ -290,7 +290,8 @@ public sealed partial class DockViewModel : ObservableObject, IDisposable
         foreach (var group in loose)
         {
             if (!runSequence.ContainsKey(group.Key)) runSequence[group.Key] = ++orderSequence;
-            if (tracker.Foreground != lastForeground && group.Windows.Any(window => window.Handle == tracker.Foreground))
+            if ((tracker.Foreground != lastForeground || !runUsed.ContainsKey(group.Key))
+                && group.Windows.Any(window => window.Handle == tracker.Foreground))
                 runUsed[group.Key] = ++orderSequence;
         }
         lastForeground = tracker.Foreground;

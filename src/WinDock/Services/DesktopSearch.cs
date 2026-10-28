@@ -11,7 +11,7 @@ public sealed record SearchBatch(IReadOnlyList<SearchHit> Hits, bool EverythingA
 public sealed class DesktopSearch
 {
     readonly object catalogGate = new();
-    Task<List<CatalogEntry>>? applications;
+    Task<List<CatalogEntry>>? applications, previousApplications, overdueApplications;
     long catalogStarted;
     public Task WarmAsync() => ApplicationCatalog();
 
@@ -19,13 +19,24 @@ public sealed class DesktopSearch
     {
         lock (catalogGate)
         {
-            if (applications is null || applications.IsFaulted || applications.IsCanceled
-                || applications.IsCompletedSuccessfully && Environment.TickCount64 - catalogStarted >= 120_000)
+            if (overdueApplications is { IsCompleted: true } overdue)
             {
+                if (overdue.IsCompletedSuccessfully && previousApplications is null) previousApplications = overdue;
+                else if (overdue.IsFaulted) _ = overdue.Exception;
+                overdueApplications = null;
+            }
+            if (applications is { IsCompletedSuccessfully: true }) previousApplications = applications;
+            var age = Environment.TickCount64 - catalogStarted;
+            if (applications is null || applications.IsCompletedSuccessfully && age >= 120_000
+                || (applications.IsFaulted || applications.IsCanceled) && age >= 5_000
+                || !applications.IsCompleted && age >= 15_000 && overdueApplications is null)
+            {
+                if (applications is { IsCompleted: false }) overdueApplications = applications;
+                else if (applications is { IsFaulted: true }) _ = applications.Exception;
                 applications = Task.Run(Catalog.Load);
                 catalogStarted = Environment.TickCount64;
             }
-            return applications;
+            return applications.IsCompletedSuccessfully ? applications : previousApplications ?? applications;
         }
     }
 

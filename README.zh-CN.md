@@ -1,6 +1,6 @@
 # WinDock 中文版
 
-基于 [Breno Alvim 的 WinDock 0.5.0](https://github.com/obrenoalvim/windock) 维护的分支，增加简体中文、Everything 搜索和 PecoFence 收纳管理。当前版本为 `0.6.0-preview.11`。
+基于 [Breno Alvim 的 WinDock 0.5.0](https://github.com/obrenoalvim/windock) 维护的分支，增加简体中文、Everything 搜索和 PecoFence 收纳管理。当前版本为 `0.6.0-preview.12`。
 
 ## 使用
 
@@ -40,7 +40,7 @@
 
 ### 预览与动画
 
-预览窗口使用 DWM 实时缩略图，默认尺寸扩大至 320 × 200，并随窗口数量和屏幕空间调整。缩略图按实际屏幕像素定位，跨屏时更新 DPI。
+预览窗口使用 DWM 实时缩略图，根据窗口数量和屏幕空间调整大小，单窗口宽度上限为 420 个逻辑像素。缩略图按实际屏幕像素定位，并在源窗口尺寸或屏幕缩放变化时更新比例。缩放画质仍受 Windows 和源窗口画面影响，详见[窗口预览说明](docs/window-preview.md)。
 
 启动图标动效改为 360 毫秒的短抬升和轻微回落，默认保留关闭状态；可在设置中启用。浮窗内容用 160 毫秒进入，Dock 图标分批出现总长不超过 260 毫秒。悬停位置通过按实际帧间隔计算的临界阻尼弹簧平滑跟随，稳定后停止逐帧更新。系统关闭动画时跳过这些动效。
 

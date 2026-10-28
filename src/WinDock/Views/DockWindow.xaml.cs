@@ -158,6 +158,7 @@ public partial class DockWindow : Window
         panel.Inset = Inset;
         panel.Corner = Math.Round(vm.Options.PlateCornerRadius * fit);
         panel.Radius = vm.Options.LensWidth * (IconSize + Gap);
+        panel.IndicatorSize = vm.Options.IndicatorSize * fit;
     }
 
     public void ApplyOptions()
@@ -168,7 +169,6 @@ public partial class DockWindow : Window
         panel.Magnification = o.Magnification;
         panel.SurfaceOpacity = o.PlateOpacity;
         panel.IndicatorStyle = o.IndicatorStyle;
-        panel.IndicatorSize = o.IndicatorSize * fit;
         panel.Mode = o.Lens switch
         {
             DockSettings.LensNone => LensMode.None,
@@ -180,7 +180,7 @@ public partial class DockWindow : Window
         ApplyShell();
         if (!o.AutoHide && concealed) Reveal();
         if (o.AutoHide) poll.Start();
-        Resize();
+        Dispatcher.BeginInvoke(Resize, DispatcherPriority.Loaded);
     }
 
     void ApplyShell()
@@ -1146,6 +1146,16 @@ public partial class DockWindow : Window
     void Open(ContextMenu menu)
     {
         menu.Placement = PlacementMode.MousePoint;
+        var previous = Native.GetForegroundWindow();
+        var previousThread = Native.GetWindowThreadProcessId(previous, out var previousProcess);
+        menu.Closed += (_, _) => Dispatcher.BeginInvoke(DispatcherPriority.Background, () =>
+        {
+            if (previous == 0 || previous == hwnd || previousThread == 0 || previousProcess == 0 || !IsVisible ||
+                Native.GetForegroundWindow() != hwnd || PopupInteraction.HasChildPopup(this) ||
+                !Native.IsWindow(previous) || !Native.IsWindowVisible(previous)) return;
+            var thread = Native.GetWindowThreadProcessId(previous, out var process);
+            if (thread == previousThread && process == previousProcess) Native.SetForegroundWindow(previous);
+        });
         Native.SetForegroundWindow(hwnd);
         PopupInteraction.Open(menu, this);
     }

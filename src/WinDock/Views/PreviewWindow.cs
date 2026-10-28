@@ -17,8 +17,10 @@ public sealed class PreviewWindow : Window
     const uint ThumbDestination = 0x1, ThumbVisible = 0x8, ThumbOpacity = 0x4, ThumbClientOnly = 0x10;
 
     readonly StackPanel cards = new() { Orientation = Orientation.Horizontal };
-    readonly List<(nint Thumb, Border Box)> thumbs = [];
+    readonly List<Thumbnail> thumbs = [];
+    readonly DispatcherTimer refresh = new() { Interval = TimeSpan.FromMilliseconds(300) };
     nint hwnd;
+    int generation;
     bool dark = true;
     (double Center, double Top, Forms.Screen Screen)? anchor;
 
@@ -47,11 +49,17 @@ public sealed class PreviewWindow : Window
         };
         IsVisibleChanged += (_, _) =>
         {
-            if (!IsVisible) Release();
+            if (!IsVisible) { generation++; refresh.Stop(); Release(); }
         };
         MouseEnter += (_, _) => PointerEntered?.Invoke();
         MouseLeave += (_, _) => PointerLeft?.Invoke();
-        DpiChanged += (_, _) => Dispatcher.BeginInvoke(() => { UpdateLayout(); Position(); Reposition(); }, DispatcherPriority.Loaded);
+        refresh.Tick += (_, _) => Reposition();
+        DpiChanged += (_, _) => Dispatcher.BeginInvoke(() =>
+        {
+            if (!IsVisible) return;
+            SizeCards(VisualTreeHelper.GetDpi(this).DpiScaleX);
+            UpdateLayout(); Position(); Reposition();
+        }, DispatcherPriority.Loaded);
     }
 
     public AppTile? Tile { get; private set; }
@@ -66,15 +74,16 @@ public sealed class PreviewWindow : Window
     {
         dark = darkTheme;
         Tile = tile;
+        var requestedGeneration = ++generation;
+        refresh.Stop();
         Release();
         Background = new SolidColorBrush(dark ? Color.FromRgb(0x1C, 0x1E, 0x26) : Color.FromRgb(0xF6, 0xF6, 0xF8));
         cards.Children.Clear();
         anchor = (centerX, top, screen);
         var monitor = Native.MonitorFromPoint(new Native.Point { X = (int)centerX, Y = (int)top }, 2);
-        var dpiScale = Native.GetDpiForMonitor(monitor, 0, out var dpi, out _) == 0 ? dpi / 96.0 : 1;
+        var dpiScale = Native.GetDpiForMonitor(monitor, 0, out var dpi, out _) == 0 && dpi > 0 ? dpi / 96.0 : 1;
         var count = Math.Min(6, tile.Windows.Count);
-        boxWidth = Math.Clamp((screen.Bounds.Width / dpiScale - 32) / Math.Max(1, count) - 16, 160, 320);
-        boxHeight = Math.Round(boxWidth * 0.625);
+        SetBoxSize(screen, dpiScale, count);
         foreach (var window in tile.Windows.Take(6)) cards.Children.Add(Card(tile, window));
         if (cards.Children.Count == 0)
         {
@@ -85,19 +94,40 @@ public sealed class PreviewWindow : Window
         if (!IsVisible) Show();
         UpdateLayout();
         Position();
-        Dispatcher.BeginInvoke(Register, DispatcherPriority.Loaded);
+        Dispatcher.BeginInvoke(() => { if (requestedGeneration == generation) Register(); }, DispatcherPriority.Loaded);
+    }
+
+    void SetBoxSize(Forms.Screen screen, double dpiScale, int count)
+    {
+        var available = (screen.Bounds.Width / Math.Max(dpiScale, 0.1) - 28) / Math.Max(1, count) - 16;
+        boxWidth = Math.Clamp(available, 1, 420);
+        boxHeight = Math.Round(boxWidth * 0.625);
+    }
+
+    void SizeCards(double dpiScale)
+    {
+        if (anchor is not { } location) return;
+        SetBoxSize(location.Screen, dpiScale, cards.Children.Count);
+        foreach (var card in cards.Children.OfType<Border>())
+        {
+            if (card.Child is not StackPanel { Children.Count: 2 } panel
+                || panel.Children[0] is not DockPanel header || panel.Children[1] is not Border box) continue;
+            header.Width = boxWidth; box.Width = boxWidth; box.Height = boxHeight;
+        }
     }
 
     void Position()
     {
         if (anchor is not { } location || hwnd == 0) return;
         var (centerX, top, screen) = location;
-        var scale = VisualTreeHelper.GetDpi(this).DpiScaleX;
-        var w = (int)Math.Round(ActualWidth * scale);
-        var h = (int)Math.Round(ActualHeight * scale);
+        var dpi = VisualTreeHelper.GetDpi(this);
+        var w = (int)Math.Round(ActualWidth * dpi.DpiScaleX);
+        var h = (int)Math.Round(ActualHeight * dpi.DpiScaleY);
+        var marginX = (int)Math.Round(8 * dpi.DpiScaleX);
+        var marginY = (int)Math.Round(8 * dpi.DpiScaleY);
         var bounds = screen.Bounds;
-        var x =(int)Math.Clamp(centerX - w / 2.0, bounds.Left + 8, Math.Max(bounds.Left + 8, bounds.Right - w - 8));
-        var y = (int)Math.Max(bounds.Top + 8, top - h - 10 * scale);
+        var x = (int)Math.Round(Math.Clamp(centerX - w / 2.0, bounds.Left + marginX, Math.Max(bounds.Left + marginX, bounds.Right - w - marginX)));
+        var y = (int)Math.Round(Math.Max(bounds.Top + marginY, top - h - 10 * dpi.DpiScaleY));
         Native.SetWindowPos(hwnd, Native.HWND_TOPMOST, x, y, 0, 0, Native.SWP_NOSIZE | Native.SWP_NOACTIVATE);
     }
 
@@ -176,7 +206,16 @@ public sealed class PreviewWindow : Window
             Unregister(box);
             cards.Children.Remove(card);
             if (cards.Children.Count == 0) Hide();
-            else Dispatcher.BeginInvoke(Reposition, DispatcherPriority.Loaded);
+            else
+            {
+                var closingGeneration = generation;
+                Dispatcher.BeginInvoke(() =>
+                {
+                    if (!IsVisible || generation != closingGeneration) return;
+                    SizeCards(VisualTreeHelper.GetDpi(this).DpiScaleX);
+                    UpdateLayout(); Position(); Reposition();
+                }, DispatcherPriority.Loaded);
+            }
         };
         return card;
     }
@@ -189,57 +228,82 @@ public sealed class PreviewWindow : Window
         {
             if (card.Child is not StackPanel { Children.Count: 2 } stackPanel || stackPanel.Children[1] is not Border box || box.Tag is not nint source) continue;
             if (Native.DwmRegisterThumbnail(hwnd, source, out var thumb) != 0) continue;
-            thumbs.Add((thumb, box));
+            thumbs.Add(new Thumbnail(thumb, box));
         }
         Reposition();
+        if (thumbs.Count > 0) refresh.Start();
     }
 
     void Reposition()
     {
+        if (!IsVisible || hwnd == 0) return;
         var client = PointToScreen(new Point());
-        foreach (var (thumb, box) in thumbs)
+        foreach (var item in thumbs)
         {
+            var box = item.Box;
             if (!box.IsLoaded) continue;
             var origin = box.PointToScreen(new Point());
             var end = box.PointToScreen(new Point(box.ActualWidth, box.ActualHeight));
-            var left = origin.X - client.X;
-            var topPx = origin.Y - client.Y;
-            var width = end.X - origin.X;
-            var height = end.Y - origin.Y;
-            Native.DwmQueryThumbnailSourceSize(thumb, out var source);
-            if (source.Width > 0 && source.Height > 0)
+            var x1 = (int)Math.Round(origin.X - client.X);
+            var y1 = (int)Math.Round(origin.Y - client.Y);
+            var width = (int)Math.Round(end.X - client.X) - x1;
+            var height = (int)Math.Round(end.Y - client.Y) - y1;
+            var valid = Native.DwmQueryThumbnailSourceSize(item.Handle, out var source) == 0
+                && source.Width > 0 && source.Height > 0 && width > 0 && height > 0;
+            if (!valid)
             {
-                var fit = Math.Min(width / source.Width, height / source.Height);
-                var fw = source.Width * fit;
-                var fh = source.Height * fit;
-                left += (width - fw) / 2;
-                topPx += (height - fh) / 2;
-                width = fw;
-                height = fh;
+                if (item.Visible)
+                {
+                    var hidden = new Native.ThumbnailProperties { Flags = ThumbVisible, Visible = 0 };
+                    if (Native.DwmUpdateThumbnailProperties(item.Handle, ref hidden) == 0) item.Visible = false;
+                }
+                continue;
             }
+            var fit = Math.Min((double)width / source.Width, (double)height / source.Height);
+            var fw = Math.Clamp((int)Math.Round(source.Width * fit), 1, width);
+            var fh = Math.Clamp((int)Math.Round(source.Height * fit), 1, height);
+            var left = x1 + (width - fw) / 2;
+            var topPx = y1 + (height - fh) / 2;
+            var destination = new Native.Rect { Left = left, Top = topPx, Right = left + fw, Bottom = topPx + fh };
+            if (item.Visible && SameRect(item.Destination, destination)) continue;
             var props = new Native.ThumbnailProperties
             {
                 Flags = ThumbDestination | ThumbVisible | ThumbOpacity | ThumbClientOnly,
-                Destination = new Native.Rect { Left = (int)Math.Round(left), Top = (int)Math.Round(topPx), Right = (int)Math.Round(left + width), Bottom = (int)Math.Round(topPx + height) },
+                Destination = destination,
                 Opacity = 255,
                 Visible = 1,
                 SourceClientAreaOnly = 0
             };
-            Native.DwmUpdateThumbnailProperties(thumb, ref props);
+            if (Native.DwmUpdateThumbnailProperties(item.Handle, ref props) == 0)
+            {
+                item.Destination = destination;
+                item.Visible = true;
+            }
         }
     }
+
+    static bool SameRect(Native.Rect left, Native.Rect right) => left.Left == right.Left && left.Top == right.Top
+        && left.Right == right.Right && left.Bottom == right.Bottom;
 
     void Unregister(Border box)
     {
         var index = thumbs.FindIndex(t => t.Box == box);
         if (index < 0) return;
-        Native.DwmUnregisterThumbnail(thumbs[index].Thumb);
+        Native.DwmUnregisterThumbnail(thumbs[index].Handle);
         thumbs.RemoveAt(index);
     }
 
     void Release()
     {
-        foreach (var (thumb, _) in thumbs) Native.DwmUnregisterThumbnail(thumb);
+        foreach (var item in thumbs) Native.DwmUnregisterThumbnail(item.Handle);
         thumbs.Clear();
+    }
+
+    sealed class Thumbnail(nint handle, Border box)
+    {
+        public nint Handle { get; } = handle;
+        public Border Box { get; } = box;
+        public Native.Rect Destination { get; set; }
+        public bool Visible { get; set; }
     }
 }
