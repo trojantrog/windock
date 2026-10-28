@@ -143,7 +143,7 @@ public sealed class SystemTrayIconButton : Border
         e.Handled = true; Focus(); pressed = e.ChangedButton; clicks = e.ClickCount; pressedAt = e.GetPosition(this);
         if (!CaptureMouse()) { pressed = null; EndHover(); return; }
         if (editing) return;
-        Interaction?.BeginTrayMenu(item);
+        Interaction?.BeginTrayMenu(item, this);
         EndHover();
         uint message = e.ChangedButton switch
         {
@@ -190,7 +190,7 @@ public sealed class SystemTrayIconButton : Border
             var sent = false;
             switch (e.ChangedButton)
             {
-                case MouseButton.Left: sent = Send(0x202); if (item.Version >= 3) sent |= Send(0x400); if (sent) service.MarkSeen(item); break;
+                case MouseButton.Left: sent = Send(0x202); if (item.Version >= 3) sent |= Send(0x400); break;
                 case MouseButton.Right: sent = Send(0x205); if (item.Version >= 3) sent |= Send(0x7B); break;
                 case MouseButton.Middle: sent = Send(0x208); break;
             }
@@ -211,16 +211,15 @@ public sealed class SystemTrayIconButton : Border
         if (e.Key is Key.Enter or Key.Space)
         {
             e.Handled = true;
-            Interaction?.BeginTrayMenu(item);
+            Interaction?.BeginTrayMenu(item, this);
             EndHover();
             var sent = item.Version >= 3 ? Send(0x401, true) : Send(0x201, true) & Send(0x202, true);
             Interaction?.CompleteTrayMenu(sent);
-            if (sent) service.MarkSeen(item);
         }
         else if (e.Key == Key.Apps || (e.Key == Key.F10 && Keyboard.Modifiers.HasFlag(ModifierKeys.Shift)))
         {
             e.Handled = true;
-            Interaction?.BeginTrayMenu(item);
+            Interaction?.BeginTrayMenu(item, this);
             EndHover();
             var sent = item.Version >= 3 ? Send(0x7B, true) : Send(0x204, true) & Send(0x205, true);
             Interaction?.CompleteTrayMenu(sent);

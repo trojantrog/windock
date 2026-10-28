@@ -11,7 +11,7 @@
     <RootNamespace>WinDock</RootNamespace>
     <ApplicationIcon>Assets\app.ico</ApplicationIcon>
     <StartupObject>WinDock.Program</StartupObject>
-    <Version>0.6.0-preview.12</Version>
+    <Version>0.6.0-preview.13</Version>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <Product>WinDock</Product>
@@ -27,6 +27,8 @@
     <Content Include="..\..\docs\native-window-animation.md" Link="整窗动画说明.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
     <Content Include="..\..\docs\popup-interactions.md" Link="托盘与菜单说明.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
     <Content Include="..\..\docs\tray-compatibility.md" Link="托盘兼容说明.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
+    <Content Include="..\..\docs\tray-input-method.md" Link="托盘输入法说明.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
+    <Content Include="..\..\docs\windows-notification-listener.md" Link="系统通知说明.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
     <Content Include="..\..\docs\window-preview.md" Link="窗口预览说明.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
   </ItemGroup>
 

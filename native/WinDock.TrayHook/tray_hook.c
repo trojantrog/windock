@@ -13,11 +13,11 @@
 #include <string.h>
 
 #define MAGIC 0x52544457u
-#define PROTOCOL 3u
+#define PROTOCOL 4u
 #define QUEUE_SIZE 128
 #define MAX_ICON 256
-#define START_MESSAGE L"WinDock.TrayHook.Connect.v3"
-#define STOP_MESSAGE L"WinDock.TrayHook.Disconnect.v3"
+#define START_MESSAGE L"WinDock.TrayHook.Connect.v4"
+#define STOP_MESSAGE L"WinDock.TrayHook.Disconnect.v4"
 
 #pragma pack(push, 1)
 // Explorer's Shell_NotifyIcon wire representation is 32-bit on x64 as well.
@@ -216,6 +216,29 @@ finish:
     return 0;
 }
 
+static BOOL SameIcon(const QueuedIcon *left, const QueuedIcon *right) {
+    if (left->ownerPid != right->ownerPid) return FALSE;
+    BOOL leftGuid = (left->data.flags & NIF_GUID) != 0;
+    BOOL rightGuid = (right->data.flags & NIF_GUID) != 0;
+    if (leftGuid != rightGuid) return FALSE;
+    if (leftGuid) return memcmp(&left->data.guid, &right->data.guid, sizeof(GUID)) == 0;
+    return left->data.window == right->data.window && left->data.id == right->data.id;
+}
+
+static BOOL IconUpdate(const QueuedIcon *event) {
+    return event->operation == NIM_MODIFY && (event->data.flags & NIF_ICON) != 0 &&
+        (event->data.flags & ~(NIF_ICON | NIF_GUID | NIF_MESSAGE | NIF_TIP | NIF_STATE | NIF_SHOWTIP)) == 0;
+}
+
+static BOOL SameIconUpdate(const QueuedIcon *left, const QueuedIcon *right) {
+    const IconData32 *a = &left->data, *b = &right->data;
+    if (!IconUpdate(left) || a->size != b->size || a->flags != b->flags ||
+        a->window != b->window || a->id != b->id) return FALSE;
+    if ((a->flags & NIF_MESSAGE) && a->callback != b->callback) return FALSE;
+    if ((a->flags & NIF_STATE) && (a->state != b->state || a->stateMask != b->stateMask)) return FALSE;
+    return TRUE;
+}
+
 static void Capture(const COPYDATASTRUCT *copy) {
     if (stopped || !copy || copy->dwData != 1 || !copy->lpData ||
         copy->cbData < 8 + 24 || copy->cbData > 4096) return;
@@ -248,7 +271,27 @@ static void Capture(const COPYDATASTRUCT *copy) {
     // CopyIcon is the only image work on Explorer's thread; bitmap conversion and
     // pipe I/O happen on Worker. Never wait behind a busy renderer or pipe.
     if (!TryAcquireSRWLockExclusive(&queueLock)) { InterlockedIncrement(&dropped); return; }
-    if (stopped || count == QUEUE_SIZE) { ReleaseSRWLockExclusive(&queueLock); InterlockedIncrement(&dropped); return; }
+    if (stopped) { ReleaseSRWLockExclusive(&queueLock); return; }
+    if (IconUpdate(&event)) {
+        for (unsigned int i = count; i > 0; --i) {
+            QueuedIcon *pending = &queue[(head + i - 1) % QUEUE_SIZE];
+            if (!SameIcon(pending, &event)) continue;
+            if (!SameIconUpdate(pending, &event)) break;
+            HICON copied = event.data.icon ? CopyIcon((HICON)(LONG_PTR)(LONG)event.data.icon) : NULL;
+            if (event.data.icon && !copied) InterlockedIncrement(&dropped);
+            else {
+                if (pending->icon) DestroyIcon(pending->icon);
+                event.icon = copied;
+                for (unsigned int position = i - 1; position + 1 < count; ++position)
+                    queue[(head + position) % QUEUE_SIZE] = queue[(head + position + 1) % QUEUE_SIZE];
+                queue[(head + count - 1) % QUEUE_SIZE] = event;
+                if (wakeEvent) SetEvent(wakeEvent);
+            }
+            ReleaseSRWLockExclusive(&queueLock);
+            return;
+        }
+    }
+    if (count == QUEUE_SIZE) { ReleaseSRWLockExclusive(&queueLock); InterlockedIncrement(&dropped); return; }
     if (event.operation <= NIM_MODIFY && (event.data.flags & NIF_ICON) && event.data.icon)
         event.icon = CopyIcon((HICON)(LONG_PTR)(LONG)event.data.icon);
     queue[(head + count) % QUEUE_SIZE] = event;

@@ -79,6 +79,7 @@ public sealed class DockOptions : ObservableObject
     public double TrayIconSize { get => D.TrayIconSize; set => Set(() => D.TrayIconSize = Math.Round(value)); }
     public int TrayColumns { get => D.TrayColumns; set => Set(() => D.TrayColumns = value); }
     public bool TrayShowNames { get => D.TrayShowNames; set => Set(() => D.TrayShowNames = value); }
+    public bool TrayMenuPlacement { get => D.TrayMenuPlacement; set => Set(() => D.TrayMenuPlacement = value); }
     public string TraySort { get => D.TraySort; set => Set(() => D.TraySort = value); }
     public IReadOnlyList<string> TrayPinnedIds => D.TrayPinnedIds;
     public IReadOnlyList<string> TrayOrder => D.TrayOrder;

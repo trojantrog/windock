@@ -139,13 +139,13 @@ sealed class PopupInteraction : IDisposable
             && instances.TryGetValue(owner, out var state)) state.external?.SetEscapeIntent(e.Key == Key.Escape);
     }
 
-    public void BeginTrayMenu(SystemTrayItem item)
+    public void BeginTrayMenu(SystemTrayItem item, FrameworkElement anchor)
     {
         if (disposed) return;
         ++generation;
         external?.Dispose();
         acceptInactive = false;
-        external = new(window, item);
+        external = new(window, item, anchor: SystemTrayHub.Current?.Options.TrayMenuPlacement == true ? anchor : null);
         poll.Start();
         Signal(); UpdateWatchers();
     }

@@ -22,9 +22,20 @@ public sealed class TrayPanel : Flyout
     readonly DockPanel heading = new();
     readonly StackPanel footer = new() { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
     readonly ScrollViewer iconScroll, hintScroll;
+    readonly CancellationTokenSource inputLifetime = new();
+    readonly DispatcherTimer notificationAccessCheck = new() { Interval = TimeSpan.FromSeconds(5) };
+    readonly bool notificationIdentity = SystemNotificationReader.HasPackageIdentity();
     ContextMenu? menu;
-    bool arranging, dragging, showingHints, renderQueued, renderPending, closed;
-    protected override bool KeepOpenOnDeactivate => dragging;
+    SystemTrayItem? revealIcon;
+    SystemNotificationReader? notificationReader;
+    CancellationTokenSource? notificationLifetime;
+    IReadOnlyList<SystemNotificationItem> systemNotifications = [];
+    bool arranging, dragging, showingHints, showingSystemNotifications, renderQueued, renderPending, closed, inputOpening;
+    bool notificationAuthorizing, notificationRefreshing, notificationRefreshAgain;
+    int notificationGeneration;
+    string? inputStatus, notificationStatus;
+    SystemNotificationAccess notificationAccess;
+    protected override bool KeepOpenOnDeactivate => dragging || notificationAuthorizing;
 
     public TrayPanel(bool dark) : base(dark, glass: true)
     {
@@ -45,6 +56,7 @@ public sealed class TrayPanel : Flyout
         KeyboardNavigation.SetDirectionalNavigation(icons, KeyboardNavigationMode.Contained);
         icons.AllowDrop = true; icons.DragOver += OnDragOver; icons.Drop += OnDrop;
         PreviewKeyDown += Navigate;
+        notificationAccessCheck.Tick += (_, _) => CheckNotificationAccess();
         Interaction.Changed += () => { if (renderPending && !dragging && !Interaction.IsBusy) QueueRender(); };
         Interaction.TrayFocusRestored += item => icons.Children.OfType<SystemTrayIconButton>()
             .FirstOrDefault(button => ReferenceEquals(button.Item, item))?.Focus();
@@ -59,6 +71,8 @@ public sealed class TrayPanel : Flyout
         Closed += (_, _) =>
         {
             closed = true;
+            StopSystemNotifications();
+            inputLifetime.Cancel(); inputLifetime.Dispose();
             if (menu is not null) menu.IsOpen = false;
             if (hub is null) return;
             hub.Service.Icons.CollectionChanged -= RefreshIcons; hub.Service.Hints.CollectionChanged -= RefreshHints;
@@ -90,6 +104,7 @@ public sealed class TrayPanel : Flyout
         renderPending = false;
         var previousButtons = icons.Children.OfType<SystemTrayIconButton>().ToList();
         var focusedButton = Keyboard.FocusedElement as SystemTrayIconButton;
+        var focusedHint = (Keyboard.FocusedElement as Button)?.Tag as TrayHint;
         var focusedIndex = focusedButton is null ? -1 : previousButtons.IndexOf(focusedButton);
         var focusedLabel = Keyboard.FocusedElement is Button control && Window.GetWindow(control) == this
             ? AutomationProperties.GetName(control) : null;
@@ -98,17 +113,19 @@ public sealed class TrayPanel : Flyout
         var options = hub?.Options;
         var tile = (options?.TrayShowNames == true ? Math.Max(78, options.TrayIconSize + 44) : Math.Max(36, (options?.TrayIconSize ?? 22) + 16)) + 4;
         var columns = options?.TrayColumns ?? 5;
-        body.Width = showingHints ? Math.Max(280, tile * columns) : Math.Max(190, tile * columns);
-        heading.Children.Clear(); heading.Visibility = arranging || showingHints ? Visibility.Visible : Visibility.Collapsed;
-        if (arranging || showingHints)
+        var showingList = showingHints || showingSystemNotifications;
+        body.Width = showingList ? Math.Max(280, tile * columns) : Math.Max(190, tile * columns);
+        heading.Children.Clear(); heading.Visibility = arranging || showingList ? Visibility.Visible : Visibility.Collapsed;
+        if (arranging || showingList)
         {
-            var done = SmallButton(showingHints ? "\uE72B" : "\uE73E", Loc.T(showingHints ? "trayBack" : "trayDone"), () =>
-            { arranging = false; showingHints = false; Render(); });
+            var done = SmallButton(showingList ? "\uE72B" : "\uE73E", Loc.T(showingList ? "trayBack" : "trayDone"), () =>
+            { StopSystemNotifications(); arranging = false; showingHints = false; Render(); });
             DockPanel.SetDock(done, Dock.Right); heading.Children.Add(done);
-            var caption = Text(Loc.T(showingHints ? "trayRecentHints" : "trayArrange"), 12); heading.Children.Add(caption);
+            var caption = Text(Loc.T(showingSystemNotifications ? "systemNotificationsTitle" : showingHints ? "trayRecentHints" : "trayArrange"), 12);
+            heading.Children.Add(caption);
         }
-        iconScroll.Visibility = showingHints ? Visibility.Collapsed : Visibility.Visible;
-        hintScroll.Visibility = showingHints ? Visibility.Visible : Visibility.Collapsed;
+        iconScroll.Visibility = showingList ? Visibility.Collapsed : Visibility.Visible;
+        hintScroll.Visibility = showingList ? Visibility.Visible : Visibility.Collapsed;
         icons.Children.Clear();
         if (hub is not null)
         foreach (var icon in hub.OrderedIcons())
@@ -122,12 +139,52 @@ public sealed class TrayPanel : Flyout
             icons.Children.Add(button);
         }
         footer.Children.Clear();
+        var input = SmallButton("\uE765", Loc.T("systemTrayInput"), () => { });
+        input.IsEnabled = !inputOpening;
+        input.Click += async (_, _) =>
+        {
+            if (inputOpening) return;
+            inputOpening = true; input.IsEnabled = false; inputStatus = null; RenderStatus();
+            try
+            {
+                var outcome = await SystemInputIndicator.OpenAsync(inputLifetime.Token);
+                if (closed) return;
+                if (outcome == SystemInputRequest.Requested) { SafeClose(); return; }
+                var message = outcome switch
+                {
+                    SystemInputRequest.Busy => "systemTrayInputBusy",
+                    SystemInputRequest.TimedOut => "systemTrayInputTimeout",
+                    SystemInputRequest.Pending => "systemTrayInputPending",
+                    _ => "systemTrayInputUnavailable"
+                };
+                inputStatus = Loc.T(message);
+                RenderStatus();
+            }
+            catch (Exception)
+            {
+                if (!closed) { inputStatus = Loc.T("systemTrayInputUnavailable"); RenderStatus(); }
+            }
+            finally { inputOpening = false; if (!closed) QueueRender(); }
+        };
+        footer.Children.Add(input);
+        if (notificationIdentity)
+        {
+            var active = showingSystemNotifications && notificationReader?.Enabled == true;
+            footer.Children.Add(SmallButton(active ? "\uE72C" : "\uE8FD",
+                Loc.T(active ? "systemTrayRefresh" : "systemNotificationsRead"),
+                () => { if (active) RequestNotificationRefresh(); else _ = ShowSystemNotificationsAsync(); }));
+            if (showingSystemNotifications && notificationAccess == SystemNotificationAccess.Denied)
+                footer.Children.Add(SmallButton("\uE713", Loc.T("systemNotificationsPrivacy"),
+                    () => Launcher.OpenFile("ms-settings:privacy-notifications")));
+        }
         if (hub is not null && !hub.Options.SystemTrayEnabled)
         {
             var enable = new Button { Content = Loc.T("systemTrayEnable"), Padding = new Thickness(10, 6, 10, 6),
                 ToolTip = Loc.T("systemTrayConsent"), Foreground = Ink, Background = Hover, BorderThickness = new Thickness(0) };
             enable.Click += (_, _) => { hub.Options.SystemTrayEnabled = true; SafeClose(); };
             body.Width = Math.Max(body.Width, 270); footer.Children.Add(enable);
+            if (notificationIdentity)
+                footer.Children.Add(SmallButton("\uE7F4", Loc.T("systemTrayWindowsNotifications"), () => { SafeClose(); ShellGuard.Notifications(); }));
         }
         else
         {
@@ -138,8 +195,17 @@ public sealed class TrayPanel : Flyout
             more.Click += (_, _) => OpenMenu(more);
             footer.Children.Add(more);
         }
-        RenderStatus(); if (showingHints) RenderHints();
-        if (IsActive && focusedIndex >= 0)
+        RenderStatus();
+        if (showingHints) RenderHints();
+        else if (showingSystemNotifications) RenderSystemNotifications();
+        if (IsActive && showingHints && focusedHint is not null)
+        {
+            var replacement = hints.Children.OfType<StackPanel>().SelectMany(row => row.Children.OfType<DockPanel>())
+                .SelectMany(header => header.Children.OfType<Button>()).FirstOrDefault(button => ReferenceEquals(button.Tag, focusedHint));
+            if (replacement is not null) replacement.Focus();
+            else footer.Children.OfType<Button>().FirstOrDefault(button => button.IsEnabled)?.Focus();
+        }
+        else if (IsActive && focusedIndex >= 0)
         {
             var buttons = icons.Children.OfType<SystemTrayIconButton>().Where(button => button.IsEnabled).ToList();
             var replacement = buttons.FirstOrDefault(button => button.Item == focusedButton!.Item)
@@ -152,9 +218,28 @@ public sealed class TrayPanel : Flyout
                 .FirstOrDefault(button => button.IsEnabled && AutomationProperties.GetName(button) == focusedLabel)?.Focus();
         iconScroll.ScrollToVerticalOffset(scroll);
         hintScroll.ScrollToVerticalOffset(hintOffset);
+        if (!showingList && revealIcon is { } requested)
+        {
+            revealIcon = null;
+            Dispatcher.BeginInvoke(DispatcherPriority.Loaded, () =>
+            {
+                if (closed || !IsVisible || showingHints || showingSystemNotifications || CurrentIcon(requested) is not { } current) return;
+                var button = icons.Children.OfType<SystemTrayIconButton>().FirstOrDefault(entry => ReferenceEquals(entry.Item, current));
+                if (button is null) return;
+                button.BringIntoView();
+                if (IsActive) button.Focus();
+            });
+        }
     }
     void RenderStatus()
     {
+        if (inputStatus is { Length: > 0 }) { status.Text = inputStatus; status.Visibility = Visibility.Visible; return; }
+        if (showingSystemNotifications)
+        {
+            status.Text = notificationStatus ?? "";
+            status.Visibility = string.IsNullOrEmpty(notificationStatus) ? Visibility.Collapsed : Visibility.Visible;
+            return;
+        }
         if (showingHints) { status.Visibility = Visibility.Collapsed; return; }
         var service = hub?.Service;
         var content = service?.Status ?? Loc.T("systemTrayOff");
@@ -171,11 +256,196 @@ public sealed class TrayPanel : Flyout
         foreach (var hint in hub.Service.Hints.Take(50))
         {
             var row = new StackPanel { Margin = new Thickness(3, 7, 3, 12) };
-            row.Children.Add(Text(hint.Icon.AccessibleName + "  ·  " + hint.Received.ToString("HH:mm"), 10.5, true));
+            var header = new DockPanel();
+            if (CurrentIcon(hint.Icon) is not null)
+            {
+                var locate = SmallButton("\uE721", Loc.T("trayLocateIcon"), () => ShowHintIcon(hint.Icon));
+                locate.Tag = hint;
+                DockPanel.SetDock(locate, Dock.Right); header.Children.Add(locate);
+            }
+            header.Children.Add(Text(hint.Icon.AccessibleName + "  ·  " + hint.Received.ToString("HH:mm"), 10.5, true));
+            row.Children.Add(header);
             if (hint.Title.Length > 0) { var title = Text(hint.Title, 12); title.Margin = new Thickness(0, 5, 0, 3); row.Children.Add(title); }
             var message = Text(hint.Text, 11.5, true); message.TextWrapping = TextWrapping.Wrap; message.TextTrimming = TextTrimming.None;
             row.Children.Add(message); hints.Children.Add(row);
         }
+    }
+
+    async Task ShowSystemNotificationsAsync()
+    {
+        if (!notificationIdentity || notificationAuthorizing || closed) return;
+        StopSystemNotifications();
+        var current = notificationGeneration;
+        var source = new SystemNotificationReader(Dispatcher);
+        var lifetime = new CancellationTokenSource();
+        notificationReader = source; notificationLifetime = lifetime;
+        source.Changed += SystemNotificationsChanged;
+        showingSystemNotifications = true; showingHints = false; arranging = false; inputStatus = null;
+        notificationStatus = Loc.T("systemNotificationsLoading");
+        notificationAuthorizing = true;
+        QueueRender();
+        try
+        {
+            var result = await source.EnableAsync(lifetime.Token);
+            if (closed || current != notificationGeneration || !ReferenceEquals(source, notificationReader)) return;
+            notificationAccess = result;
+            if (result == SystemNotificationAccess.Enabled)
+            {
+                notificationStatus = Loc.T("systemNotificationsLoading");
+                notificationAccessCheck.Start();
+                RequestNotificationRefresh();
+            }
+            else notificationStatus = NotificationMessage(result);
+        }
+        catch (Exception)
+        {
+            if (!closed && current == notificationGeneration)
+            {
+                notificationAccess = SystemNotificationAccess.Unavailable;
+                notificationStatus = Loc.T("systemNotificationsUnavailable");
+            }
+        }
+        finally
+        {
+            if (current == notificationGeneration)
+            {
+                notificationAuthorizing = false;
+                if (!closed) QueueRender();
+            }
+        }
+    }
+
+    void SystemNotificationsChanged() => RequestNotificationRefresh();
+
+    void CheckNotificationAccess()
+    {
+        if (closed || !showingSystemNotifications || notificationReader is not { } source) return;
+        var access = source.CheckAccess();
+        if (access == SystemNotificationAccess.Enabled) return;
+        notificationAccessCheck.Stop();
+        systemNotifications = []; hints.Children.Clear();
+        notificationAccess = access; notificationStatus = NotificationMessage(access);
+        RenderStatus(); QueueRender();
+    }
+
+    void RequestNotificationRefresh()
+    {
+        if (closed || !showingSystemNotifications || notificationReader is not { Enabled: true } source || notificationLifetime is null) return;
+        if (notificationRefreshing) { notificationRefreshAgain = true; return; }
+        _ = RefreshSystemNotificationsAsync(source, notificationGeneration, notificationLifetime.Token);
+    }
+
+    async Task RefreshSystemNotificationsAsync(SystemNotificationReader source, int current, CancellationToken token)
+    {
+        notificationRefreshing = true;
+        try
+        {
+            do
+            {
+                notificationRefreshAgain = false;
+                var result = await source.ReadAsync(token);
+                if (closed || current != notificationGeneration || !ReferenceEquals(source, notificationReader) || !showingSystemNotifications) return;
+                if (result.Access == SystemNotificationAccess.Cancelled) return;
+                notificationAccess = result.Access;
+                if (result.Access == SystemNotificationAccess.Enabled)
+                {
+                    systemNotifications = result.Items;
+                    notificationStatus = source.EventsAvailable ? null : Loc.T("systemNotificationsLiveUnavailable");
+                }
+                else
+                {
+                    notificationAccessCheck.Stop();
+                    systemNotifications = [];
+                    notificationStatus = NotificationMessage(result.Access);
+                    notificationRefreshAgain = false;
+                }
+                QueueRender();
+            } while (notificationRefreshAgain);
+        }
+        catch (Exception)
+        {
+            if (!closed && current == notificationGeneration)
+            {
+                notificationAccessCheck.Stop();
+                systemNotifications = [];
+                notificationAccess = SystemNotificationAccess.Unavailable;
+                notificationStatus = Loc.T("systemNotificationsUnavailable");
+            }
+        }
+        finally
+        {
+            if (current == notificationGeneration)
+            {
+                notificationRefreshing = false;
+                if (!closed) QueueRender();
+            }
+        }
+    }
+
+    static string NotificationMessage(SystemNotificationAccess access) => Loc.T(access switch
+    {
+        SystemNotificationAccess.Denied => "systemNotificationsDenied",
+        SystemNotificationAccess.Unspecified => "systemNotificationsUnspecified",
+        _ => "systemNotificationsUnavailable"
+    });
+
+    void StopSystemNotifications()
+    {
+        ++notificationGeneration;
+        notificationAccessCheck.Stop();
+        if (showingSystemNotifications) hints.Children.Clear();
+        notificationLifetime?.Cancel(); notificationLifetime?.Dispose(); notificationLifetime = null;
+        if (notificationReader is { } source)
+        {
+            source.Changed -= SystemNotificationsChanged;
+            source.Dispose();
+        }
+        notificationReader = null; systemNotifications = [];
+        notificationAuthorizing = notificationRefreshing = notificationRefreshAgain = false;
+        notificationStatus = null; notificationAccess = SystemNotificationAccess.Disabled;
+        showingSystemNotifications = false;
+    }
+
+    void RenderSystemNotifications()
+    {
+        hints.Children.Clear();
+        if (systemNotifications.Count == 0)
+        {
+            if (notificationAccess == SystemNotificationAccess.Enabled && !notificationRefreshing)
+                hints.Children.Add(Text(Loc.T("systemNotificationsNone"), 12, true));
+            return;
+        }
+        foreach (var notification in systemNotifications)
+        {
+            var row = new StackPanel { Margin = new Thickness(3, 7, 3, 12) };
+            var name = !string.IsNullOrWhiteSpace(notification.AppName) ? notification.AppName
+                : !string.IsNullOrWhiteSpace(notification.AppId) ? notification.AppId : Loc.T("systemNotificationsUnknown");
+            row.Children.Add(Text(name + "  ·  " + notification.Created.ToLocalTime().ToString("MM-dd HH:mm"), 10.5, true));
+            foreach (var value in notification.Text.Where(value => !string.IsNullOrWhiteSpace(value)))
+            {
+                var message = Text(value, 11.5, true); message.TextWrapping = TextWrapping.Wrap;
+                message.TextTrimming = TextTrimming.None; message.Margin = new Thickness(0, 4, 0, 0);
+                row.Children.Add(message);
+            }
+            hints.Children.Add(row);
+        }
+    }
+
+    SystemTrayItem? CurrentIcon(SystemTrayItem item)
+    {
+        if (hub?.Service.Ready != true) return null;
+        if (!item.Hidden && hub.Service.Icons.Contains(item)) return item;
+        if (item.StableId.Length == 0 || item.ProcessStarted == 0) return null;
+        var matches = hub.Service.Icons.Where(icon => !icon.Hidden &&
+            icon.StableId.Equals(item.StableId, StringComparison.OrdinalIgnoreCase) && icon.ProcessId == item.ProcessId &&
+            icon.Window == item.Window && icon.ProcessStarted == item.ProcessStarted).Take(2).ToArray();
+        return matches.Length == 1 ? matches[0] : null;
+    }
+
+    void ShowHintIcon(SystemTrayItem item)
+    {
+        if (CurrentIcon(item) is null) return;
+        revealIcon = item; showingHints = false; arranging = false; Render();
     }
     Button SmallButton(string glyph, string label, Action action)
     {
@@ -207,11 +477,11 @@ public sealed class TrayPanel : Flyout
             menu.Resources["MenuInk"] = Ink; menu.Resources["MenuSurface"] = Paint("#FAF5F6F8");
             menu.Resources["MenuLine"] = Track; menu.Resources["MenuHover"] = Hover;
         }
-        Add(menu, Loc.T("trayArrange"), () => { arranging = !arranging; showingHints = false; Render(); }, arranging);
+        Add(menu, Loc.T("trayArrange"), () => { StopSystemNotifications(); arranging = !arranging; showingHints = false; Render(); }, arranging);
         Add(menu, Loc.T("trayShowNames"), () => hub.Options.TrayShowNames = !hub.Options.TrayShowNames, hub.Options.TrayShowNames);
         Add(menu, Loc.T(hub.Options.TrayPinned ? "systemTrayUnpin" : "systemTrayPin"), () => hub.Options.TrayPinned = !hub.Options.TrayPinned);
         menu.Items.Add(new Separator());
-        Add(menu, Loc.T("trayRecentHints"), () => { showingHints = true; arranging = false; Render(); });
+        Add(menu, Loc.T("trayRecentHints"), () => { StopSystemNotifications(); showingHints = true; arranging = false; Render(); });
         Add(menu, Loc.T("systemTrayRefresh"), () => { if (hub.Service.Ready) hub.Service.RequestRefresh(); else hub.Retry(); });
         menu.Closed += (_, _) => MenuClosed(target);
         PopupInteraction.Open(menu, target);
@@ -258,7 +528,8 @@ public sealed class TrayPanel : Flyout
     void Navigate(object sender, KeyEventArgs e)
     {
         if (PopupInteraction.HasChildPopup(this)) return;
-        if (e.Key == Key.Escape && (arranging || showingHints)) { e.Handled = true; arranging = false; showingHints = false; Render(); return; }
+        if (e.Key == Key.Escape && (arranging || showingHints || showingSystemNotifications))
+        { e.Handled = true; StopSystemNotifications(); arranging = false; showingHints = false; Render(); return; }
         if (Keyboard.Modifiers != ModifierKeys.None || Keyboard.FocusedElement is not SystemTrayIconButton current) return;
         var buttons = icons.Children.OfType<SystemTrayIconButton>().Where(button => button.IsEnabled).ToList();
         var index = buttons.IndexOf(current); if (index < 0) return;

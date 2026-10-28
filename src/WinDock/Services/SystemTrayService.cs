@@ -18,6 +18,7 @@ public sealed class SystemTrayItem : INotifyPropertyChanged
     public uint Callback { get; internal set; }
     public uint Version { get; internal set; }
     internal bool RegistrationObserved { get; set; }
+    internal long ProcessStarted { get; set; }
     public Guid Guid { get; internal set; }
     public string Title { get; internal set; } = "";
     public string ProcessPath { get; internal set; } = "";
@@ -47,8 +48,10 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
     readonly DispatcherTimer prune = new() { Interval = TimeSpan.FromSeconds(10) };
     readonly DispatcherTimer recovery = new() { Interval = TimeSpan.FromSeconds(1) };
     readonly Dictionary<string, SystemTrayItem> known = [];
+    readonly HashSet<SystemTrayItem> retainedHints = [];
     readonly TrayIdentity identities = new();
     readonly Dictionary<nint, (long At, int Attempts)> requestedOwners = [];
+    readonly Dictionary<uint, long> requestedProcesses = [];
     readonly object pendingLock = new();
     readonly Queue<(uint Kind, byte[] Data)> pending = [];
     volatile CancellationTokenSource? lifetime;
@@ -89,6 +92,9 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
             var owners = Icons.Select(item => item.Window).ToHashSet();
             foreach (var window in requestedOwners.Keys.Where(window => !owners.Contains(window)
                 && (!Native.IsWindow(window) || Environment.TickCount64 - requestedOwners[window].At > 120_000)).ToArray()) requestedOwners.Remove(window);
+            var processes = Icons.Select(item => item.ProcessId).ToHashSet();
+            foreach (var pid in requestedProcesses.Keys.Where(pid => !processes.Contains(pid)
+                && Environment.TickCount64 - requestedProcesses[pid] > 120_000).ToArray()) requestedProcesses.Remove(pid);
         };
     }
 
@@ -240,6 +246,7 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
             else if (item is null) RequestRegistration(window, pid);
             return;
         }
+        if (useGuid && item is not null && operation == 1) id = item.Id;
         bool added = item is null;
         if (added)
         {
@@ -284,12 +291,17 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
 
     void RequestRegistration(nint window, uint pid)
     {
-        if (!requestedOwners.ContainsKey(window) && requestedOwners.Count >= 512) return;
+        if ((!requestedOwners.ContainsKey(window) && requestedOwners.Count >= 512)
+            || (!requestedProcesses.ContainsKey(pid) && requestedProcesses.Count >= 512)) return;
         var requested = requestedOwners.GetValueOrDefault(window, (At: long.MinValue / 2, Attempts: 0));
-        if (window != 0 && pid != 0 && requested.Attempts < 2 && Environment.TickCount64 - requested.At > 30_000)
+        var processAt = requestedProcesses.GetValueOrDefault(pid, long.MinValue / 2);
+        var now = Environment.TickCount64;
+        if (window != 0 && pid != 0 && requested.Attempts < 2 && now - requested.At > 30_000 && now - processAt > 30_000)
         {
-            requestedOwners[window] = (Environment.TickCount64, requested.Attempts + 1);
-            TrayReRegistration.RequestOwner(window, pid);
+            requestedOwners[window] = (now, requested.Attempts + 1);
+            requestedProcesses[pid] = now;
+            var cancellation = lifetime?.Token ?? CancellationToken.None;
+            _ = Task.Run(() => TrayReRegistration.RequestOwner(window, pid, cancellation), cancellation);
         }
     }
 
@@ -300,16 +312,34 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
         if (lifetime != run || !known.TryGetValue(item.Key, out var current) || !ReferenceEquals(item, current)) return;
         Native.GetWindowThreadProcessId(item.Window, out var pid);
         if (pid != item.ProcessId || !Native.IsWindow(item.Window)) return;
-        item.ProcessPath = identity.Path; item.ApplicationName = identity.Name;
+        item.ProcessPath = identity.Path; item.ApplicationName = identity.Name; item.ProcessStarted = identity.Started;
+        if (identity.Started != 0)
+        {
+            var prior = retainedHints.Where(old => old.Key == item.Key && old.Window == item.Window
+                && old.ProcessId == item.ProcessId && old.ProcessStarted == identity.Started).ToHashSet();
+            if (prior.Count > 0)
+            {
+                item.HasHint |= prior.Any(old => old.HasHint);
+                for (var index = 0; index < Hints.Count; ++index)
+                    if (prior.Contains(Hints[index].Icon)) Hints[index] = Hints[index] with { Icon = item };
+                retainedHints.ExceptWith(prior);
+            }
+        }
         item.Title = TrayIdentity.Name(item); item.Refresh(); LayoutChanged?.Invoke();
     }
 
     static string ReadText(byte[] data, int offset, int characters) => Encoding.Unicode.GetString(data, offset, characters * 2).Split('\0')[0];
     void Remove(SystemTrayItem item) { Icons.Remove(item); known.Remove(item.Key); }
-    void ClearIcons() { Icons.Clear(); known.Clear(); identities.Clear(); requestedOwners.Clear(); }
+    void ClearIcons()
+    {
+        retainedHints.RemoveWhere(old => !Hints.Any(hint => ReferenceEquals(hint.Icon, old)));
+        foreach (var item in Icons)
+            if (item.HasHint && item.ProcessStarted != 0 && Hints.Any(hint => ReferenceEquals(hint.Icon, item))) retainedHints.Add(item);
+        Icons.Clear(); known.Clear(); identities.Clear(); requestedOwners.Clear(); requestedProcesses.Clear();
+    }
 
     public void MarkSeen(SystemTrayItem item) { item.HasHint = false; item.Refresh(); }
-    public void ClearHints() { Hints.Clear(); foreach (var item in Icons) MarkSeen(item); }
+    public void ClearHints() { Hints.Clear(); retainedHints.Clear(); foreach (var item in Icons) MarkSeen(item); }
 
     public void RequestRefresh()
     {
@@ -349,7 +379,7 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
             _ = completing.ContinueWith(_ => run.Dispose(), TaskScheduler.Default);
         runner = null;
         // The runner owns cancellation registrations until it completes.
-        prune.Stop(); recovery.Stop(); Ready = false; ClearIcons(); Hints.Clear(); Status = Loc.T("systemTrayOff");
+        prune.Stop(); recovery.Stop(); Ready = false; ClearIcons(); Hints.Clear(); retainedHints.Clear(); Status = Loc.T("systemTrayOff");
         lock (pendingLock) { activeSession = null; pending.Clear(); pendingBytes = 0; scheduled = false; }
     }
     public void Dispose() { Loc.Instance.PropertyChanged -= LanguageChanged; Stop(); }

@@ -1,17 +1,21 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Text;
 
 namespace WinDock.Services;
 
-internal sealed record TrayProcessIdentity(string Path, string Name)
+internal sealed record TrayProcessIdentity(string Path, string Name, long Started)
 {
-    public static readonly TrayProcessIdentity Unknown = new("", "");
+    public static readonly TrayProcessIdentity Unknown = new("", "", 0);
 }
 
 internal sealed class TrayIdentity
 {
     readonly Dictionary<uint, Task<TrayProcessIdentity>> processes = [];
     readonly SemaphoreSlim reads = new(4);
+
+    [DllImport("kernel32.dll")]
+    static extern bool GetProcessTimes(nint process, out long created, out long exited, out long kernel, out long user);
 
     public Task<TrayProcessIdentity> Read(uint pid)
     {
@@ -30,12 +34,13 @@ internal sealed class TrayIdentity
     {
         var handle = Native.OpenProcess(0x1000, false, (int)pid);
         if (handle == 0) return TrayProcessIdentity.Unknown;
-        string path;
+        string path; long started;
         try
         {
             var buffer = new StringBuilder(32768); var length = buffer.Capacity;
             if (!Native.QueryFullProcessImageName(handle, 0, buffer, ref length)) return TrayProcessIdentity.Unknown;
             path = buffer.ToString();
+            if (!GetProcessTimes(handle, out started, out _, out _, out _)) started = 0;
         }
         finally { Native.CloseHandle(handle); }
         var name = System.IO.Path.GetFileNameWithoutExtension(path);
@@ -52,7 +57,7 @@ internal sealed class TrayIdentity
             }
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or System.ComponentModel.Win32Exception) { }
-        return new(path, name);
+        return new(path, name, started);
     }
 
     static bool Generic(string value) => value.Equals("Electron", StringComparison.OrdinalIgnoreCase)

@@ -11,6 +11,7 @@ sealed class TrayMenuSession : IDisposable
     readonly uint callbackThread;
     readonly HashSet<nint> baseline, popups = [];
     readonly HashSet<uint> threads = [];
+    readonly TrayMenuPlacement? placement;
     nint menuOwner;
     long deadline, lastOpen;
     bool sent, seen, disposed;
@@ -21,13 +22,14 @@ sealed class TrayMenuSession : IDisposable
     public bool ReturnFocusRequested { get; private set; }
     public bool PreserveSource { get; private set; }
 
-    public TrayMenuSession(Window source, SystemTrayItem item, bool hover = false)
+    public TrayMenuSession(Window source, SystemTrayItem item, bool hover = false, FrameworkElement? anchor = null)
     {
         Item = item; IsHover = hover;
         this.source = source; callback = item.Window; ProcessId = item.ProcessId;
         callbackThread = Native.GetWindowThreadProcessId(callback, out _);
         threads.Add(callbackThread);
         baseline = VisiblePopups();
+        if (!hover && anchor is not null) placement = TrayMenuPlacement.Create(item, anchor);
         deadline = Environment.TickCount64 + 1200;
     }
 
@@ -84,12 +86,16 @@ sealed class TrayMenuSession : IDisposable
         var foregroundThread = Native.GetWindowThreadProcessId(foreground, out var foregroundPid);
         if (foregroundPid == ProcessId || RelatedWindow(foreground)) threads.Add(foregroundThread);
         var nativeMenu = false;
+        nint callbackMenuOwner = 0;
         foreach (var thread in threads.Where(value => value != 0))
         {
             var info = new GuiThreadInfo { Size = Marshal.SizeOf<GuiThreadInfo>() };
             if (!GetGUIThreadInfo(thread, ref info) || (info.Flags & 0x1C) == 0) continue;
             nativeMenu = true; menuOwner = info.MenuOwner;
+            if (thread == callbackThread) callbackMenuOwner = info.MenuOwner;
         }
+        var standardMenus = popups.Where(popup => Native.ClassOf(popup) == "#32768").Take(2).ToArray();
+        if (standardMenus.Length == 1) placement?.TryPlace(standardMenus[0], callback, callbackThread, callbackMenuOwner);
         if (managedMenu || nativeMenu || popups.Count > 0)
         {
             if ((GetAsyncKeyState(0x1B) & 0x8000) != 0) EscapePressed = true;

@@ -84,6 +84,7 @@ public sealed class DockPreferences : StackPanel
         Number(tray, "trayIconSize", nameof(DockOptions.TrayIconSize), 16, 32, 1);
         Number(tray, "trayColumns", nameof(DockOptions.TrayColumns), 3, 8, 1);
         Toggle(tray, "trayShowNames", nameof(DockOptions.TrayShowNames));
+        Toggle(tray, "trayMenuPlacement", nameof(DockOptions.TrayMenuPlacement), "trayMenuPlacementDesc");
         Select(tray, "traySort", nameof(DockOptions.TraySort), ("system", "orderCustom"), ("name", "orderName"));
 
         var behavior = Group("behaviorSettings");

@@ -66,11 +66,34 @@ internal static class TrayReRegistration
         }
     }
 
-    public static void RequestOwner(nint window, uint pid)
+    public static void RequestOwner(nint window, uint pid, CancellationToken cancellation)
     {
         Native.GetWindowThreadProcessId(window, out var actual);
-        if (actual != pid || !Native.IsWindow(window)) return;
+        if (actual != pid || !Native.IsWindow(window) || cancellation.IsCancellationRequested) return;
+        var taskbar = Native.FindWindow("Shell_TrayWnd", null);
+        if (taskbar != 0 && Native.GetWindowThreadProcessId(taskbar, out var shellPid) != 0 && shellPid == pid) return;
         var message = SystemTrayInterop.RegisterWindowMessage("TaskbarCreated");
-        if (message != 0) PostMessageW(window, message, 0, 0);
+        if (message == 0) return;
+        var sent = new HashSet<nint>();
+        void Send(nint candidate)
+        {
+            if (candidate == 0 || sent.Count >= 128 || cancellation.IsCancellationRequested) return;
+            Native.GetWindowThreadProcessId(candidate, out var owner);
+            if (owner == pid && Native.IsWindow(candidate) && sent.Add(candidate)) PostMessageW(candidate, message, 0, 0);
+        }
+        Send(window);
+        Native.EnumWindows((candidate, _) =>
+        {
+            Send(candidate);
+            return sent.Count < 128 && !cancellation.IsCancellationRequested;
+        }, 0);
+        nint previous = 0;
+        var enumerated = new HashSet<nint>();
+        for (var count = 0; count < 2048 && sent.Count < 128 && !cancellation.IsCancellationRequested; count++)
+        {
+            var candidate = FindWindowExW((nint)(-3), previous, null, null);
+            if (candidate == 0 || !enumerated.Add(candidate)) break;
+            previous = candidate; Send(candidate);
+        }
     }
 }

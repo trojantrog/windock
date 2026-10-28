@@ -109,6 +109,7 @@ public sealed class DockSettings
     public double TrayIconSize { get; set; } = 22;
     public int TrayColumns { get; set; } = 5;
     public bool TrayShowNames { get; set; }
+    public bool TrayMenuPlacement { get; set; }
     public string TraySort { get; set; } = "system";
     public List<string> TrayPinnedIds { get; set; } = [];
     public List<string> TrayOrder { get; set; } = [];
