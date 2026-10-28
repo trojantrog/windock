@@ -4,6 +4,7 @@ using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
+using System.Windows.Shell;
 using WinDock.Services;
 using Forms = System.Windows.Forms;
 
@@ -12,14 +13,16 @@ namespace WinDock.Views;
 public abstract class Flyout : Window
 {
     readonly Border face;
+    readonly bool glass;
+    GlassBackdrop? backdrop;
     bool closing;
     (double CenterX, double BarTop, Forms.Screen Screen)? anchor;
 
-    protected Flyout(bool dark)
+    protected Flyout(bool dark, bool glass = false)
     {
-        Dark = dark;
+        Dark = dark; this.glass = glass;
         WindowStyle = WindowStyle.None;
-        AllowsTransparency = true;
+        AllowsTransparency = !glass;
         Background = Brushes.Transparent;
         ResizeMode = ResizeMode.NoResize;
         ShowInTaskbar = false;
@@ -30,26 +33,41 @@ public abstract class Flyout : Window
 
         face = new Border
         {
-            Margin = new Thickness(14),
+            Margin = new Thickness(glass ? 0 : 14),
             Padding = new Thickness(16, 14, 16, 14),
-            CornerRadius = new CornerRadius(18),
+            CornerRadius = new CornerRadius(glass ? 12 : 18),
             Background = Paint(dark ? "#F21C1E26" : "#F7F8F8FA"),
             BorderBrush = Paint(dark ? "#33FFFFFF" : "#24000000"),
             BorderThickness = new Thickness(1),
-            Effect = new System.Windows.Media.Effects.DropShadowEffect { BlurRadius = 24, ShadowDepth = 6, Direction = 270, Opacity = 0.45 },
+            Effect = glass ? null : new System.Windows.Media.Effects.DropShadowEffect { BlurRadius = 24, ShadowDepth = 6, Direction = 270, Opacity = 0.45 },
             RenderTransformOrigin = new Point(0.5, 1),
             RenderTransform = new ScaleTransform(1, 1)
         };
         Content = face;
+        if (glass)
+        {
+            Left = -32000; Top = -32000;
+            WindowChrome.SetWindowChrome(this, new WindowChrome { CaptionHeight = 0, ResizeBorderThickness = new Thickness(0),
+                CornerRadius = new CornerRadius(12), GlassFrameThickness = new Thickness(-1), UseAeroCaptionButtons = false });
+        }
 
         SourceInitialized += (_, _) =>
         {
             var hwnd = new WindowInteropHelper(this).Handle;
             var ex = (long)Native.GetWindowLongPtr(hwnd, Native.GWL_EXSTYLE);
             Native.SetWindowLongPtr(hwnd, Native.GWL_EXSTYLE, (nint)(ex | Native.WS_EX_TOOLWINDOW));
+            if (glass) backdrop = new GlassBackdrop(this, face, dark);
         };
         SizeChanged += (_, _) => Place();
-        Deactivated += (_, _) => SafeClose();
+        Deactivated += (_, _) => Dispatcher.BeginInvoke(() =>
+        {
+            if (!IsActive && !KeepOpenOnDeactivate && !IsMouseCaptureWithin) SafeClose();
+        });
+        LostMouseCapture += (_, _) => Dispatcher.BeginInvoke(() =>
+        {
+            if (!IsActive && !KeepOpenOnDeactivate) SafeClose();
+        });
+        Closed += (_, _) => backdrop?.Dispose();
         KeyDown += (_, e) =>
         {
             if (e.Key == Key.Escape) SafeClose();
@@ -57,10 +75,11 @@ public abstract class Flyout : Window
     }
 
     protected bool Dark { get; }
-    protected Brush Ink => Paint(Dark ? "#F4EFE7" : "#1B1D24");
-    protected Brush Muted => Paint(Dark ? "#B3F4EFE7" : "#991B1D24");
-    protected Brush Hover => Paint(Dark ? "#24FFFFFF" : "#14000000");
-    protected Brush Track => Paint(Dark ? "#26FFFFFF" : "#1A000000");
+    protected virtual bool KeepOpenOnDeactivate => false;
+    protected Brush Ink => SystemParameters.HighContrast ? SystemColors.WindowTextBrush : Paint(Dark ? "#F4EFE7" : "#1B1D24");
+    protected Brush Muted => SystemParameters.HighContrast ? SystemColors.WindowTextBrush : Paint(Dark ? "#B3F4EFE7" : "#991B1D24");
+    protected Brush Hover => SystemParameters.HighContrast ? SystemColors.HighlightBrush : Paint(Dark ? "#24FFFFFF" : "#14000000");
+    protected Brush Track => SystemParameters.HighContrast ? SystemColors.WindowTextBrush : Paint(Dark ? "#26FFFFFF" : "#1A000000");
     protected static FontFamily Display => (FontFamily)Application.Current.FindResource("Display");
     protected static FontFamily Glyphs { get; } = new("Segoe Fluent Icons, Segoe MDL2 Assets");
 
@@ -68,13 +87,21 @@ public abstract class Flyout : Window
 
     public void ShowAt(double centerX, double barTop, Forms.Screen screen)
     {
-        Opacity = 0;
+        if (!glass) Opacity = 0;
+        else face.Opacity = 0;
         Show();
         UpdateLayout();
         anchor = (centerX, barTop, screen);
         Place();
         Opacity = 1;
         Activate();
+
+        if (glass)
+        {
+            face.Opacity = 1;
+            if (SystemParameters.ClientAreaAnimation) face.BeginAnimation(OpacityProperty, new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(120)));
+            return;
+        }
 
         var grow = new DoubleAnimation(0.88, 1, TimeSpan.FromMilliseconds(200)) { EasingFunction = new BackEase { Amplitude = 0.25, EasingMode = EasingMode.EaseOut } };
         var transform = (ScaleTransform)face.RenderTransform;

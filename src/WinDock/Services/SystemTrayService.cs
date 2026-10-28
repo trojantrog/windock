@@ -19,9 +19,16 @@ public sealed class SystemTrayItem : INotifyPropertyChanged
     public uint Version { get; internal set; }
     public Guid Guid { get; internal set; }
     public string Title { get; internal set; } = "";
+    public string ProcessPath { get; internal set; } = "";
+    public string ApplicationName { get; internal set; } = "";
+    public string OwnerClass { get; internal set; } = "";
+    public string StableId => Guid != Guid.Empty ? "guid:" + Guid.ToString("D")
+        : ProcessPath.Length > 0 ? $"exe:{ProcessPath.ToLowerInvariant()}:{OwnerClass}:{Id}" : "";
     public string Tip { get; internal set; } = "";
     public bool ShowStandardTip { get; internal set; }
-    public string? HoverTip => (Version >= 4 && !ShowStandardTip) || Tip.Length == 0 ? null : Tip;
+    public string? HoverTip => Version >= 4 && !ShowStandardTip ? null :
+        Title.Length == 0 || Tip.Contains(Title, StringComparison.OrdinalIgnoreCase) ? (Tip.Length > 0 ? Tip : null) :
+        Tip.Length == 0 ? Title : Title + "\n" + Tip;
     public BitmapSource? Icon { get; internal set; }
     public bool Hidden { get; internal set; }
     public bool HasHint { get; internal set; }
@@ -38,6 +45,8 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
     readonly Dispatcher dispatcher = Application.Current.Dispatcher;
     readonly DispatcherTimer prune = new() { Interval = TimeSpan.FromSeconds(10) };
     readonly Dictionary<string, SystemTrayItem> known = [];
+    readonly TrayIdentity identities = new();
+    readonly Dictionary<nint, (long At, int Attempts)> requestedOwners = [];
     readonly object pendingLock = new();
     readonly Queue<(uint Kind, byte[] Data)> pending = [];
     volatile CancellationTokenSource? lifetime;
@@ -50,11 +59,13 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
     public ObservableCollection<TrayHint> Hints { get; } = [];
     public string Status { get => status; private set { status = value; Notify(); } }
     public bool Ready { get => ready; private set { ready = value; Notify(); } }
+    public bool HasStatusNotice { get; private set; }
     public event PropertyChangedEventHandler? PropertyChanged;
     public event Action? LayoutChanged;
 
     public SystemTrayService()
     {
+        Loc.Instance.PropertyChanged += LanguageChanged;
         prune.Tick += (_, _) =>
         {
             foreach (var item in Icons.ToArray())
@@ -62,7 +73,16 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
                 Native.GetWindowThreadProcessId(item.Window, out var pid);
                 if (pid != item.ProcessId || !Native.IsWindow(item.Window)) Remove(item);
             }
+            identities.Keep(Icons.Select(item => item.ProcessId));
+            var owners = Icons.Select(item => item.Window).ToHashSet();
+            foreach (var window in requestedOwners.Keys.Where(window => !owners.Contains(window)).ToArray()) requestedOwners.Remove(window);
         };
+    }
+
+    void LanguageChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        foreach (var item in Icons) { item.Title = TrayIdentity.Name(item); item.Refresh(); }
+        LayoutChanged?.Invoke();
     }
 
     public void Start()
@@ -84,7 +104,7 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
                 await session.ReadAsync((kind, data) => Queue(run, kind, data), () => dispatcher.BeginInvoke(() =>
                 {
                     if (lifetime != run) return;
-                    Ready = true; Status = Loc.T("systemTrayConnected"); RequestRefresh();
+                    HasStatusNotice = false; Ready = true; Status = Loc.T("systemTrayConnected"); RequestRefresh();
                 }));
             }
             catch (OperationCanceledException) when (token.IsCancellationRequested) { break; }
@@ -143,7 +163,7 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
         {
             foreach (var (kind, data) in batch)
             {
-                if (kind == 3) { Status = Loc.T("systemTrayUpdatesSkipped"); continue; }
+                if (kind == 3) { HasStatusNotice = true; Status = Loc.T("systemTrayUpdatesSkipped"); continue; }
                 Apply(data);
             }
         }
@@ -174,7 +194,7 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
         if (added)
         {
             if (known.Count >= 512) return;
-            item = new SystemTrayItem { Window = window, ProcessId = pid, Id = id, Guid = (flags & 0x20) != 0 ? guid : Guid.Empty };
+            item = new SystemTrayItem { Window = window, ProcessId = pid, Id = id, OwnerClass = Native.ClassOf(window), Guid = (flags & 0x20) != 0 ? guid : Guid.Empty };
             item.Key = item.Guid == Guid.Empty ? $"{rawWindow:X8}:{id}:{pid}" : item.Guid.ToString();
             known[item.Key] = item;
         }
@@ -186,7 +206,6 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
         {
             item!.Tip = ReadText(bytes, 44, 128);
             item.ShowStandardTip = (flags & 0x80) != 0;
-            item.Title = item.Tip.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? "";
         }
         if ((flags & 8) != 0 && (stateMask & 1) != 0) item!.Hidden = (state & 1) != 0;
         if ((flags & 2) != 0)
@@ -205,14 +224,32 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
                 while (Hints.Count > 50) Hints.RemoveAt(Hints.Count - 1);
             }
         }
-        item!.Refresh();
-        if (added) Icons.Add(item);
+        item!.Title = TrayIdentity.Name(item);
+        item.Refresh();
+        if (added) { Icons.Add(item); _ = ResolveIdentity(item); }
         else if (wasHidden != item.Hidden) LayoutChanged?.Invoke();
+        var requested = requestedOwners.GetValueOrDefault(item.Window, (At: long.MinValue / 2, Attempts: 0));
+        if (operation == 1 && !item.CanInvoke && requested.Attempts < 2 && Environment.TickCount64 - requested.At > 30_000)
+        {
+            requestedOwners[item.Window] = (Environment.TickCount64, requested.Attempts + 1);
+            TrayReRegistration.RequestOwner(item.Window, item.ProcessId);
+        }
+    }
+
+    async Task ResolveIdentity(SystemTrayItem item)
+    {
+        var run = lifetime;
+        var identity = await identities.Read(item.ProcessId);
+        if (lifetime != run || !known.TryGetValue(item.Key, out var current) || !ReferenceEquals(item, current)) return;
+        Native.GetWindowThreadProcessId(item.Window, out var pid);
+        if (pid != item.ProcessId || !Native.IsWindow(item.Window)) return;
+        item.ProcessPath = identity.Path; item.ApplicationName = identity.Name;
+        item.Title = TrayIdentity.Name(item); item.Refresh(); LayoutChanged?.Invoke();
     }
 
     static string ReadText(byte[] data, int offset, int characters) => Encoding.Unicode.GetString(data, offset, characters * 2).Split('\0')[0];
     void Remove(SystemTrayItem item) { Icons.Remove(item); known.Remove(item.Key); }
-    void ClearIcons() { Icons.Clear(); known.Clear(); }
+    void ClearIcons() { Icons.Clear(); known.Clear(); identities.Clear(); requestedOwners.Clear(); }
 
     public void MarkSeen(SystemTrayItem item) { item.HasHint = false; item.Refresh(); }
     public void ClearHints() { Hints.Clear(); foreach (var item in Icons) MarkSeen(item); }
@@ -221,10 +258,14 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
     {
         if (!Ready || DateTime.UtcNow - refreshAt < TimeSpan.FromSeconds(10)) return;
         refreshAt = DateTime.UtcNow;
-        // Applications that support TaskbarCreated re-register with Explorer.
-        // Explorer remains the receiver; this service never impersonates it.
-        var message = SystemTrayInterop.RegisterWindowMessage("TaskbarCreated");
-        _ = Task.Run(() => SystemTrayInterop.SendMessageTimeoutW((nint)0xFFFF, message, 0, 0, 0x22, 100, out _));
+        HasStatusNotice = false; Status = Loc.T("systemTrayConnected");
+        var owners = Icons.Select(icon => (icon.Window, icon.ProcessId)).Distinct().ToArray();
+        var cancellation = lifetime?.Token ?? CancellationToken.None;
+        _ = Task.Run(() =>
+        {
+            try { TrayReRegistration.Request(owners, cancellation); }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception or InvalidOperationException) { }
+        });
     }
 
     public bool Invoke(SystemTrayItem item, uint message, Point physicalPoint)
@@ -251,6 +292,6 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
         prune.Stop(); Ready = false; ClearIcons(); Hints.Clear(); Status = Loc.T("systemTrayOff");
         lock (pendingLock) { pending.Clear(); pendingBytes = 0; scheduled = false; }
     }
-    public void Dispose() => Stop();
+    public void Dispose() { Loc.Instance.PropertyChanged -= LanguageChanged; Stop(); }
     void Notify([CallerMemberName] string? name = null) => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
 }
