@@ -21,7 +21,8 @@ public sealed class SystemTrayIconButton : Border
     Point pressedAt;
     MouseButton? pressed;
     int clicks;
-    bool popupOpen, dragging;
+    bool popupOpen, dragging, nativePress;
+    CancellationTokenSource? nativeActivation;
     long moveAt;
     public event Action<SystemTrayItem>? PinRequested;
     public event Action<bool>? DraggingChanged;
@@ -37,7 +38,7 @@ public sealed class SystemTrayIconButton : Border
         Width = showName ? Math.Max(78, iconSize + 44) : Math.Max(36, iconSize + 16);
         Height = showName ? iconSize + 46 : Math.Max(36, iconSize + 16);
         Margin = new Thickness(2); UseLayoutRounding = true; SnapsToDevicePixels = true;
-        Focusable = true; Cursor = editing || item.CanInvoke ? Cursors.Hand : Cursors.Arrow;
+        Focusable = true; Cursor = editing || item.CanInvoke || TrayActionRouter.CanAttempt(item) ? Cursors.Hand : Cursors.Arrow;
         if (!editing) PropertyChangedEventManager.AddHandler(item, ItemChanged, "");
         SetBinding(ToolTipProperty, new Binding(editing ? nameof(SystemTrayItem.AccessibleName) : nameof(SystemTrayItem.HoverTip)));
         SetBinding(AutomationProperties.NameProperty, new Binding(nameof(SystemTrayItem.AccessibleName)));
@@ -112,6 +113,8 @@ public sealed class SystemTrayIconButton : Border
         Unloaded += (_, _) =>
         {
             pressed = null;
+            nativePress = false;
+            nativeActivation?.Cancel();
             if (IsMouseCaptured) ReleaseMouseCapture();
             EndHover();
         };
@@ -123,7 +126,8 @@ public sealed class SystemTrayIconButton : Border
         {
             if (dragging || pressed is null) return;
             pressed = null;
-            if (!editing) Interaction?.CompleteTrayMenu(true);
+            if (!editing && !nativePress) Interaction?.CompleteTrayMenu(true);
+            nativePress = false;
         };
     }
 
@@ -133,16 +137,21 @@ public sealed class SystemTrayIconButton : Border
         item.Click += (_, _) => action(); menu.Items.Add(item);
     }
 
-    void ItemChanged(object? sender, PropertyChangedEventArgs e) => Cursor = item.CanInvoke ? Cursors.Hand : Cursors.Arrow;
+    void ItemChanged(object? sender, PropertyChangedEventArgs e) =>
+        Cursor = item.CanInvoke || TrayActionRouter.CanAttempt(item) ? Cursors.Hand : Cursors.Arrow;
 
     void OnDown(object sender, MouseButtonEventArgs e)
     {
         if (e.ChangedButton is not (MouseButton.Left or MouseButton.Right or MouseButton.Middle) || pressed is not null) return;
         if (editing && e.ChangedButton != MouseButton.Left) return; // WPF edit menu
-        if (!editing && !item.CanInvoke) { e.Handled = true; Focus(); return; }
+        if (!editing && (nativeActivation is not null || !item.CanInvoke
+            && (e.ChangedButton != MouseButton.Left || !TrayActionRouter.CanAttempt(item))))
+        { e.Handled = true; Focus(); return; }
         e.Handled = true; Focus(); pressed = e.ChangedButton; clicks = e.ClickCount; pressedAt = e.GetPosition(this);
-        if (!CaptureMouse()) { pressed = null; EndHover(); return; }
+        nativePress = !editing && !item.CanInvoke;
+        if (!CaptureMouse()) { pressed = null; nativePress = false; EndHover(); return; }
         if (editing) return;
+        if (nativePress) { EndHover(); return; }
         Interaction?.BeginTrayMenu(item, this);
         EndHover();
         uint message = e.ChangedButton switch
@@ -166,22 +175,35 @@ public sealed class SystemTrayIconButton : Border
             return;
         }
         var now = Environment.TickCount64;
-        if (now - moveAt > 50) { moveAt = now; Send(0x200); }
+        if (!nativePress && nativeActivation is null && now - moveAt > 50) { moveAt = now; Send(0x200); }
     }
     void OnUp(object sender, MouseButtonEventArgs e)
     {
-        if (pressed != e.ChangedButton) return;
+        if (pressed != e.ChangedButton)
+        {
+            if (!editing && (nativeActivation is not null || !item.CanInvoke)
+                && e.ChangedButton is MouseButton.Left or MouseButton.Right or MouseButton.Middle) e.Handled = true;
+            return;
+        }
         e.Handled = true; pressed = null;
+        var useNativeAction = nativePress;
+        nativePress = false;
         var releasedInside = new Rect(RenderSize).Contains(e.GetPosition(this));
         ReleaseMouseCapture();
         if (!releasedInside)
         {
-            if (!editing) Interaction?.CompleteTrayMenu(true);
+            if (!editing && !useNativeAction) Interaction?.CompleteTrayMenu(true);
             return;
         }
         if (editing)
         {
             if (!dragging && clicks == 1 && item.StableId.Length > 0) PinRequested?.Invoke(item);
+        }
+        else if (useNativeAction)
+        {
+            // Invoke has one default-action meaning. Do not turn the second
+            // half of a double click into another toggle/open request.
+            if (clicks % 2 != 0) ActivateNative();
         }
         else
         {
@@ -207,7 +229,16 @@ public sealed class SystemTrayIconButton : Border
             { e.Handled = true; MoveRequested?.Invoke(item, e.Key == Key.Left ? -1 : 1); }
             return;
         }
-        if (!item.CanInvoke) return;
+        if (!item.CanInvoke || nativeActivation is not null)
+        {
+            if (e.Key is Key.Enter or Key.Space)
+            {
+                e.Handled = true;
+                if (TrayActionRouter.CanAttempt(item)) ActivateNative();
+            }
+            else if (e.Key == Key.Apps || (e.Key == Key.F10 && Keyboard.Modifiers.HasFlag(ModifierKeys.Shift))) e.Handled = true;
+            return;
+        }
         if (e.Key is Key.Enter or Key.Space)
         {
             e.Handled = true;
@@ -226,6 +257,20 @@ public sealed class SystemTrayIconButton : Border
         }
     }
     PopupInteraction? Interaction => Window.GetWindow(this) is { } window ? PopupInteraction.For(window) : null;
+
+    async void ActivateNative()
+    {
+        if (nativeActivation is not null || !TrayActionRouter.CanAttempt(item)) return;
+        EndHover();
+        var cancellation = new CancellationTokenSource();
+        nativeActivation = cancellation;
+        try { await TrayActionRouter.ActivateAsync(service, item, this, cancellation.Token); }
+        finally
+        {
+            if (ReferenceEquals(nativeActivation, cancellation)) nativeActivation = null;
+            cancellation.Dispose();
+        }
+    }
 
     void EndHover()
     {

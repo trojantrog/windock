@@ -1,6 +1,6 @@
-# Windows 系统通知接入草案
+# Windows 系统通知接入
 
-`SystemNotificationReader` 是只读模块。运行程序具有 Windows 包身份时，托盘面板显示“读取系统通知”入口；用户点击后才请求权限和读取内容。当前发布目录没有相关包身份，也没有可安装的通知身份包，因此该入口不会显示；原生任务栏和 Windows 通知中心继续工作。
+`SystemNotificationReader` 是只读模块。运行程序具有 Windows 包身份时，托盘面板显示“读取系统通知”入口；用户点击后才请求权限和读取内容。通知身份包已有独立构建、签名和注册脚本，目前完成了未签名工件构建；尚未完成可信签名、注册或系统授权验证。普通发布目录仍不具有包身份，原生任务栏和 Windows 通知中心继续工作。
 
 ## 功能范围
 
@@ -18,8 +18,8 @@ Windows 的 `UserNotificationListener` 可读取用户授权后系统当前保�
 
 ## 包身份
 
-`packaging/notifications/` 中的两个 XML 文件仅为外部位置身份包及可执行文件身份信息的模板。身份包使用 `uap3:userNotificationListener` 声明；`Publisher` 必须与可信签名证书的主体一致，包名、发布者和应用 ID 必须与可执行文件的身份信息一致。集成可执行文件清单时，应保留现有的 DPI 和权限设置，不直接覆盖现有清单。应用图标资源需要随外部目录提供。
+`packaging/notifications/` 提供外部位置身份包与可执行文件清单模板，以及构建、签名、注册、移除脚本。身份包使用 `uap3:userNotificationListener` 声明；`Publisher` 必须与可信代码签名证书的主体一致，包名、发布者和应用 ID 必须与可执行文件的身份信息一致。构建脚本保留现有 DPI 和权限设置，在生成 .NET 单文件程序之前嵌入身份信息，并读回核对。应用图标资源同时提供在外部程序目录中。
 
-微软的外部位置身份包适用于 Windows 10 2004 及更新系统；它仍需使用 Windows SDK 的 MakeAppx 与 SignTool 构建、签名，并按当前用户正常注册。当前未生成、签名或注册任何身份包，也未修改证书信任。模板中的发布者与图标资源需要在正式打包时确定。来源：[微软外部位置身份包说明](https://learn.microsoft.com/en-us/windows/apps/desktop/modernize/grant-identity-to-nonpackaged-apps)、[Seelen UI 清单](https://github.com/eythaann/Seelen-UI/blob/2f9aaa321b49fc2ac58aaa9188a2a6678e41c947/src/templates/AppxManifest.xml)。
+微软的外部位置身份包适用于 Windows 10 2004 及更新系统；它仍需使用 Windows SDK 的 MakeAppx 与 SignTool 构建、签名，并按当前用户正常注册。脚本核对微软工具签名，注册前核对包和程序的可信签名及哈希，不修改证书信任、不启用开发者模式。没有合适签名证书时可生成审查工件，但不能注册。完整步骤见[身份包构建与安装](../packaging/notifications/README.md)。来源：[微软外部位置身份包说明](https://learn.microsoft.com/en-us/windows/apps/desktop/modernize/grant-identity-to-nonpackaged-apps)、[微软 sparse package 实现说明](https://github.com/microsoft/winappCli/blob/main/docs/guides/sparse.md)。
 
 本项目使用 `net10.0-windows10.0.19041.0` 的 Windows SDK .NET 投影编译此模块。系统通知监听的包身份、授权对话框、事件及各应用内容仍须在用户选择的环境中验证；模块编译成功不能证明授权或通知访问已经生效。

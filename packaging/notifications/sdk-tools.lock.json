@@ -1,0 +1,9 @@
+{
+  "package": "Microsoft.Windows.SDK.BuildTools",
+  "version": "10.0.26100.9457",
+  "source": "https://api.nuget.org/v3-flatcontainer/microsoft.windows.sdk.buildtools/10.0.26100.9457/microsoft.windows.sdk.buildtools.10.0.26100.9457.nupkg",
+  "sha256": "4c2e0d85f3490e7f7c065c35b4c47fe913b1bc9627e9711ae349b2cdc7edc791",
+  "tools": "bin/10.0.26100.0/x64",
+  "signatureVerifiedOn": "2026-10-29",
+  "author": "Microsoft Corporation"
+}

@@ -12,6 +12,7 @@ sealed class TrayMenuSession : IDisposable
     readonly HashSet<nint> baseline, popups = [];
     readonly HashSet<uint> threads = [];
     readonly TrayMenuPlacement? placement;
+    NativeTraySurface? nativeSurface;
     nint menuOwner;
     long deadline, lastOpen;
     bool sent, seen, disposed;
@@ -21,10 +22,15 @@ sealed class TrayMenuSession : IDisposable
     public bool EscapePressed { get; private set; }
     public bool ReturnFocusRequested { get; private set; }
     public bool PreserveSource { get; private set; }
+    internal NativeTrayOperation? NativeOperation { get; }
+    internal FrameworkElement? NativeAnchor { get; }
 
-    public TrayMenuSession(Window source, SystemTrayItem item, bool hover = false, FrameworkElement? anchor = null)
+    public TrayMenuSession(Window source, SystemTrayItem item, bool hover = false, FrameworkElement? anchor = null,
+        NativeTrayOperation? nativeOperation = null, FrameworkElement? nativeAnchor = null)
     {
         Item = item; IsHover = hover;
+        NativeOperation = nativeOperation;
+        NativeAnchor = nativeAnchor;
         this.source = source; callback = item.Window; ProcessId = item.ProcessId;
         callbackThread = Native.GetWindowThreadProcessId(callback, out _);
         threads.Add(callbackThread);
@@ -36,6 +42,13 @@ sealed class TrayMenuSession : IDisposable
     public void CompleteRequest(int grace = 900) { sent = true; deadline = Environment.TickCount64 + grace; }
     public void SetEscapeIntent(bool value) => EscapePressed = value;
     public bool Matches(SystemTrayItem item) => ReferenceEquals(item, Item) && item.Window == callback && item.ProcessId == ProcessId;
+
+    internal bool PrepareNativeAction(NativeTrayOperation operation, NativeTraySurface surface)
+    {
+        if (disposed || !ReferenceEquals(operation, NativeOperation) || operation.Stopped || !surface.IsCurrent()) return false;
+        nativeSurface = surface;
+        return true;
+    }
 
     public void RequestFocus(SystemTrayItem item)
     {
@@ -63,6 +76,7 @@ sealed class TrayMenuSession : IDisposable
     public bool AllowsForeground(nint window)
     {
         if (window == 0 || window == new WindowInteropHelper(source).Handle) return true;
+        if (nativeSurface is { } surface && window == surface.Window && surface.IsCurrent()) return true;
         if (IsSystemTray(window)) return false;
         Native.GetWindowThreadProcessId(window, out var pid);
         return RelatedWindow(window) || (pid == Environment.ProcessId && PopupInteraction.For(source).HasMenu);
@@ -78,6 +92,10 @@ sealed class TrayMenuSession : IDisposable
             PreserveSource = source.IsActive;
             return false;
         }
+        // A native resolution can still be pending after the mouse was released.
+        // Keep the originating panel alive until that single request completes
+        // or reaches its deadline. Outside input still disposes this session.
+        if (NativeOperation?.IsResolving == true) return true;
         if (!sent && !PointerPressed()) CompleteRequest();
         popups.Clear();
         foreach (var popup in VisiblePopups())
@@ -110,6 +128,7 @@ sealed class TrayMenuSession : IDisposable
 
     public bool Contains(Native.Point point)
     {
+        if (nativeSurface?.Contains(point) == true) return true;
         var window = Native.GetAncestor(WindowFromPoint(point), Native.GA_ROOT);
         if (window == 0) return false;
         if (Application.Current.Windows.OfType<Window>().Any(owner => new WindowInteropHelper(owner).Handle == window)) return false;
@@ -139,7 +158,8 @@ sealed class TrayMenuSession : IDisposable
         return false;
     }
 
-    static bool IsSystemTray(nint window) => Native.ClassOf(window) is "Shell_TrayWnd" or "Shell_SecondaryTrayWnd" or "NotifyIconOverflowWindow";
+    static bool IsSystemTray(nint window) => Native.ClassOf(window) is "Shell_TrayWnd" or "Shell_SecondaryTrayWnd"
+        or "NotifyIconOverflowWindow" or "TopLevelWindowForOverflowXamlIsland";
 
     static bool IsPopup(nint window)
     {
@@ -151,7 +171,7 @@ sealed class TrayMenuSession : IDisposable
         return (style & 0x80000000L) != 0 && (style & 0x00C00000L) == 0 && (extended & Native.WS_EX_APPWINDOW) == 0;
     }
 
-    public void Dispose() { disposed = true; popups.Clear(); }
+    public void Dispose() { disposed = true; NativeOperation?.Cancel(); popups.Clear(); }
 
     static bool PointerPressed() => (GetAsyncKeyState(1) & 0x8000) != 0 || (GetAsyncKeyState(2) & 0x8000) != 0
         || (GetAsyncKeyState(4) & 0x8000) != 0;

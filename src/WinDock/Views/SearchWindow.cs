@@ -20,8 +20,8 @@ public sealed class SearchWindow : DesktopToolWindow
     string? scopeFolder;
     string? resultError;
     string scopeName = Loc.T("searchScopeAll");
-    CancellationTokenSource? pending;
-    int version;
+    CancellationTokenSource? pending, iconRequests;
+    int version, iconVersion;
     bool opening;
 
     public SearchWindow(Settings settings, DesktopSearch search) : base(settings, Loc.T("searchTitle"), 820, 600)
@@ -76,17 +76,22 @@ public sealed class SearchWindow : DesktopToolWindow
             var selected = Selected;
             var app = selected?.Application;
             reveal.IsEnabled = selected is not null && (selected.Window != 0
-                ? !string.IsNullOrWhiteSpace(selected.Path) && File.Exists(selected.Path)
+                ? !string.IsNullOrWhiteSpace(selected.Path) && Path.IsPathFullyQualified(selected.Path)
                 : app is null || !app.IsRaw && !app.IsLauncher && app.ResolvedTarget is not null);
         };
         results.KeyDown += (_, e) => { if (e.Key == Key.Enter) { e.Handled = true; OpenSelection(); } };
         Loaded += async (_, _) =>
         {
             query.Focus();
-            try { await search.WarmAsync(); }
+            try { await search.WarmAsync(LifetimeToken); }
+            catch (OperationCanceledException) { }
             catch (Exception) { if (IsVisible && string.IsNullOrWhiteSpace(query.Text)) Status.Text = Loc.T("searchAppsUnavailable"); }
         };
-        Closed += (_, _) => { pending?.Cancel(); pending?.Dispose(); pending = null; };
+        Closed += (_, _) =>
+        {
+            pending?.Cancel(); pending?.Dispose(); pending = null;
+            iconRequests?.Cancel(); iconRequests?.Dispose(); iconRequests = null;
+        };
         RenderResults();
         UpdateScopeLabel();
     }
@@ -143,6 +148,10 @@ public sealed class SearchWindow : DesktopToolWindow
 
     void RenderResults()
     {
+        iconRequests?.Cancel(); iconRequests?.Dispose();
+        iconRequests = CancellationTokenSource.CreateLinkedTokenSource(LifetimeToken);
+        var currentIcons = ++iconVersion;
+        var iconToken = iconRequests.Token;
         var previous = Selected;
         results.Items.Clear();
         foreach (var button in filters)
@@ -156,12 +165,13 @@ public sealed class SearchWindow : DesktopToolWindow
             var visual = SearchVisual.For(hit);
             var row = Row(hit, hit.Name, hit.Detail, visual.Glyph);
             var grid = (Grid)row.Content;
-            ((TextBlock)grid.Children[0]).Foreground = SystemParameters.HighContrast ? Ink : Paint(visual.Color);
-            if (hit.Application is { } pin && ShellIcons.ForPin(pin, 48) is { } icon)
+            var glyph = (TextBlock)grid.Children[0];
+            glyph.Foreground = SystemParameters.HighContrast ? Ink : Paint(visual.Color);
+            if (hit.Application is { } pin)
             {
-                grid.Children[0].Visibility = Visibility.Collapsed;
-                var image = new Image { Source = icon, Width = 26, Height = 26, HorizontalAlignment = HorizontalAlignment.Left };
+                var image = new Image { Width = 26, Height = 26, HorizontalAlignment = HorizontalAlignment.Left, Visibility = Visibility.Collapsed };
                 RenderOptions.SetBitmapScalingMode(image, BitmapScalingMode.HighQuality); grid.Children.Add(image);
+                _ = LoadIconAsync(pin, glyph, image, currentIcons, iconToken);
             }
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             var badge = Text(visual.Label, 10, true); badge.Margin = new Thickness(12, 0, 0, 0); Grid.SetColumn(badge, 2); grid.Children.Add(badge);
@@ -177,6 +187,20 @@ public sealed class SearchWindow : DesktopToolWindow
         ((TextBlock)empty.Children[1]).Text = Loc.T(resultError is not null ? "searchUnavailableTitle"
             : string.IsNullOrWhiteSpace(query.Text) ? "searchEmptyTitle" : "searchNoResults");
         ((TextBlock)empty.Children[2]).Text = resultError ?? Loc.T(string.IsNullOrWhiteSpace(query.Text) ? "searchEmptyHint" : "searchTryAnother");
+    }
+
+    async Task LoadIconAsync(PinItem pin, TextBlock glyph, Image image, int current, CancellationToken cancellation)
+    {
+        try
+        {
+            var icon = await SearchIconLoader.ForPinAsync(pin, 48, cancellation);
+            if (icon is null || cancellation.IsCancellationRequested || current != iconVersion || LifetimeToken.IsCancellationRequested) return;
+            image.Source = icon;
+            glyph.Visibility = Visibility.Hidden;
+            image.Visibility = Visibility.Visible;
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception e) { System.Diagnostics.Trace.WriteLine("Search icon unavailable: " + e.GetType().Name); }
     }
 
     void UpdateScopeLabel()

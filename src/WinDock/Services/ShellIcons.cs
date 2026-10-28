@@ -10,8 +10,12 @@ public static class ShellIcons
 {
     static readonly Guid ImageFactoryId = new("BCC18B79-BA16-442F-80C4-8A59C30C463B");
     static readonly Guid ItemId = new("43826D1E-E718-42EE-BC55-A1E261C37BFE");
-    static readonly Dictionary<string, ImageSource?> Cache = new(StringComparer.OrdinalIgnoreCase);
-    static readonly Dictionary<string, string?> Names = new(StringComparer.OrdinalIgnoreCase);
+    const int CacheCapacity = 512;
+    const long RetryDelay = 5_000;
+    sealed record Cached<T>(T? Value, long RetryAt) where T : class;
+    static readonly object CacheGate = new();
+    static readonly Dictionary<string, Cached<ImageSource>> Cache = new(StringComparer.OrdinalIgnoreCase);
+    static readonly Dictionary<string, Cached<string>> Names = new(StringComparer.OrdinalIgnoreCase);
 
     [StructLayout(LayoutKind.Sequential)]
     struct Size
@@ -59,32 +63,38 @@ public static class ShellIcons
         return pin.ResolvedTarget is { } path ? ForPath(path, size) : null;
     }
 
-    static readonly Dictionary<string, string?> Prints = new(StringComparer.OrdinalIgnoreCase);
+    static readonly Dictionary<string, Cached<string>> Prints = new(StringComparer.OrdinalIgnoreCase);
 
     public static string? Fingerprint(string path)
     {
-        if (Prints.TryGetValue(path, out var hit)) return hit;
-        if (ForPath(path, 32) is not BitmapSource icon) return Prints[path] = null;
+        if (TryCached(Prints, path, out var hit)) return hit;
+        if (ForPath(path, 32) is not BitmapSource icon) return Remember(Prints, path, null);
         var bgra = new FormatConvertedBitmap(icon, PixelFormats.Bgra32, null, 0);
         var px = new byte[bgra.PixelWidth * bgra.PixelHeight * 4];
         bgra.CopyPixels(px, bgra.PixelWidth * 4, 0);
-        return Prints[path] = Convert.ToHexString(System.Security.Cryptography.SHA1.HashData(px));
+        return Remember(Prints, path, Convert.ToHexString(System.Security.Cryptography.SHA1.HashData(px)));
     }
 
     public static string? NameForAppId(string appId)
     {
         var key = @"shell:AppsFolder\" + appId;
-        if (Names.TryGetValue(key, out var hit)) return hit;
+        if (TryCached(Names, key, out var hit)) return hit;
+        object? obj = null;
+        nint ptr = 0;
         try
         {
             var iid = ItemId;
-            SHCreateItemFromParsingName(key, IntPtr.Zero, ref iid, out var obj);
-            ((IShellItem)obj).GetDisplayName(0, out var ptr);
+            SHCreateItemFromParsingName(key, IntPtr.Zero, ref iid, out obj);
+            ((IShellItem)obj).GetDisplayName(0, out ptr);
             var name = Marshal.PtrToStringUni(ptr);
-            Marshal.FreeCoTaskMem(ptr);
-            return Names[key] = name;
+            return Remember(Names, key, name);
         }
-        catch (Exception e) when (e is COMException or ArgumentException or IOException) { return Names[key] = null; }
+        catch (Exception e) when (e is COMException or ArgumentException or IOException) { return Remember(Names, key, null); }
+        finally
+        {
+            if (ptr != 0) Marshal.FreeCoTaskMem(ptr);
+            if (obj is not null) Marshal.ReleaseComObject(obj);
+        }
     }
 
     const int IconFlags = 0x4 | 0x100;
@@ -93,8 +103,34 @@ public static class ShellIcons
     static ImageSource? Get(string parsingName, int size, int flags = IconFlags)
     {
         var key = $"{size}|{flags}|{parsingName}";
-        if (Cache.TryGetValue(key, out var hit)) return hit;
-        return Cache[key] = Load(parsingName, size, flags);
+        if (TryCached(Cache, key, out var hit)) return hit;
+        // Shell extensions and file reads must never hold the shared cache lock.
+        // Existing synchronous callers can read cached icons while a worker loads.
+        return Remember(Cache, key, Load(parsingName, size, flags));
+    }
+
+    static bool TryCached<T>(Dictionary<string, Cached<T>> cache, string key, out T? value) where T : class
+    {
+        lock (CacheGate)
+        {
+            if (cache.TryGetValue(key, out var entry))
+            {
+                if (entry.Value is not null || Environment.TickCount64 < entry.RetryAt) { value = entry.Value; return true; }
+                cache.Remove(key);
+            }
+        }
+        value = null; return false;
+    }
+
+    static T? Remember<T>(Dictionary<string, Cached<T>> cache, string key, T? value) where T : class
+    {
+        lock (CacheGate)
+        {
+            if (cache.TryGetValue(key, out var existing) && existing.Value is not null) return existing.Value;
+            if (cache.Count >= CacheCapacity && !cache.ContainsKey(key)) cache.Remove(cache.Keys.First());
+            cache[key] = new Cached<T>(value, Environment.TickCount64 + RetryDelay);
+            return value;
+        }
     }
 
     static ImageSource? LoadImage(string path, int size)
@@ -147,19 +183,22 @@ public static class ShellIcons
         if (flags == IconFlags && Path.GetExtension(parsingName).ToLowerInvariant() is ".jpg" or ".jpeg" or ".png" or ".bmp" && File.Exists(parsingName))
             return LoadImage(parsingName, size);
 
+        object? obj = null;
+        nint bitmap = 0;
         try
         {
             var iid = ImageFactoryId;
-            SHCreateItemFromParsingName(parsingName, IntPtr.Zero, ref iid, out var obj);
-            ((IShellItemImageFactory)obj).GetImage(new Size { Width = size, Height = size }, flags, out var bitmap);
-            try
-            {
-                var source = Imaging.CreateBitmapSourceFromHBitmap(bitmap, IntPtr.Zero, Int32Rect.Empty, BitmapSizeOptions.FromEmptyOptions());
-                source.Freeze();
-                return flags == IconFlags ? Trim(source) : source;
-            }
-            finally { DeleteObject(bitmap); }
+            SHCreateItemFromParsingName(parsingName, IntPtr.Zero, ref iid, out obj);
+            ((IShellItemImageFactory)obj).GetImage(new Size { Width = size, Height = size }, flags, out bitmap);
+            var source = Imaging.CreateBitmapSourceFromHBitmap(bitmap, IntPtr.Zero, Int32Rect.Empty, BitmapSizeOptions.FromEmptyOptions());
+            source.Freeze();
+            return flags == IconFlags ? Trim(source) : source;
         }
         catch (Exception e) when (e is COMException or ArgumentException or IOException) { return null; }
+        finally
+        {
+            if (bitmap != 0) DeleteObject(bitmap);
+            if (obj is not null) Marshal.ReleaseComObject(obj);
+        }
     }
 }

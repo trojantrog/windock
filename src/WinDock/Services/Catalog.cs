@@ -13,33 +13,37 @@ public static class Catalog
 
     static readonly string Explorer = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "explorer.exe");
 
-    public static List<CatalogEntry> Load()
+    public static List<CatalogEntry> Load(bool createIconFiles = true)
     {
         var entries = new List<CatalogEntry>();
         Safe(() => entries.AddRange(StartMenu.Scan().Select(a =>
             new CatalogEntry(a.Name, Programs, a.Path, () => new PinItem { Name = a.Name, Target = a.Path }))));
         Safe(() => entries.AddRange(AppsFolder.Store().Select(a =>
-            new CatalogEntry(a.Name, Store, @"shell:AppsFolder\" + a.AppId, () => StoreItem(a)))));
-        Safe(() => entries.AddRange(GameLibraries.Steam().Select(g =>
-            new CatalogEntry(g.Name, Steam, g.IconPath ?? SteamExe(), () => SteamItem(g)))));
+            new CatalogEntry(a.Name, Store, @"shell:AppsFolder\" + a.AppId, () => StoreItem(a, createIconFiles)))));
+        Safe(() =>
+        {
+            var steamIcon = SteamExe();
+            entries.AddRange(GameLibraries.Steam().Select(g =>
+                new CatalogEntry(g.Name, Steam, g.IconPath ?? steamIcon, () => SteamItem(g, createIconFiles, steamIcon))));
+        });
         Safe(() => entries.AddRange(GameLibraries.Epic().Select(g =>
-            new CatalogEntry(g.Name, Epic, g.Executable ?? Explorer, () => EpicItem(g)))));
+            new CatalogEntry(g.Name, Epic, g.Executable ?? Explorer, () => EpicItem(g, createIconFiles)))));
         return entries;
     }
 
-    static PinItem StoreItem(StoreApp app) => new()
+    static PinItem StoreItem(StoreApp app, bool createIconFiles) => new()
     {
         Name = app.Name,
         Target = Explorer,
         Args = @"shell:AppsFolder\" + app.AppId,
         AppId = app.AppId,
-        Icon = IconFiles.FromParsingName("store-" + app.AppId, @"shell:AppsFolder\" + app.AppId)
+        Icon = createIconFiles ? IconFiles.FromParsingName("store-" + app.AppId, @"shell:AppsFolder\" + app.AppId) : null
     };
 
-    static PinItem SteamItem(SteamGame game)
+    static PinItem SteamItem(SteamGame game, bool createIconFiles, string? steamIcon)
     {
-        var icon = game.IconPath is null ? SteamExe()
-            : game.IconIsReady ? game.IconPath
+        var icon = game.IconPath is null ? steamIcon
+            : game.IconIsReady || !createIconFiles ? game.IconPath
             : IconFiles.FromImageFile("steam-" + game.Id, game.IconPath);
         return new PinItem
         {
@@ -51,13 +55,13 @@ public static class Catalog
         };
     }
 
-    static PinItem EpicItem(EpicGame game) => new()
+    static PinItem EpicItem(EpicGame game, bool createIconFiles) => new()
     {
         Name = game.Name,
         Target = Explorer,
         Args = $"com.epicgames.launcher://apps/{game.Namespace}%3A{game.ItemId}%3A{game.AppName}?action=launch&silent=true",
         AppId = $"WinDock.Epic.{game.AppName}",
-        Icon = game.Executable is null ? null : IconFiles.FromParsingName("epic-" + game.AppName, game.Executable)
+        Icon = game.Executable is null ? null : createIconFiles ? IconFiles.FromParsingName("epic-" + game.AppName, game.Executable) : game.Executable
     };
 
     static string? SteamExe() =>

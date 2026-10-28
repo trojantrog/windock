@@ -47,7 +47,7 @@ public sealed class DesktopSearch
     readonly object catalogGate = new();
     Task<List<SearchEntry>>? applications, previousApplications, overdueApplications;
     long catalogStarted;
-    public Task WarmAsync() => ApplicationCatalog();
+    public Task WarmAsync(CancellationToken cancellation = default) => ApplicationCatalog().WaitAsync(cancellation);
 
     Task<List<SearchEntry>> ApplicationCatalog()
     {
@@ -96,7 +96,7 @@ public sealed class DesktopSearch
         }
 
         var entries = new List<SearchEntry>();
-        foreach (var entry in Catalog.Load())
+        foreach (var entry in Catalog.Load(createIconFiles: false))
         {
             var aliases = new List<string> { entry.Name };
             // Keep the original shortcut as the launch target: its arguments and

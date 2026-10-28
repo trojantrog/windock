@@ -22,6 +22,7 @@ public sealed class SystemTrayItem : INotifyPropertyChanged
     internal bool VersionObserved { get; set; }
     internal bool IconObserved { get; set; }
     internal bool TipObserved { get; set; }
+    internal bool NativeSnapshotObserved { get; set; }
     internal long ProcessStarted { get; set; }
     public Guid Guid { get; internal set; }
     public string Title { get; internal set; } = "";
@@ -68,15 +69,18 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
     bool scheduled, ready;
     int pendingBytes;
     int sessionNumber;
-    long receivedPackets, nativeLossReports, interfaceLossReports, rejectedOwners, rejectedRegistrations, confirmedCandidates;
+    long receivedPackets, nativeLossReports, interfaceLossReports, registrationPackets, rejectedOwners, rejectedRegistrations, confirmedCandidates;
+    int nativeSnapshotRecords;
+    bool snapshotPending;
     string? connectionError;
     string status = Loc.T("systemTrayOff");
-    DateTime refreshAt, recoveryAt;
+    DateTime refreshAt, recoveryAt, snapshotAt;
     public ObservableCollection<SystemTrayItem> Icons { get; } = [];
     public ObservableCollection<TrayHint> Hints { get; } = [];
     public string Status { get => status; private set { status = value; Notify(); } }
     public bool Ready { get => ready; private set { ready = value; Notify(); } }
     public bool HasStatusNotice { get; private set; }
+    internal long RegistrationGeneration { get; private set; }
     public event PropertyChangedEventHandler? PropertyChanged;
     public event Action? LayoutChanged;
     public event Action<SystemTrayItem>? FocusRequested;
@@ -107,6 +111,7 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
             var processes = Icons.Select(item => item.ProcessId).ToHashSet();
             foreach (var pid in requestedProcesses.Keys.Where(pid => !processes.Contains(pid)
                 && Environment.TickCount64 - requestedProcesses[pid] > 120_000).ToArray()) requestedProcesses.Remove(pid);
+            if (Ready) RequestNativeSnapshot();
         };
     }
 
@@ -183,6 +188,7 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
         }
         Ready = false; recovery.Stop(); ClearIcons();
         ++sessionNumber; connectionError = null;
+        snapshotAt = default;
         Interlocked.Exchange(ref receivedPackets, 0);
         Interlocked.Exchange(ref nativeLossReports, 0);
         Interlocked.Exchange(ref interfaceLossReports, 0);
@@ -203,8 +209,10 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
             if (lifetime != run || !ReferenceEquals(activeSession, session)) return;
             if (kind is 1 or 4) Interlocked.Increment(ref receivedPackets);
             else if (kind == 3) Interlocked.Increment(ref nativeLossReports);
+            if (kind == 3 || (kind == 1 && data.Length >= 4 && BitConverter.ToUInt32(data, 0) is 0 or 2))
+                Interlocked.Increment(ref registrationPackets);
             if (pending.Count >= 256 || pendingBytes + data.Length > 8 * 1024 * 1024)
-            { Interlocked.Increment(ref interfaceLossReports); pending.Clear(); pendingBytes = 0; pending.Enqueue((3, [])); }
+            { Interlocked.Increment(ref interfaceLossReports); Interlocked.Increment(ref registrationPackets); pending.Clear(); pendingBytes = 0; pending.Enqueue((3, [])); }
             pending.Enqueue((kind, data));
             pendingBytes += data.Length;
             if (scheduled) return;
@@ -253,7 +261,7 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
             : Icons.FirstOrDefault(i => i.Guid == Guid.Empty && i.Window == window && i.Id == id);
         var key = item?.Key ?? (useGuid ? guid.ToString() : $"{rawWindow:X8}:{id}:{pid}");
         if (!candidate && operation is 0 or 2)
-        { bootstrapCandidates.Remove(key); pendingVersions.Remove(key); }
+        { BumpRegistrationGeneration(); bootstrapCandidates.Remove(key); pendingVersions.Remove(key); }
         if (operation == 2) { if (item is not null && (pid == 0 || item.ProcessId == pid)) Remove(item); return; }
         if (window == 0 && item is not null && useGuid)
         { window = item.Window; pid = item.ProcessId; id = item.Id; }
@@ -409,7 +417,10 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
         if (lifetime != run || !known.TryGetValue(item.Key, out var current) || !ReferenceEquals(item, current)) return;
         Native.GetWindowThreadProcessId(item.Window, out var pid);
         if (pid != item.ProcessId || !Native.IsWindow(item.Window)) return;
-        item.ProcessPath = identity.Path; item.ApplicationName = identity.Name; item.ProcessStarted = identity.Started;
+        if (item.ProcessStarted != 0 && identity.Started != item.ProcessStarted) return;
+        if (identity.Path.Length > 0) item.ProcessPath = identity.Path;
+        if (identity.Name.Length > 0) item.ApplicationName = identity.Name;
+        if (identity.Started != 0) item.ProcessStarted = identity.Started;
         if (identity.Started != 0)
         {
             var prior = retainedHints.Where(old => old.Key == item.Key && old.Window == item.Window
@@ -427,9 +438,11 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
 
     static string ReadText(byte[] data, int offset, int characters) => Encoding.Unicode.GetString(data, offset, characters * 2).Split('\0')[0];
     void Remove(SystemTrayItem item)
-    { bootstrapCandidates.Remove(item.Key); pendingVersions.Remove(item.Key); Icons.Remove(item); known.Remove(item.Key); }
+    { BumpRegistrationGeneration(); bootstrapCandidates.Remove(item.Key); pendingVersions.Remove(item.Key); Icons.Remove(item); known.Remove(item.Key); }
     void ClearIcons()
     {
+        BumpRegistrationGeneration();
+        nativeSnapshotRecords = 0;
         retainedHints.RemoveWhere(old => !Hints.Any(hint => ReferenceEquals(hint.Icon, old)));
         foreach (var item in Icons)
             if (item.HasHint && item.ProcessStarted != 0 && Hints.Any(hint => ReferenceEquals(hint.Icon, item))) retainedHints.Add(item);
@@ -452,6 +465,83 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
             try { TrayReRegistration.Request(owners, cancellation); }
             catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception or InvalidOperationException) { }
         });
+        RequestNativeSnapshot();
+    }
+
+    void BumpRegistrationGeneration()
+    {
+        ++RegistrationGeneration;
+        Notify(nameof(RegistrationGeneration));
+    }
+
+    void RequestNativeSnapshot()
+    {
+        if (snapshotPending || DateTime.UtcNow - snapshotAt < TimeSpan.FromSeconds(30)
+            || lifetime is not { } run || activeSession is not { } session) return;
+        snapshotAt = DateTime.UtcNow;
+        snapshotPending = true;
+        _ = ReadSnapshot();
+
+        async Task ReadSnapshot()
+        {
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(run.Token);
+            timeout.CancelAfter(TimeSpan.FromSeconds(4));
+            try
+            {
+                // Let the application's initial re-registration packets settle.
+                await Task.Delay(750, timeout.Token);
+                if (!Ready || !IsCurrent(run, session)) return;
+                var generation = RegistrationGeneration;
+                var packets = Interlocked.Read(ref registrationPackets);
+                var records = await NativeTraySnapshot.ReadAsync(session.ExplorerWindow, session.ExplorerProcess, timeout.Token);
+                if (!Ready || !IsCurrent(run, session) || generation != RegistrationGeneration
+                    || packets != Interlocked.Read(ref registrationPackets) || timeout.IsCancellationRequested) return;
+                nativeSnapshotRecords = records.Count;
+                foreach (var record in records) MergeNativeRegistration(record);
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception error) when (error is InvalidOperationException or System.Runtime.InteropServices.COMException
+                or IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception) { }
+            finally { snapshotPending = false; }
+        }
+    }
+
+    void MergeNativeRegistration(NativeTrayRegistration record)
+    {
+        if (Native.GetWindowThreadProcessId(record.Window, out var pid) != record.ThreadId
+            || pid != record.ProcessId || !Native.IsWindow(record.Window)) return;
+        var key = record.Guid == Guid.Empty ? $"{unchecked((uint)record.Window):X8}:{record.Id}:{record.ProcessId}" : record.Guid.ToString();
+        var added = !known.TryGetValue(key, out var item);
+        // A historical GUID row plus GetRect does not prove current ownership:
+        // the GUID lookup ignores HWND/ID. Only supplement an association that
+        // was already observed through the live protocol; never invent one.
+        if (added && record.Guid != Guid.Empty) return;
+        if (record.Guid != Guid.Empty && (item!.ProcessStarted == 0 || item.ProcessStarted != record.ProcessStarted)) return;
+        if (!added && (item!.Window != record.Window || item.ProcessId != record.ProcessId || item.Id != record.Id
+            || (item.ProcessStarted != 0 && item.ProcessStarted != record.ProcessStarted))) return;
+        if (added)
+        {
+            if (known.Count >= 512) return;
+            item = new SystemTrayItem
+            {
+                Key = key, Window = record.Window, ProcessId = record.ProcessId, Id = record.Id, Guid = record.Guid,
+                OwnerClass = record.WindowClass, ProcessPath = record.Executable, ProcessStarted = record.ProcessStarted
+            };
+            // The inventory carries identity/display metadata, not the callback,
+            // version or NIS_HIDDEN state. Its preference is never a state mask.
+            if (pendingVersions.Remove(key, out var observedVersion))
+            { item.Version = observedVersion; item.VersionObserved = true; }
+            known[key] = item;
+            BumpRegistrationGeneration();
+        }
+        item!.NativeSnapshotObserved = true;
+        if (!item.IconObserved && item.Icon is null) item.Icon = record.Icon;
+        if (!item.TipObserved && item.Tip.Length == 0) item.Tip = record.Tip;
+        if (item.ProcessPath.Length == 0) item.ProcessPath = record.Executable;
+        if (item.ProcessStarted == 0) item.ProcessStarted = record.ProcessStarted;
+        item.Title = TrayIdentity.Name(item); item.Refresh();
+        if (added) { Icons.Add(item); _ = ResolveIdentity(item); }
+        if (!item.CallbackObserved || !item.VersionObserved) RequestRegistration(item.Window, item.ProcessId);
     }
 
     public bool Invoke(SystemTrayItem item, uint message, Point physicalPoint)
@@ -494,6 +584,8 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
         rejectedOwners,
         rejectedRegistrations,
         confirmedCandidates,
+        nativeSnapshotRecords,
+        nativeSnapshotStatus = NativeTraySnapshot.Status,
         icons = Icons.Select(item => new
         {
             window = item.Window.ToInt64(),
@@ -508,6 +600,7 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
             registrationObserved = item.RegistrationObserved,
             callbackObserved = item.CallbackObserved,
             versionObserved = item.VersionObserved,
+            nativeSnapshotObserved = item.NativeSnapshotObserved,
             hidden = item.Hidden,
             hasIcon = item.Icon is not null,
             canInvoke = item.CanInvoke

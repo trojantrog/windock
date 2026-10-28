@@ -11,7 +11,7 @@ internal sealed record TrayProcessIdentity(string Path, string Name, long Starte
 
 internal sealed class TrayIdentity
 {
-    readonly Dictionary<uint, Task<TrayProcessIdentity>> processes = [];
+    readonly Dictionary<uint, (long Started, Task<TrayProcessIdentity> Read)> processes = [];
     readonly SemaphoreSlim reads = new(4);
 
     [DllImport("kernel32.dll")]
@@ -19,14 +19,31 @@ internal sealed class TrayIdentity
 
     public Task<TrayProcessIdentity> Read(uint pid)
     {
-        if (!processes.TryGetValue(pid, out var task)) processes[pid] = task = ReadAsync(pid);
+        // A PID can be reused while a previous icon/cache entry is still being
+        // pruned. Reuse metadata only for the same live process incarnation.
+        var handle = Native.OpenProcess(0x1000, false, (int)pid);
+        long started = 0;
+        if (handle != 0)
+        {
+            try { GetProcessTimes(handle, out started, out _, out _, out _); }
+            finally { Native.CloseHandle(handle); }
+        }
+        if (started != 0 && processes.TryGetValue(pid, out var cached) && cached.Started == started
+            && (!cached.Read.IsCompleted || (cached.Read.IsCompletedSuccessfully && cached.Read.Result.Started == started))) return cached.Read;
+        var task = ReadAsync(pid, started);
+        if (started != 0) processes[pid] = (started, task);
+        else processes.Remove(pid);
         return task;
     }
 
-    async Task<TrayProcessIdentity> ReadAsync(uint pid)
+    async Task<TrayProcessIdentity> ReadAsync(uint pid, long expectedStarted)
     {
         await reads.WaitAsync().ConfigureAwait(false);
-        try { return await Task.Run(() => ReadProcess(pid)).ConfigureAwait(false); }
+        try
+        {
+            var identity = await Task.Run(() => ReadProcess(pid)).ConfigureAwait(false);
+            return expectedStarted != 0 && identity.Started != expectedStarted ? TrayProcessIdentity.Unknown : identity;
+        }
         finally { reads.Release(); }
     }
 

@@ -109,6 +109,7 @@ sealed class PopupInteraction : IDisposable
         if (owner is not null)
         {
             var state = For(owner);
+            state.external?.NativeOperation?.TryCancelPending();
             ++state.generation;
             state.Signal();
         }
@@ -159,6 +160,34 @@ sealed class PopupInteraction : IDisposable
         external.CompleteRequest();
         poll.Start();
         Signal(); UpdateWatchers();
+    }
+
+    internal void BeginNativeTrayAction(SystemTrayItem item, FrameworkElement anchor, NativeTrayOperation operation)
+    {
+        if (disposed || !window.IsVisible) { operation.Cancel(); return; }
+        ++generation;
+        external?.Dispose();
+        acceptInactive = false;
+        external = new(window, item, anchor: SystemTrayHub.Current?.Options.TrayMenuPlacement == true ? anchor : null,
+            nativeOperation: operation, nativeAnchor: anchor);
+        poll.Start();
+        Signal(); UpdateWatchers();
+    }
+
+    internal bool PrepareNativeTrayAction(NativeTrayOperation operation, NativeTraySurface surface) =>
+        !disposed && window.IsVisible && !HasMenu && !HasDropDown(window)
+        && external?.PrepareNativeAction(operation, surface) == true;
+
+    internal void CompleteNativeTrayAction(NativeTrayOperation operation, NativeTrayActionResult result)
+    {
+        if (external is not { } session || !ReferenceEquals(session.NativeOperation, operation)) return;
+        if (result is NativeTrayActionResult.Requested or NativeTrayActionResult.Pending) session.CompleteRequest();
+        else EndTrayMenu(window.IsActive);
+    }
+
+    internal void CancelPendingNativeAction()
+    {
+        if (external?.NativeOperation?.TryCancelPending() == true) EndTrayMenu(window.IsActive);
     }
 
     public void CompleteTrayHover(SystemTrayItem item)
@@ -213,6 +242,16 @@ sealed class PopupInteraction : IDisposable
 
     void PointerDown(object sender, MouseButtonEventArgs e)
     {
+        if (external?.NativeOperation is { } pending)
+        {
+            var anchor = external.NativeAnchor;
+            var target = e.OriginalSource as DependencyObject;
+            var sameDoubleClick = e.ChangedButton == MouseButton.Left && e.ClickCount % 2 == 0 && anchor is not null
+                && (ReferenceEquals(target, anchor) || target is Visual or System.Windows.Media.Media3D.Visual3D && anchor.IsAncestorOf(target));
+            if (!sameDoubleClick) pending.TryCancelPending();
+            // Cancel without ending the session synchronously: rebuilding the
+            // panel here could remove the target during PreviewMouseDown.
+        }
         if (unchecked((uint)e.Timestamp) != inputTime)
         {
             inputTime = unchecked((uint)e.Timestamp); ++inputSequence; dismissedAnchor = null;
@@ -227,7 +266,13 @@ sealed class PopupInteraction : IDisposable
         if (press.Sequence == inputSequence && press.Button == e.ChangedButton) e.Handled = true;
     }
 
-    void KeyDown(object sender, KeyEventArgs e) => ResetDismissalGesture();
+    void KeyDown(object sender, KeyEventArgs e)
+    {
+        ResetDismissalGesture();
+        if (e.Key == Key.Escape) CancelPendingNativeAction();
+        // Leave Escape unhandled so flyouts and child controls keep their
+        // existing close behavior, including when no native request is pending.
+    }
 
     public static void ResetDismissalGesture() => dismissedAnchor = null;
 
@@ -270,6 +315,9 @@ sealed class PopupInteraction : IDisposable
     void OutsidePointer(Native.Point point)
     {
         if (keepOpen?.Invoke() == true) return;
+        // Cancel the pending native commit at the observed input boundary,
+        // before the deferred dismissal competes with a worker's UI handoff.
+        external?.NativeOperation?.Cancel();
         if (Anchor is { } anchor && Contains(anchor, point))
             dismissedAnchor = (new(anchor), inputSequence);
         acceptInactive = false;
