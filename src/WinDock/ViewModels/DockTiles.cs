@@ -70,7 +70,7 @@ public sealed partial class AppTile : DockTile, IDisposable
     public bool IsFolder => Folder is not null;
     public string? Exe { get; init; }
     public string? AppId { get; init; }
-    public bool HasBadge => Badge != 0;
+    public bool HasBadge => ShowBadge && Badge != 0;
     public string BadgeText => Badge < 0 ? "" : Badge > 99 ? "99+" : Badge.ToString();
 
     public IEnumerable<string?> BadgeIds => match.Ids.Append(AppId).Append(Pin?.AppId).Concat(Windows.Select(w => w.AppId));
@@ -86,6 +86,10 @@ public sealed partial class AppTile : DockTile, IDisposable
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(HasBadge), nameof(BadgeText))]
     int badge;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasBadge))]
+    bool showBadge = true;
 
     public bool IsRunning => Windows.Count > 0;
 

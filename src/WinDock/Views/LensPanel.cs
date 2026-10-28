@@ -18,6 +18,10 @@ public sealed class LensPanel : Panel
     public static readonly DependencyProperty GapProperty = Value(nameof(Gap), 8.0, FrameworkPropertyMetadataOptions.AffectsMeasure);
     public static readonly DependencyProperty CornerProperty = Value(nameof(Corner), 22.0, FrameworkPropertyMetadataOptions.AffectsRender);
     public static readonly DependencyProperty StrokeWidthProperty = Value(nameof(StrokeWidth), 1.0, FrameworkPropertyMetadataOptions.AffectsRender);
+    public static readonly DependencyProperty SurfaceOpacityProperty = Value(nameof(SurfaceOpacity), 0.9, FrameworkPropertyMetadataOptions.AffectsRender);
+    public static readonly DependencyProperty IndicatorSizeProperty = Value(nameof(IndicatorSize), 4, FrameworkPropertyMetadataOptions.AffectsRender);
+    public static readonly DependencyProperty IndicatorStyleProperty = DependencyProperty.Register(nameof(IndicatorStyle), typeof(string), typeof(LensPanel),
+        new FrameworkPropertyMetadata("line", FrameworkPropertyMetadataOptions.AffectsRender));
 
     public static readonly DependencyProperty ModeProperty = DependencyProperty.Register(nameof(Mode), typeof(LensMode), typeof(LensPanel),
         new FrameworkPropertyMetadata(LensMode.Magnify, FrameworkPropertyMetadataOptions.AffectsArrange));
@@ -79,6 +83,9 @@ public sealed class LensPanel : Panel
     public double Gap { get => (double)GetValue(GapProperty); set => SetValue(GapProperty, value); }
     public double Corner { get => (double)GetValue(CornerProperty); set => SetValue(CornerProperty, value); }
     public double StrokeWidth { get => (double)GetValue(StrokeWidthProperty); set => SetValue(StrokeWidthProperty, value); }
+    public double SurfaceOpacity { get => (double)GetValue(SurfaceOpacityProperty); set => SetValue(SurfaceOpacityProperty, value); }
+    public double IndicatorSize { get => (double)GetValue(IndicatorSizeProperty); set => SetValue(IndicatorSizeProperty, value); }
+    public string IndicatorStyle { get => (string)GetValue(IndicatorStyleProperty); set => SetValue(IndicatorStyleProperty, value); }
     public LensMode Mode { get => (LensMode)GetValue(ModeProperty); set => SetValue(ModeProperty, value); }
     public Thickness Inset { get => (Thickness)GetValue(InsetProperty); set => SetValue(InsetProperty, value); }
     public Brush? BarBrush { get => (Brush?)GetValue(BarBrushProperty); set => SetValue(BarBrushProperty, value); }
@@ -193,6 +200,7 @@ public sealed class LensPanel : Panel
         if (Amplitude > 0.01 && Mode != LensMode.None)
             dc.DrawRectangle(Catcher, null, new Rect(bar.Left, 0, bar.Width, Math.Max(0, bar.Top)));
 
+        dc.PushOpacity(Math.Clamp(SurfaceOpacity, 0, 1));
         if (ShadowBrush is { } shadow)
             for (var k = 1; k <= 3; k++)
             {
@@ -207,13 +215,26 @@ public sealed class LensPanel : Panel
         inner.Inflate(-StrokeWidth / 2, -StrokeWidth / 2);
         dc.DrawRoundedRectangle(BarBrush, pen, inner, corner, corner);
         if (GlowBrush is { } glow) dc.DrawRoundedRectangle(glow, null, inner, corner, corner);
+        dc.Pop();
 
         foreach (var (center, kind) in indicators)
         {
-            if (kind == 2 && FocusBrush is { } focus)
-                dc.DrawRoundedRectangle(focus, null, new Rect(center.X - 7, center.Y - 2, 14, 4), 2, 2);
-            else if (IndicatorBrush is { } dot)
-                dc.DrawEllipse(dot, null, center, 2.2, 2.2);
+            if (IndicatorStyle == "none") continue;
+            var ink = kind == 2 ? FocusBrush ?? IndicatorBrush : IndicatorBrush;
+            if (ink is null) continue;
+            var size = Math.Clamp(IndicatorSize, 1, 8);
+            var active = kind == 2;
+            if (IndicatorStyle == "dot") dc.DrawEllipse(ink, null, center, size * (active ? 0.65 : 0.5), size * (active ? 0.65 : 0.5));
+            else if (IndicatorStyle == "square")
+            {
+                var side = size * (active ? 1.3 : 1);
+                dc.DrawRoundedRectangle(ink, null, new Rect(center.X - side / 2, center.Y - side / 2, side, side), 1, 1);
+            }
+            else
+            {
+                var width = size * (active ? 3.5 : 1.6);
+                dc.DrawRoundedRectangle(ink, null, new Rect(center.X - width / 2, center.Y - size / 2, width, size), size / 2, size / 2);
+            }
         }
     }
 

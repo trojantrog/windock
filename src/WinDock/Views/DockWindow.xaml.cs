@@ -17,7 +17,7 @@ namespace WinDock.Views;
 
 public partial class DockWindow : Window
 {
-    const int BottomGap = 6;
+    double BottomGap => vm.Options.BottomMargin * fit;
     const int AbmNew = 0, AbmRemove = 1, AbmQueryPos = 2, AbmSetPos = 3, AbeBottom = 3, AbnPosChanged = 1;
     const int WmDisplayChange = 0x7E;
 
@@ -123,8 +123,10 @@ public partial class DockWindow : Window
     }
 
     double IconSize => Math.Round(vm.Options.IconSize * fit);
-    double Gap => Math.Round(IconSize * 0.17);
-    Thickness Inset => new(Math.Round(IconSize * 0.26), Math.Round(IconSize * 0.2), Math.Round(IconSize * 0.26), Math.Round(IconSize * 0.27));
+    double Gap => Math.Round(vm.Options.IconGap * fit);
+    Thickness Inset => new(Math.Round((vm.Options.PlatePadding + 4) * fit), Math.Round(vm.Options.PlatePadding * fit),
+        Math.Round((vm.Options.PlatePadding + 4) * fit), Math.Round(Math.Max(vm.Options.PlatePadding,
+            vm.Options.IndicatorStyle == "none" ? 0 : vm.Options.IndicatorSize + 4) * fit));
     double BarHeight => IconSize + Inset.Top + Inset.Bottom;
 
     protected override void OnSourceInitialized(EventArgs e)
@@ -151,9 +153,10 @@ public partial class DockWindow : Window
         Resources["IconSize"] = IconSize;
         Resources["WideSize"] = IconSize * 2 + Gap;
         Resources["WiderSize"] = IconSize * 3 + Gap * 2;
+        Strip.Margin = new Thickness(0, 0, 0, BottomGap);
         panel.Gap = Gap;
         panel.Inset = Inset;
-        panel.Corner = Math.Round(BarHeight * Theme.Corner);
+        panel.Corner = Math.Round(vm.Options.PlateCornerRadius * fit);
         panel.Radius = vm.Options.LensWidth * (IconSize + Gap);
     }
 
@@ -163,6 +166,9 @@ public partial class DockWindow : Window
         var o = vm.Options;
         ApplySizes();
         panel.Magnification = o.Magnification;
+        panel.SurfaceOpacity = o.PlateOpacity;
+        panel.IndicatorStyle = o.IndicatorStyle;
+        panel.IndicatorSize = o.IndicatorSize * fit;
         panel.Mode = o.Lens switch
         {
             DockSettings.LensNone => LensMode.None,
@@ -193,7 +199,7 @@ public partial class DockWindow : Window
         panel.StrokeWidth = theme.StrokeWidth;
         panel.ShadowBrush = theme.Shadow is { } shadow ? Brush(shadow) : null;
         panel.IndicatorBrush = Brush(theme.Indicator ?? (dark ? "#E6FFFFFF" : "#B3000000"));
-        panel.FocusBrush = accent;
+        panel.FocusBrush = vm.Options.UseAccentIndicator ? accent : panel.IndicatorBrush;
         panel.GlowBrush = glow;
         Resources["DockLine"] = Brush(theme.Line);
         Resources["DotIdle"] = Brush(theme.DotIdle);
@@ -222,6 +228,7 @@ public partial class DockWindow : Window
 
     void OnOption(string name)
     {
+        if (name == nameof(DockOptions.ShowAppNames) && !vm.Options.ShowAppNames) NameTag.Visibility = Visibility.Collapsed;
         if (name is nameof(DockOptions.WindowMotion) or nameof(DockOptions.WindowMotionDuration))
         {
             WindowTransitions.Shared.Prepare(vm.Options.WindowMotion);
@@ -527,7 +534,7 @@ public partial class DockWindow : Window
         hovered = element;
         var name = element.DataContext switch
         {
-            AppTile app => app.Name,
+            AppTile app => vm.Options.ShowAppNames ? app.Name : null,
             StartTile s => s.Tip,
             UtilityTile utility => utility.Tip,
             _ => null

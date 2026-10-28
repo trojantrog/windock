@@ -18,6 +18,10 @@ public sealed partial class DockViewModel : ObservableObject, IDisposable
     readonly bool owner;
     readonly string? screen;
     readonly Dictionary<string, DockTile> cache = [];
+    readonly Dictionary<string, long> runSequence = [];
+    readonly Dictionary<string, long> runUsed = [];
+    long orderSequence;
+    nint lastForeground;
     readonly Dictionary<string, WidgetTile> widgets = [];
     readonly DispatcherTimer tick = new();
     readonly HashSet<WidgetTile> lastShown = [];
@@ -151,7 +155,8 @@ public sealed partial class DockViewModel : ObservableObject, IDisposable
             tracker.ShowAll();
             shell.SetHiddenWindows([]);
         }
-        if (name is nameof(DockOptions.ReplaceTaskbar) or nameof(DockOptions.SearchEnabled) or nameof(DockOptions.OrganizerEnabled)) Rebuild();
+        if (name is nameof(DockOptions.ReplaceTaskbar) or nameof(DockOptions.SearchEnabled) or nameof(DockOptions.OrganizerEnabled)
+            or nameof(DockOptions.RunningOrder) or nameof(DockOptions.RunningPosition) or nameof(DockOptions.ShowBadges)) Rebuild();
     }
 
     void OnActiveChanged()
@@ -246,7 +251,6 @@ public sealed partial class DockViewModel : ObservableObject, IDisposable
             if (!seen.Add(key)) continue;
             pinned.Add(Pinned(key, pin));
         }
-        desired.AddRange(pinned);
 
         var assigned = pinned.ToDictionary(t => t, _ => new List<AppWindow>());
         var loose = new List<(string Key, List<AppWindow> Windows)>();
@@ -263,15 +267,41 @@ public sealed partial class DockViewModel : ObservableObject, IDisposable
         }
 
         StackAlike(loose);
+        var liveKeys = loose.Select(group => group.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var key in runSequence.Keys.Where(key => !liveKeys.Contains(key)).ToArray()) { runSequence.Remove(key); runUsed.Remove(key); }
+        foreach (var group in loose)
+        {
+            if (!runSequence.ContainsKey(group.Key)) runSequence[group.Key] = ++orderSequence;
+            if (tracker.Foreground != lastForeground && group.Windows.Any(window => window.Handle == tracker.Foreground))
+                runUsed[group.Key] = ++orderSequence;
+        }
+        lastForeground = tracker.Foreground;
+        loose = Options.RunningOrder switch
+        {
+            "name" => loose.OrderBy(group => ((AppTile)Get(group.Key, () => RunningTile(group.Key, group.Windows[0]))).Name, StringComparer.CurrentCultureIgnoreCase).ToList(),
+            "recent" => loose.OrderByDescending(group => runUsed.GetValueOrDefault(group.Key)).ThenBy(group => runSequence[group.Key]).ToList(),
+            _ => loose.OrderBy(group => runSequence[group.Key]).ToList()
+        };
         var running = loose.Select(g => (AppTile)Get(g.Key, () => RunningTile(g.Key, g.Windows[0]))).ToList();
-        if (running.Count > 0) desired.Add(Get("sep:run", () => new SeparatorTile("sep:run")));
-        desired.AddRange(running);
+        if (Options.RunningPosition == "before-pins")
+        {
+            desired.AddRange(running);
+            if (running.Count > 0 && pinned.Count > 0) desired.Add(Get("sep:run", () => new SeparatorTile("sep:run")));
+            desired.AddRange(pinned);
+        }
+        else
+        {
+            desired.AddRange(pinned);
+            if (running.Count > 0 && pinned.Count > 0) desired.Add(Get("sep:run", () => new SeparatorTile("sep:run")));
+            desired.AddRange(running);
+        }
 
         var foreground = tracker.Foreground;
         foreach (var (tile, list) in assigned.Select(p => (p.Key, p.Value)).Concat(running.Select((t, i) => (t, loose[i].Windows))))
         {
             if (!tile.Windows.SequenceEqual(list)) tile.Windows = list;
             tile.IsFocused = list.Any(w => w.Handle == foreground);
+            tile.ShowBadge = Options.ShowBadges;
             if (!tile.IsFolder) tile.Badge = BadgeOf(tile);
         }
 

@@ -61,6 +61,7 @@ public partial class ConfigWindow : Window
     public void Open()
     {
         FillScreens();
+        ShowTab(dock: true);
         Show();
         Topmost = true;
         Activate();
