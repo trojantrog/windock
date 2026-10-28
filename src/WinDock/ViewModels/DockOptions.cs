@@ -34,6 +34,18 @@ public sealed class DockOptions : ObservableObject
     public double Magnification { get => D.Magnification; set => Set(() => D.Magnification = Math.Round(value, 2)); }
     public double LensWidth { get => D.LensWidth; set => Set(() => D.LensWidth = Math.Round(value, 2)); }
     public double IconSize { get => D.IconSize; set => Set(() => D.IconSize = Math.Round(value)); }
+    public double IconGap { get => D.IconGap; set => Set(() => D.IconGap = Math.Round(value)); }
+    public double PlateOpacity { get => D.PlateOpacity; set => Set(() => D.PlateOpacity = Math.Round(value, 2)); }
+    public double PlatePadding { get => D.PlatePadding; set => Set(() => D.PlatePadding = Math.Round(value)); }
+    public double PlateCornerRadius { get => D.PlateCornerRadius; set => Set(() => D.PlateCornerRadius = Math.Round(value)); }
+    public double BottomMargin { get => D.BottomMargin; set => Set(() => D.BottomMargin = Math.Round(value)); }
+    public string RunningOrder { get => D.RunningOrder; set => Set(() => D.RunningOrder = value); }
+    public string RunningPosition { get => D.RunningPosition; set => Set(() => D.RunningPosition = value); }
+    public string IndicatorStyle { get => D.IndicatorStyle; set => Set(() => D.IndicatorStyle = value); }
+    public double IndicatorSize { get => D.IndicatorSize; set => Set(() => D.IndicatorSize = Math.Round(value)); }
+    public bool UseAccentIndicator { get => D.UseAccentIndicator; set => Set(() => D.UseAccentIndicator = value); }
+    public bool ShowBadges { get => D.ShowBadges; set => Set(() => D.ShowBadges = value); }
+    public bool ShowAppNames { get => D.ShowAppNames; set => Set(() => D.ShowAppNames = value); }
     public string Lens { get => D.Lens; set => Set(() => D.Lens = value, nameof(LensNone), nameof(LensScale), nameof(LensMagnify)); }
     public string Theme { get => D.Theme; set => Set(() => D.Theme = value); }
     public string? Screen { get => D.Screen; set => Set(() => D.Screen = value); }
@@ -45,10 +57,24 @@ public sealed class DockOptions : ObservableObject
     public double AnimationStrength { get => D.AnimationStrength; set => Set(() => D.AnimationStrength = Math.Round(value, 2)); }
     public bool WindowMotion { get => D.WindowMotion; set => Set(() => D.WindowMotion = value); }
     public int WindowMotionDuration { get => D.WindowMotionDuration; set => Set(() => D.WindowMotionDuration = value); }
+    public bool WindowOpenAnimation { get => D.WindowOpenAnimation; set => Set(() => D.WindowOpenAnimation = value); }
+    public int WindowOpenDuration { get => D.WindowOpenDuration; set => Set(() => D.WindowOpenDuration = value); }
     public bool SearchEnabled { get => D.SearchEnabled; set => Set(() => D.SearchEnabled = value); }
     public bool OrganizerEnabled { get => D.OrganizerEnabled; set => Set(() => D.OrganizerEnabled = value); }
     public bool SystemTrayEnabled { get => D.SystemTrayEnabled; set => Set(() => D.SystemTrayEnabled = value); }
     public bool TrayPinned { get => D.TrayPinned; set => Set(() => D.TrayPinned = value); }
+    public double TrayIconSize { get => D.TrayIconSize; set => Set(() => D.TrayIconSize = Math.Round(value)); }
+    public int TrayColumns { get => D.TrayColumns; set => Set(() => D.TrayColumns = value); }
+    public bool TrayShowNames { get => D.TrayShowNames; set => Set(() => D.TrayShowNames = value); }
+    public string TraySort { get => D.TraySort; set => Set(() => D.TraySort = value); }
+    public IReadOnlyList<string> TrayPinnedIds => D.TrayPinnedIds;
+    public IReadOnlyList<string> TrayOrder => D.TrayOrder;
+    public void SetTrayPinned(string id, bool pinned) => Set(() =>
+    {
+        D.TrayPinnedIds.RemoveAll(key => key.Equals(id, StringComparison.OrdinalIgnoreCase));
+        if (pinned) D.TrayPinnedIds.Add(id);
+    }, name: nameof(TrayPinnedIds));
+    public void SetTrayOrder(IEnumerable<string> ids) => Set(() => D.TrayOrder = ids.ToList(), name: nameof(TrayOrder));
 
     string? newVersion;
     string searchShortcutStatus = "";
