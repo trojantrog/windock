@@ -1,6 +1,6 @@
 # WinDock 中文版
 
-基于 [Breno Alvim 的 WinDock 0.5.0](https://github.com/obrenoalvim/windock) 维护的分支，增加简体中文、Everything 搜索和 PecoFence 收纳管理。当前版本为 `0.6.0-preview.5`。
+基于 [Breno Alvim 的 WinDock 0.5.0](https://github.com/obrenoalvim/windock) 维护的分支，增加简体中文、Everything 搜索和 PecoFence 收纳管理。当前版本为 `0.6.0-preview.7`。
 
 ## 使用
 
@@ -42,32 +42,45 @@
 
 启动图标动效改为 360 毫秒的短抬升和轻微回落，默认保留关闭状态；可在设置中启用。浮窗内容用 160 毫秒进入，Dock 图标分批出现总长不超过 260 毫秒。悬停位置通过按实际帧间隔计算的临界阻尼弹簧平滑跟随，稳定后停止逐帧更新。系统关闭动画时跳过这些动效。
 
-新增从 Dock 最小化和恢复窗口的整窗变形动画，默认时长 320 毫秒，可在设置中关闭或调整至 240–440 毫秒。动画将窗口快照收向对应图标，恢复时反向展开；连续点击可反向过渡。快照只保留在内存中，最多 4 份、96 MiB，3 分钟后过期。独立恢复进程负责在动画中断或 Dock 异常退出时恢复窗口可见性。
+整窗动画预览版已接入 Windows 原生动画时间线：打开和恢复从 Dock 图标展开，最小化收向图标，关闭采用短距离下移、轻微收缩和淡出。默认时长分别为 240、240、320、180 毫秒，四类动作可独立开关和调整。设置还提供运动曲线、关闭幅度与淡出延后程度。
 
-自定义动画只覆盖通过 Dock 最小化的受支持窗口及其缓存内恢复。首次打开应用、系统最小化按钮和快捷键、没有可用快照的恢复仍使用系统行为。全屏、受保护、透明或无法获取有效快照的窗口会退回系统行为。此版本尚未完成运行验证；预览画质、跨屏行为和窗口兼容性仍需确认。
+功能默认关闭，在“Dock 设置 → 动画”中点击“启用到本次登录”，通过正常的 Windows 管理员确认后连接。仅适配经完整文件校验的 `udwm.dll 10.0.26100.9949`。本版没有安装提权启动任务，注销或重启后需再次启用。旧截图覆盖层已停止由 Dock 调用，原生组件不可用时使用系统动画。
+
+四类普通动作的代码路径已实现，尚未验证实际桌面效果。首次画面、关闭内容、快速反向、圆角阴影和跨屏仍有兼容性风险；组件运行在 DWM 内部，异常可能引起桌面闪黑或会话中断。关闭此选项或退出 WinDock 可停止新的自定义过渡，注销可完全卸载本次加载的组件。适用范围、启用方法及回滚见 [整窗动画说明](docs/native-window-animation.md)。
 
 ### 独立托盘
 
-在 Dock 设置中开启“启用独立托盘（预览）”后，可显示后台应用提供给 Windows 的托盘图标、悬停说明及托盘提示。点击和菜单操作交还原应用处理。可选择在主屏左下角常驻；空间不足时收起，避免挤动主 Dock。点击 Dock 的托盘入口不再临时唤出整条 Windows 任务栏。
+在 Dock 设置中开启“独立托盘”后，可显示后台应用提供给 Windows 的托盘图标、悬停说明及托盘提示。默认使用紧凑图标网格，完整名称与动态状态在悬停时显示。点击和菜单操作交还原应用处理。可选择在主屏左下角常驻；空间不足时收起，避免挤动主 Dock。点击 Dock 的托盘入口不会临时唤出整条 Windows 任务栏。
+
+通过“更多 → 整理图标”调整顺序和选择常驻图标。正常模式保留应用的原生右键菜单；整理模式用于拖动和固定。名称显示、图标大小、网格列数和排序可在 Dock 设置中调整。刷新、最近提示和通知中心收在菜单中，正常连接时不再显示状态说明。
 
 此功能默认关闭。开启后会把随程序提供的本机组件加载到 Explorer 的托盘线程，关闭功能或退出 WinDock 会断开连接。组件在本机从源码编译，目前没有数字签名；遇到 Windows 或安全软件阻止时，不应绕过检查。该功能与隐藏 Windows 任务栏的设置相互独立。
 
-图标蓝点表示本次连接收到了应用的托盘提示，不代表未读消息数。最近 50 条提示仅保存在内存中；现代 Windows 通知中心仍由系统提供。部分应用需要重新打开才会重新登记图标；部分原生菜单仍可能出现在 Windows 原任务栏附近。当前只支持 x64，Windows 更新可能影响兼容性。完整行为与限制见 [独立托盘说明](docs/system-tray.md)。
+图标蓝点表示本次连接收到了应用的托盘提示，不代表未读消息数。最近 50 条提示仅保存在内存中；现代 Windows 通知中心仍由系统提供。连接或刷新时会请求运行中的应用重新登记图标，能否补齐仍取决于应用回应；历史图标记录不会被伪造成当前托盘图标。部分原生菜单仍可能出现在 Windows 原任务栏附近。当前只支持 x64，Windows 更新可能影响兼容性。完整行为与限制见 [独立托盘说明](docs/system-tray.md)。
+
+### 外观与应用显示
+
+Dock 设置提供图标大小（24–96）、间距、底板留白、圆角、不透明度和底部距离。运行标记可选择短线、圆点、方点或关闭，并调整大小和当前应用的强调色。消息角标与悬停名称可以分别关闭。
+
+未固定应用可保持顺序、按最近使用或按名称排列，位置可设在固定应用之前或之后。固定应用继续使用手动顺序。
+
+“显示后台运行的应用”默认开启。曾登记托盘、仍在运行且有窗口的程序，即使当前没有可见主窗口，也会保留在运行区；与固定或可见窗口的入口合并。后台应用状态在后台每 5 秒更新一次，点击通过应用自己的启动入口恢复，避免把微信等程序隐藏主窗口误认为已经退出。这个入口提供程序访问，不伪造托盘通知或未读数。
 
 ## 构建与检查
 
-需要 Windows 和 .NET 10 SDK。要包含独立托盘组件，还需先使用 Zig 编译本机 DLL；未构建该组件时，其他功能仍可使用。
+需要 Windows、.NET 10 SDK 和 Zig 0.15.2。发布前先编译两个本机组件，再打包整个发布目录。
 
 ```powershell
 & .\native\WinDock.TrayHook\build.ps1 -Zig 'C:\path\to\zig.exe'
+& .\native\WinDock.Motion\build.ps1 -Zig 'C:\path\to\zig.exe'
 dotnet publish src/WinDock -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish
 ```
 
-运行 `publish/WinDock.exe`，保留同目录的 `WinDock.TrayHook.x64.dll`、`.sha256` 文件和 `licenses` 目录。`--tray` 参数用于登录启动。默认配置位于 `%APPDATA%\WinDock`，固定应用和环境配置可沿用上游版本。编译成功不代表已经验证桌面交互和视觉效果。
+运行 `publish/WinDock.exe`，保留发布目录中的 DLL、`WinDock.MotionHost.exe`、校验文件和 `licenses` 目录。`--tray` 参数用于 Dock 登录启动，原生动画组件仍需按上述方式启用。默认配置位于 `%APPDATA%\WinDock`，固定应用和环境配置可沿用上游版本。编译成功不代表已经验证桌面交互和视觉效果。
 
 ## 恢复上游版本
 
-先从托盘菜单退出 WinDock，确认完整任务栏恢复，再把原版 `WinDock.exe` 放回原位置。更换程序前备份 `%APPDATA%\WinDock`。PecoFence 布局由 PecoFence 单独管理，可在收纳窗口选择已保存的布局恢复；布局快照不备份文件内容。
+先关闭整窗动画并从托盘菜单退出 WinDock，确认完整任务栏恢复，再把原版 `WinDock.exe` 放回原位置。启用过原生动画时，注销并重新登录可完全卸载组件。更换程序前备份 `%APPDATA%\WinDock`。PecoFence 布局由 PecoFence 单独管理，可在收纳窗口选择已保存的布局恢复；布局快照不备份文件内容。
 
 ## 许可
 
@@ -76,3 +89,5 @@ dotnet publish src/WinDock -c Release -r win-x64 --self-contained true -p:Publis
 背景实现参考 [WPF UI](https://github.com/lepoco/wpfui/blob/main/src/Wpf.Ui/Controls/Window/WindowBackdrop.cs) 的系统背景设置方式；动效设计参考 [Motion Primitives](https://github.com/ibelick/motion-primitives/blob/main/components/core/dock.tsx) 的弹簧跟随思路。相应许可记录见 `THIRD_PARTY_NOTICES.txt`。
 
 整窗动画的源码对照与适用边界见 [窗口动画参考记录](docs/window-motion-references.txt)。托盘实现对照了 ManagedShell、Cairo、YASB 和 Seelen，出处与许可见 [独立托盘说明](docs/system-tray.md)；YASB 的 MIT 许可随程序提供。
+
+原生动画组件使用 MinHook 1.3.4，保留其完整 [许可文件](third_party/minhook/LICENSE.txt)；原生接口的实现依据见 [组件说明](native/WinDock.Motion/README.md)。

@@ -60,6 +60,18 @@ public sealed class DockOptions : ObservableObject
     public int WindowMotionDuration { get => D.WindowMotionDuration; set => Set(() => D.WindowMotionDuration = value); }
     public bool WindowOpenAnimation { get => D.WindowOpenAnimation; set => Set(() => D.WindowOpenAnimation = value); }
     public int WindowOpenDuration { get => D.WindowOpenDuration; set => Set(() => D.WindowOpenDuration = value); }
+    public bool NativeWindowAnimations { get => D.NativeWindowAnimations; set => Set(() => D.NativeWindowAnimations = value); }
+    public bool WindowCloseAnimation { get => D.WindowCloseAnimation; set => Set(() => D.WindowCloseAnimation = value); }
+    public int WindowCloseDuration { get => D.WindowCloseDuration; set => Set(() => D.WindowCloseDuration = value); }
+    public bool WindowRestoreAnimation { get => D.WindowRestoreAnimation; set => Set(() => D.WindowRestoreAnimation = value); }
+    public int WindowRestoreDuration { get => D.WindowRestoreDuration; set => Set(() => D.WindowRestoreDuration = value); }
+    public bool WindowHideAnimation { get => D.WindowHideAnimation; set => Set(() => D.WindowHideAnimation = value); }
+    public double WindowCloseDistance { get => D.WindowCloseDistance; set => Set(() => D.WindowCloseDistance = Math.Round(value)); }
+    public double WindowCloseScale { get => D.WindowCloseScale; set => Set(() => D.WindowCloseScale = Math.Round(value, 2)); }
+    public double WindowFadeHold { get => D.WindowFadeHold; set => Set(() => D.WindowFadeHold = Math.Round(value, 2)); }
+    public string WindowMotionCurve { get => D.WindowMotionCurve; set => Set(() => D.WindowMotionCurve = value); }
+    string windowAnimationStatus = "";
+    public string WindowAnimationStatus { get => windowAnimationStatus; set => SetProperty(ref windowAnimationStatus, value); }
     public bool SearchEnabled { get => D.SearchEnabled; set => Set(() => D.SearchEnabled = value); }
     public bool OrganizerEnabled { get => D.OrganizerEnabled; set => Set(() => D.OrganizerEnabled = value); }
     public bool SystemTrayEnabled { get => D.SystemTrayEnabled; set => Set(() => D.SystemTrayEnabled = value); }

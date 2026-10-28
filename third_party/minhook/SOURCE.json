@@ -1,0 +1,8 @@
+{
+  "repository": "https://github.com/TsudaKageyu/minhook",
+  "release": "v1.3.4",
+  "commit": "c3fcafdc10146beb5919319d0683e44e3c30d537",
+  "releaseUrl": "https://github.com/TsudaKageyu/minhook/releases/tag/v1.3.4",
+  "licenseFile": "LICENSE.txt",
+  "modifications": "None; only the x64 build sources and their headers are included."
+}

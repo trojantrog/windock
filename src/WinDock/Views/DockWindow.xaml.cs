@@ -77,7 +77,6 @@ public partial class DockWindow : Window
         vm.Switched += OnSwitched;
         vm.Options.Changed += OnOption;
         vm.Tracker.Changed += CheckFullscreen;
-        vm.Tracker.Changed += WindowTransitions.Shared.ObserveWindows;
         vm.Tracker.Reshaped += CheckFullscreen;
         SystemParameters.StaticPropertyChanged += OnSystemParameter;
         poll.Tick += (_, _) => Poll();
@@ -104,11 +103,11 @@ public partial class DockWindow : Window
         toastTimer.Tick += (_, _) => HideToast();
         DpiChanged += (_, _) =>
         {
-            WindowTransitions.Shared.Cancel(this, clearCache: true);
+            NativeWindowMotion.Shared.Publish();
             Dispatcher.BeginInvoke(Resize, DispatcherPriority.Loaded);
         };
         ApplyAccent(false);
-        WindowTransitions.Shared.Prepare(vm.Options.WindowMotion || vm.Options.WindowOpenAnimation);
+        Loaded += (_, _) => NativeWindowMotion.Shared.Register(this, MotionAnchors);
         poll.Start();
     }
 
@@ -117,9 +116,8 @@ public partial class DockWindow : Window
     void OnSystemParameter(object? sender, PropertyChangedEventArgs e)
     {
         if (e.PropertyName == nameof(SystemParameters.WorkArea)) Dispatcher.BeginInvoke(Place, DispatcherPriority.Background);
-        if (e.PropertyName is nameof(SystemParameters.ClientAreaAnimation) or nameof(SystemParameters.MinimizeAnimation)
-            && !WindowTransitions.WindowsAnimations)
-            WindowTransitions.Shared.Cancel(clearCache: true);
+        if (e.PropertyName is nameof(SystemParameters.ClientAreaAnimation) or nameof(SystemParameters.MinimizeAnimation))
+            NativeWindowMotion.Shared.Publish();
     }
 
     double IconSize => Math.Round(vm.Options.IconSize * fit);
@@ -229,13 +227,7 @@ public partial class DockWindow : Window
     void OnOption(string name)
     {
         if (name == nameof(DockOptions.ShowAppNames) && !vm.Options.ShowAppNames) NameTag.Visibility = Visibility.Collapsed;
-        if (name is nameof(DockOptions.WindowMotion) or nameof(DockOptions.WindowMotionDuration)
-            or nameof(DockOptions.WindowOpenAnimation) or nameof(DockOptions.WindowOpenDuration))
-        {
-            WindowTransitions.Shared.Cancel(this, clearCache: !vm.Options.WindowMotion);
-            WindowTransitions.Shared.Prepare(vm.Options.WindowMotion || vm.Options.WindowOpenAnimation);
-            return;
-        }
+        if (name.StartsWith("Window", StringComparison.Ordinal) || name == nameof(DockOptions.NativeWindowAnimations)) return;
         if (name == nameof(DockOptions.CompactWidgets))
         {
             var faces = (FaceSelector)Resources["Faces"];
@@ -345,7 +337,7 @@ public partial class DockWindow : Window
         }
         else if (msg == WmDisplayChange)
         {
-            WindowTransitions.Shared.Cancel(clearCache: true);
+            NativeWindowMotion.Shared.Publish();
             Dispatcher.BeginInvoke(Resize, DispatcherPriority.Background);
         }
         return 0;
@@ -677,9 +669,11 @@ public partial class DockWindow : Window
         if (windows.Count == 1)
         {
             var w = windows[0];
-            if (WindowTransitions.Shared.IsAnimating(w.Handle)) WindowTransitions.Shared.Reverse(w.Handle);
-            else if (w.Handle == foreground && !Native.IsIconic(w.Handle)) TransitionWindow(w.Handle, IconAnchor(element), true);
-            else ActivateWindow(w.Handle, IconAnchor(element));
+            if (!NativeWindowMotion.Shared.TryReverse(w.Handle, IconAnchor(element)))
+            {
+                if (w.Handle == foreground && !Native.IsIconic(w.Handle)) TransitionWindow(w.Handle, IconAnchor(element), true);
+                else ActivateWindow(w.Handle, IconAnchor(element));
+            }
             preview?.Hide();
             return;
         }
@@ -693,11 +687,8 @@ public partial class DockWindow : Window
 
     void Launch(AppTile app, FrameworkElement element)
     {
-        var opening = WindowLaunchObserver.Shared.Begin(app, IconAnchor(element), vm.Options.WindowOpenAnimation,
-            vm.Options.WindowOpenDuration, this);
-        var launched = false;
-        try { launched = app.Launch(); }
-        finally { opening?.Launched(launched); }
+        NativeWindowMotion.Shared.PrepareLaunch(app, IconAnchor(element));
+        var launched = app.Launch();
         if (!launched)
         {
             vm.Main.Notify(Loc.F("launchFailed", app.Name));
@@ -715,12 +706,35 @@ public partial class DockWindow : Window
         return new Rect((topLeft.X + bottomRight.X - size) / 2, (topLeft.Y + bottomRight.Y - size) / 2, size, size);
     }
 
-    void TransitionWindow(nint window, Rect anchor, bool minimized) => WindowTransitions.Shared.Request(
-        window, anchor, minimized, vm.Options.WindowMotion, vm.Options.WindowMotionDuration, this);
+    IEnumerable<NativeWindowMotion.Anchor> MotionAnchors()
+    {
+        if (!IsVisible || !IsLoaded || PresentationSource.FromVisual(this) is null) yield break;
+        var screen = screenName.GetHashCode(StringComparison.Ordinal);
+        var combined = Rect.Empty;
+        var iconWidth = 40.0;
+        foreach (var app in Strip.Items.OfType<AppTile>())
+        {
+            if (Strip.ItemContainerGenerator.ContainerFromItem(app) is not FrameworkElement element) continue;
+            var bounds = IconAnchor(element);
+            if (bounds.IsEmpty) continue;
+            combined.Union(bounds);
+            iconWidth = bounds.Width;
+            yield return new(0, 0, app.Opener()?.Exe ?? app.Exe ?? app.Pin?.ResolvedTarget, bounds, Screen: screen);
+            foreach (var window in app.Windows)
+            {
+                Native.GetWindowThreadProcessId(window.Handle, out var pid);
+                if (pid != 0) yield return new(window.Handle, unchecked((uint)pid), window.Exe, bounds, Screen: screen);
+            }
+        }
+        if (!combined.IsEmpty)
+            yield return new(0, 0, null, new Rect(combined.X + (combined.Width - iconWidth) / 2, combined.Y, iconWidth, iconWidth), 2, screen);
+    }
+
+    void TransitionWindow(nint window, Rect anchor, bool minimized) => NativeWindowMotion.Shared.RequestState(window, anchor, minimized);
 
     void ActivateWindow(nint window, Rect anchor)
     {
-        if (Native.IsIconic(window) || WindowTransitions.Shared.IsAnimating(window)) TransitionWindow(window, anchor, false);
+        if (Native.IsIconic(window)) TransitionWindow(window, anchor, false);
         else WindowTracker.Activate(window);
     }
 
@@ -902,7 +916,6 @@ public partial class DockWindow : Window
 
     void OnSwitched()
     {
-        WindowTransitions.Shared.Cancel(this);
         ApplyAccent(true);
         flyout?.Close();
         preview?.Hide();
@@ -982,7 +995,6 @@ public partial class DockWindow : Window
         if (!vm.Options.Enabled) return;
         if (fullscreen)
         {
-            WindowTransitions.Shared.Cancel(this);
             preview?.Hide();
             Hide();
         }
@@ -1187,7 +1199,7 @@ public partial class DockWindow : Window
 
     protected override void OnClosing(CancelEventArgs e)
     {
-        WindowTransitions.Shared.Cancel(this);
+        NativeWindowMotion.Shared.Unregister(this);
         Reserve(false);
         poll.Stop();
         hover.Stop();
@@ -1199,7 +1211,6 @@ public partial class DockWindow : Window
         vm.Switched -= OnSwitched;
         vm.Options.Changed -= OnOption;
         vm.Tracker.Changed -= CheckFullscreen;
-        vm.Tracker.Changed -= WindowTransitions.Shared.ObserveWindows;
         vm.Tracker.Reshaped -= CheckFullscreen;
         SystemParameters.StaticPropertyChanged -= OnSystemParameter;
         base.OnClosing(e);

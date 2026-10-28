@@ -51,6 +51,7 @@ public partial class App : System.Windows.Application
         if (firstRun) Autostart.Enabled = true;
         Loc.Instance.Set(settings.Language);
         main = new MainViewModel(new PresetStore(), new TaskbarService(), settings);
+        NativeWindowMotion.Shared.Initialize(main.Dock);
         window = new ConfigWindow(main);
         main.Start();
 
@@ -79,7 +80,7 @@ public partial class App : System.Windows.Application
 
     void OnCrash(object sender, DispatcherUnhandledExceptionEventArgs e)
     {
-        WindowTransitions.Shared.Cancel();
+        NativeWindowMotion.Shared.Suspend();
         try
         {
             Directory.CreateDirectory(Settings.Dir);
@@ -92,8 +93,7 @@ public partial class App : System.Windows.Application
     protected override void OnExit(ExitEventArgs e)
     {
         WinKeys.Enable(false);
-        WindowLaunchObserver.Shared.Dispose();
-        WindowTransitions.Shared.Dispose();
+        NativeWindowMotion.Shared.Dispose();
         main?.Dock.Flush();
         systemTray?.Dispose();
         docks?.Dispose();

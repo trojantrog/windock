@@ -30,7 +30,24 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
+      - name: Build native components
+        shell: pwsh
+        run: |
+          $zigArchive = Join-Path $env:RUNNER_TEMP 'zig-0.15.2.zip'
+          Invoke-WebRequest 'https://ziglang.org/download/0.15.2/zig-x86_64-windows-0.15.2.zip' -OutFile $zigArchive
+          if ((Get-FileHash -LiteralPath $zigArchive -Algorithm SHA256).Hash -ne '3a0ed1e8799a2f8ce2a6e6290a9ff22e6906f8227865911fb7ddedc3cc14cb0c') { throw 'Zig archive checksum mismatch' }
+          Expand-Archive -LiteralPath $zigArchive -DestinationPath $env:RUNNER_TEMP
+          $zigExecutable = Join-Path $env:RUNNER_TEMP 'zig-x86_64-windows-0.15.2\zig.exe'
+          & .\native\WinDock.TrayHook\build.ps1 -Zig $zigExecutable
+          & .\native\WinDock.Motion\build.ps1 -Zig $zigExecutable
       - run: dotnet publish src/WinDock -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish
+      - name: Package complete release
+        shell: pwsh
+        run: |
+          Compress-Archive -Path publish\* -DestinationPath WinDock-win-x64.zip
+          (Get-FileHash -LiteralPath WinDock-win-x64.zip -Algorithm SHA256).Hash.ToLowerInvariant() | Set-Content WinDock-win-x64.zip.sha256
       - uses: softprops/action-gh-release@v2
         with:
-          files: publish/WinDock.exe
+          files: |
+            WinDock-win-x64.zip
+            WinDock-win-x64.zip.sha256

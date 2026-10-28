@@ -11,7 +11,7 @@
     <RootNamespace>WinDock</RootNamespace>
     <ApplicationIcon>Assets\app.ico</ApplicationIcon>
     <StartupObject>WinDock.Program</StartupObject>
-    <Version>0.6.0-preview.5</Version>
+    <Version>0.6.0-preview.7</Version>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <Product>WinDock</Product>
@@ -22,6 +22,9 @@
 
   <ItemGroup>
     <RuntimeHostConfigurationOption Include="System.GC.ConserveMemory" Value="5" />
+    <Content Include="..\..\LICENSE" Link="licenses\WinDock-LICENSE.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
+    <Content Include="..\..\THIRD_PARTY_NOTICES.txt" Link="licenses\THIRD_PARTY_NOTICES.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
+    <Content Include="..\..\docs\native-window-animation.md" Link="整窗动画说明.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
   </ItemGroup>
 
   <ItemGroup>
@@ -47,5 +50,16 @@
     <Content Include="..\..\native\WinDock.TrayHook\bin\win-x64\WinDock.TrayHook.x64.dll.sha256" Link="WinDock.TrayHook.x64.dll.sha256" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
     <Content Include="..\..\third_party\YASB-LICENSE.txt" Link="licenses\YASB-LICENSE.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
   </ItemGroup>
+
+  <ItemGroup Condition="Exists('..\..\native\WinDock.Motion\bin\win-x64\WinDock.Motion.manifest.json')">
+    <Content Include="..\..\native\WinDock.Motion\bin\win-x64\WinDock.Motion.x64.dll" Link="WinDock.Motion.x64.dll" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
+    <Content Include="..\..\native\WinDock.Motion\bin\win-x64\WinDock.MotionHost.exe" Link="WinDock.MotionHost.exe" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
+    <Content Include="..\..\native\WinDock.Motion\bin\win-x64\WinDock.Motion.manifest.json" Link="WinDock.Motion.manifest.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
+    <Content Include="..\..\third_party\minhook\LICENSE.txt" Link="licenses\MinHook-LICENSE.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
+  </ItemGroup>
+
+  <Target Name="RequireNativeMotionForRelease" BeforeTargets="PrepareForPublish" Condition="'$(Configuration)' == 'Release' And '$(RuntimeIdentifier)' == 'win-x64'">
+    <Error Condition="!Exists('..\..\native\WinDock.Motion\bin\win-x64\WinDock.Motion.manifest.json')" Text="Build native/WinDock.Motion with build.ps1 before publishing." />
+  </Target>
 
 </Project>

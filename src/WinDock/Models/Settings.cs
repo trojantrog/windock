@@ -92,6 +92,16 @@ public sealed class DockSettings
     public int WindowMotionDuration { get; set; } = 320;
     public bool WindowOpenAnimation { get; set; } = true;
     public int WindowOpenDuration { get; set; } = 240;
+    public bool NativeWindowAnimations { get; set; }
+    public bool WindowCloseAnimation { get; set; } = true;
+    public int WindowCloseDuration { get; set; } = 180;
+    public bool WindowRestoreAnimation { get; set; } = true;
+    public int WindowRestoreDuration { get; set; } = 240;
+    public bool WindowHideAnimation { get; set; } = true;
+    public double WindowCloseDistance { get; set; } = 36;
+    public double WindowCloseScale { get; set; } = 0.92;
+    public double WindowFadeHold { get; set; } = 0.85;
+    public string WindowMotionCurve { get; set; } = "smooth";
     public bool SearchEnabled { get; set; } = true;
     public bool OrganizerEnabled { get; set; } = true;
     public bool SystemTrayEnabled { get; set; }
@@ -120,6 +130,12 @@ public sealed class DockSettings
         AnimationStrength = Math.Clamp(AnimationStrength, 0.2, 1.3);
         WindowMotionDuration = Math.Clamp(WindowMotionDuration, 120, 600);
         WindowOpenDuration = Math.Clamp(WindowOpenDuration, 120, 600);
+        WindowCloseDuration = Math.Clamp(WindowCloseDuration, 120, 600);
+        WindowRestoreDuration = Math.Clamp(WindowRestoreDuration, 120, 600);
+        WindowCloseDistance = double.IsFinite(WindowCloseDistance) ? Math.Clamp(WindowCloseDistance, 0, 120) : 36;
+        WindowCloseScale = double.IsFinite(WindowCloseScale) ? Math.Clamp(WindowCloseScale, .75, 1) : .92;
+        WindowFadeHold = double.IsFinite(WindowFadeHold) ? Math.Clamp(WindowFadeHold, .5, .95) : .85;
+        if (WindowMotionCurve is not ("smooth" or "quick")) WindowMotionCurve = "smooth";
         TrayIconSize = Math.Clamp(TrayIconSize, 16, 32);
         TrayColumns = Math.Clamp(TrayColumns, 3, 8);
         if (TraySort is not ("system" or "name")) TraySort = "system";
