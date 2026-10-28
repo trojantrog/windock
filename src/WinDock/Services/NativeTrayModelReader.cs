@@ -23,6 +23,9 @@ internal static class NativeTrayModelReader
     internal sealed record FilterCounts(int InvalidProtocol, int InvalidWindow, int OwnerAccess, int OwnerIdentity,
         int OwnerChanged, int PlacementUnavailable, int TipUnavailable, int PlacementEvidenceRejected, int TipEvidenceRejected,
         int TooltipModeUnavailable, int TooltipModeEvidenceRejected);
+    internal sealed record OwnerAccessFailure(uint ProcessId, uint ThreadId, long Window, string OwnerClass,
+        uint RequestedAccess, int OpenError, uint QueryOnlyAccess, bool QueryOnlyOpened, int QueryOnlyOpenError,
+        bool QueryIdentityReadable, string? QueryFailedApi, int QueryError, uint? ExitCode, bool WindowMatches);
     sealed class FiltersBuilder
     {
         internal int InvalidProtocol, InvalidWindow, OwnerAccess, OwnerIdentity, OwnerChanged, PlacementUnavailable, TipUnavailable,
@@ -34,12 +37,14 @@ internal static class NativeTrayModelReader
 
     static readonly SemaphoreSlim worker = new(1, 1);
     static FilterCounts filters = new(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    static IReadOnlyList<OwnerAccessFailure> ownerAccessFailures = Array.Empty<OwnerAccessFailure>();
     static volatile string status = "not_started";
     static int candidateCount, validatedCount;
     internal static string Status => status;
     internal static int CandidateCount => Volatile.Read(ref candidateCount);
     internal static int ValidatedCount => Volatile.Read(ref validatedCount);
     internal static FilterCounts Filters => Volatile.Read(ref filters);
+    internal static IReadOnlyList<OwnerAccessFailure> OwnerAccessFailures => Volatile.Read(ref ownerAccessFailures);
     const int MaximumItems = 512;
     const ulong LastUserAddress = 0x0000800000000000;
 
@@ -52,22 +57,29 @@ internal static class NativeTrayModelReader
         Interlocked.Exchange(ref candidateCount, 0);
         Interlocked.Exchange(ref validatedCount, 0);
         Volatile.Write(ref filters, new(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0));
+        Volatile.Write(ref ownerAccessFailures, Array.Empty<OwnerAccessFailure>());
         try
         {
             var thread = new Thread(() =>
             {
                 var reasons = new FiltersBuilder();
+                var accessDiagnostics = new OwnerAccessDiagnostics();
+                void PublishDiagnostics()
+                {
+                    Volatile.Write(ref filters, reasons.Snapshot());
+                    Volatile.Write(ref ownerAccessFailures, accessDiagnostics.Snapshot());
+                }
                 void Complete(IReadOnlyList<Record> records)
-                { Volatile.Write(ref filters, reasons.Snapshot()); completion.TrySetResult(records); }
-                try { Complete(Read(explorerWindow, explorerProcess, cancellation, reasons)); }
+                { PublishDiagnostics(); completion.TrySetResult(records); }
+                try { Complete(Read(explorerWindow, explorerProcess, cancellation, reasons, accessDiagnostics)); }
                 catch (OperationCanceledException)
-                { status = "cancelled"; Volatile.Write(ref filters, reasons.Snapshot()); completion.TrySetCanceled(cancellation); }
+                { status = "cancelled"; PublishDiagnostics(); completion.TrySetCanceled(cancellation); }
                 catch (ReadRejected e) { status = e.Reason; Complete([]); }
                 catch (Exception e) when (e is IOException or Win32Exception or UnauthorizedAccessException
                     or InvalidOperationException or ArgumentException or NotSupportedException or JsonException
                     or BadImageFormatException or System.Security.SecurityException or OverflowException or FormatException)
                 { status = "unavailable:" + e.GetType().Name; Complete([]); }
-                finally { Volatile.Write(ref filters, reasons.Snapshot()); worker.Release(); }
+                finally { PublishDiagnostics(); worker.Release(); }
             }) { IsBackground = true, Name = "WinDock current tray inventory" };
             thread.SetApartmentState(ApartmentState.MTA);
             thread.Start();
@@ -78,7 +90,8 @@ internal static class NativeTrayModelReader
         return await completion.Task.WaitAsync(cancellation).ConfigureAwait(false);
     }
 
-    static IReadOnlyList<Record> Read(nint shellWindow, uint shellProcess, CancellationToken cancellation, FiltersBuilder reasons)
+    static IReadOnlyList<Record> Read(nint shellWindow, uint shellProcess, CancellationToken cancellation,
+        FiltersBuilder reasons, OwnerAccessDiagnostics accessDiagnostics)
     {
         if (!Environment.Is64BitProcess || RuntimeInformation.ProcessArchitecture != Architecture.X64)
             throw new ReadRejected("architecture_unsupported");
@@ -141,7 +154,7 @@ internal static class NativeTrayModelReader
                 if (thread == 0 || pid <= 0 || !Native.IsWindow(window)) { ++reasons.InvalidWindow; continue; }
                 if (!owners.TryGetValue((uint)pid, out var owner))
                 {
-                    owner = Owner.TryOpen((uint)pid, reasons);
+                    owner = Owner.TryOpen((uint)pid, window, thread, reasons, accessDiagnostics);
                     if (owner is null) continue;
                     owners.Add((uint)pid, owner);
                 }
@@ -363,11 +376,18 @@ internal static class NativeTrayModelReader
         internal string Path { get; }
         internal bool Alive => WaitForSingleObject(Handle, 0) == 258;
         Owner(nint handle, long started, string path) { Handle = handle; Started = started; Path = path; }
-        internal static Owner? TryOpen(uint pid, FiltersBuilder reasons)
+        internal static Owner? TryOpen(uint pid, nint window, uint thread, FiltersBuilder reasons, OwnerAccessDiagnostics diagnostics)
         {
             if (pid == 0 || pid > int.MaxValue) { ++reasons.OwnerIdentity; return null; }
-            var handle = Native.OpenProcess(0x101000, false, (int)pid);
-            if (handle == 0) { ++reasons.OwnerAccess; return null; }
+            const uint access = 0x101000;
+            var handle = OpenOwnerProcess(access, false, pid);
+            if (handle == 0)
+            {
+                var error = Marshal.GetLastPInvokeError();
+                ++reasons.OwnerAccess;
+                diagnostics.Capture(pid, window, thread, access, error);
+                return null;
+            }
             try
             {
                 var path = ProcessPath(handle);
@@ -379,6 +399,59 @@ internal static class NativeTrayModelReader
             finally { if (handle != 0) Native.CloseHandle(handle); }
         }
         public void Dispose() => Native.CloseHandle(Handle);
+    }
+
+    sealed class OwnerAccessDiagnostics
+    {
+        const uint QueryOnlyAccess = 0x1000;
+        readonly List<OwnerAccessFailure> entries = [];
+        readonly HashSet<(uint Process, uint Thread, nint Window)> observed = [];
+        internal IReadOnlyList<OwnerAccessFailure> Snapshot() => Array.AsReadOnly(entries.ToArray());
+
+        internal void Capture(uint pid, nint window, uint thread, uint requestedAccess, int error)
+        {
+            // A failed OpenProcess does not establish access denial or a live
+            // process. This one bounded comparison only supplies diagnostics;
+            // a query-only handle never releases a record into the inventory.
+            if (entries.Count >= 16 || !observed.Add((pid, thread, window))) return;
+            var windowClass = Native.ClassOf(window);
+            var before = WindowMatches();
+            var handle = OpenOwnerProcess(QueryOnlyAccess, false, pid);
+            var openError = handle == 0 ? Marshal.GetLastPInvokeError() : 0;
+            var readable = false;
+            string? failedApi = null;
+            var queryError = 0;
+            uint? exitCode = null;
+            try
+            {
+                if (handle != 0)
+                {
+                    // Do not retain or emit the image path. Only whether the
+                    // documented minimum-rights identity queries succeeded.
+                    var imageName = new StringBuilder(32768);
+                    var size = imageName.Capacity;
+                    var imageOk = QueryOwnerImageName(handle, 0, imageName, ref size);
+                    if (!imageOk) { failedApi = "QueryFullProcessImageNameW"; queryError = Marshal.GetLastPInvokeError(); }
+                    var timesOk = GetProcessTimes(handle, out var created, out _, out _, out _);
+                    var timesError = timesOk ? 0 : Marshal.GetLastPInvokeError();
+                    if (!timesOk && failedApi is null) { failedApi = "GetProcessTimes"; queryError = timesError; }
+                    readable = imageOk && size > 0 && timesOk && created > 0;
+                    var exitOk = GetExitCodeProcess(handle, out var code);
+                    var exitError = exitOk ? 0 : Marshal.GetLastPInvokeError();
+                    if (exitOk) exitCode = code;
+                    else if (failedApi is null) { failedApi = "GetExitCodeProcess"; queryError = exitError; }
+                }
+                // 259 is reported as raw status only. It can also be an actual
+                // exit code and is never treated as proof of continued life.
+                entries.Add(new(pid, thread, window.ToInt64(), windowClass, requestedAccess, error, QueryOnlyAccess,
+                    handle != 0, openError, readable, failedApi, queryError, exitCode, before && WindowMatches()));
+            }
+            finally { if (handle != 0) Native.CloseHandle(handle); }
+
+            bool WindowMatches() => thread != 0 && windowClass.Length != 0 && Native.IsWindow(window)
+                && Native.GetWindowThreadProcessId(window, out var currentPid) == thread && currentPid == pid
+                && Native.ClassOf(window) == windowClass;
+        }
     }
 
     sealed class ReadSession : IDisposable
@@ -790,8 +863,15 @@ internal static class NativeTrayModelReader
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     static extern uint GetFinalPathNameByHandleW(SafeFileHandle file, StringBuilder text, uint size, uint flags);
     [DllImport("kernel32.dll")] static extern uint WaitForSingleObject(nint handle, uint milliseconds);
-    [DllImport("kernel32.dll")] [return: MarshalAs(UnmanagedType.Bool)]
+    [DllImport("kernel32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)]
     static extern bool GetProcessTimes(nint process, out long created, out long exited, out long kernel, out long user);
+    [DllImport("kernel32.dll", EntryPoint = "OpenProcess", SetLastError = true)]
+    static extern nint OpenOwnerProcess(uint access, [MarshalAs(UnmanagedType.Bool)] bool inherit, uint processId);
+    [DllImport("kernel32.dll", EntryPoint = "QueryFullProcessImageNameW", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    static extern bool QueryOwnerImageName(nint process, uint flags, StringBuilder name, ref int size);
+    [DllImport("kernel32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)]
+    static extern bool GetExitCodeProcess(nint process, out uint exitCode);
     // winstring.h: HRESULT (WINAPI *)(void*, UINT_PTR, UINT32, BYTE*).
     [UnmanagedFunctionPointer(CallingConvention.Winapi)]
     delegate int InspectStringCallback(nint context, nuint address, uint length, nint buffer);

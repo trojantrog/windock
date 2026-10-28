@@ -26,6 +26,8 @@ public sealed class SystemTrayItem : INotifyPropertyChanged
     internal bool CallbackObserved { get; set; }
     internal bool VersionObserved { get; set; }
     internal bool IconObserved { get; set; }
+    internal bool NativeImageObserved { get; set; }
+    internal ulong ImageSequence { get; set; }
     internal bool TipObserved { get; set; }
     internal bool NativeTipObserved { get; set; }
     internal bool NativeSnapshotObserved { get; set; }
@@ -73,6 +75,7 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
     readonly DispatcherTimer prune = new() { Interval = TimeSpan.FromSeconds(10) };
     readonly DispatcherTimer recovery = new() { Interval = TimeSpan.FromSeconds(1) };
     readonly DispatcherTimer diagnosticTimer = new() { Interval = TimeSpan.FromSeconds(5) };
+    readonly DispatcherTimer imageTimer = new() { Interval = TimeSpan.FromMilliseconds(500) };
     readonly TrayDiagnostics diagnostics = new();
     readonly Dictionary<string, SystemTrayItem> known = [];
     readonly HashSet<SystemTrayItem> retainedHints = [];
@@ -82,16 +85,24 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
     readonly Dictionary<string, byte[]> bootstrapCandidates = [];
     readonly Dictionary<string, uint> pendingVersions = [];
     readonly object pendingLock = new();
-    readonly Queue<(uint Kind, byte[] Data)> pending = [];
+    readonly Queue<(uint Kind, ulong Sequence, byte[] Data)> pending = [];
+    readonly Dictionary<string, (ulong Sequence, byte[] Data)> pendingImages = [];
+    (ulong Sequence, byte[] Data)? pendingImageStatus;
     readonly Dictionary<string, bool> queuedTipModes = [];
     volatile CancellationTokenSource? lifetime;
     TrayHookSession? activeSession;
     Task? runner;
-    bool scheduled, ready, draining;
+    bool scheduled, ready, draining, drainDeferred;
     int pendingBytes;
+    int pendingImageBytes, imageBurstRemaining;
     int sessionNumber;
     long registrationGeneration;
     long metadataPackets, processedMetadataPackets;
+    long imagePackets, nativeImageReceived, nativeImageApplied, nativeImageRejected, imageQueueDrops;
+    ulong imageBarrier, imageStatusSequence;
+    long nextImageRequest;
+    string nativeImageStatus = "not requested";
+    uint nativeImageSampled, nativeImagePublished;
     long receivedPackets, nativeLossReports, interfaceLossReports, registrationPackets, processedRegistrationPackets, rejectedOwners, rejectedRegistrations, confirmedCandidates;
     int nativeSnapshotRecords, nativeModelRecords, nativeModelApplied;
     bool snapshotPending;
@@ -114,6 +125,7 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
     public SystemTrayService()
     {
         diagnosticTimer.Tick += (_, _) => RecordStatus();
+        imageTimer.Tick += (_, _) => RequestNativeImages();
         Loc.Instance.PropertyChanged += LanguageChanged;
         recovery.Tick += (_, _) =>
         {
@@ -151,7 +163,7 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
         if (lifetime is not null) return;
         lifetime = new CancellationTokenSource(); var run = lifetime;
         Status = Loc.T("systemTrayConnecting"); prune.Start();
-        diagnosticTimer.Start(); RecordStatus();
+        diagnosticTimer.Start(); imageTimer.Start(); RecordStatus();
         runner = Task.Run(() => Run(run));
     }
 
@@ -166,11 +178,12 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
                 using (session)
                 {
                     if (!await dispatcher.InvokeAsync(() => BeginSession(run, session), DispatcherPriority.Normal, token).Task.ConfigureAwait(false)) break;
-                    await session.ReadAsync((kind, data) => Queue(run, session, kind, data), () => dispatcher.BeginInvoke(() =>
+                    await session.ReadAsync((kind, sequence, data) => Queue(run, session, kind, sequence, data), () => dispatcher.BeginInvoke(() =>
                     {
                         if (!IsCurrent(run, session)) return;
                         HasStatusNotice = false; Ready = true; Status = Loc.T("systemTrayConnected");
                         refreshAt = recoveryAt = default; RequestRefresh();
+                        Drain(run, session);
                     }));
                 }
             }
@@ -194,6 +207,7 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
                     lock (pendingLock)
                     {
                         pending.Clear(); pendingBytes = 0; scheduled = false;
+                        pendingImages.Clear(); pendingImageBytes = 0; pendingImageStatus = null;
                         queuedTipModes.Clear();
                         processedRegistrationPackets = registrationPackets; processedMetadataPackets = metadataPackets;
                     }
@@ -215,6 +229,7 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
         {
             activeSession = session;
             pending.Clear(); pendingBytes = 0; scheduled = false;
+            pendingImages.Clear(); pendingImageBytes = 0; pendingImageStatus = null;
             queuedTipModes.Clear();
             processedRegistrationPackets = registrationPackets;
             processedMetadataPackets = metadataPackets;
@@ -227,6 +242,9 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
         Interlocked.Exchange(ref interfaceLossReports, 0);
         rejectedOwners = 0;
         rejectedRegistrations = confirmedCandidates = 0;
+        imageBarrier = imageStatusSequence = 0; nativeImageReceived = nativeImageApplied = nativeImageRejected = imageQueueDrops = 0;
+        nativeImageStatus = "not requested"; nativeImageSampled = nativeImagePublished = 0;
+        imageBurstRemaining = 0; nextImageRequest = 0;
         return true;
     }
 
@@ -235,43 +253,76 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
         lock (pendingLock) return lifetime == run && ReferenceEquals(activeSession, session);
     }
 
-    void Queue(CancellationTokenSource run, TrayHookSession session, uint kind, byte[] data)
+    void Queue(CancellationTokenSource run, TrayHookSession session, uint kind, ulong sequence, byte[] data)
     {
         lock (pendingLock)
         {
             if (lifetime != run || !ReferenceEquals(activeSession, session)) return;
-            if (kind is 1 or 4) Interlocked.Increment(ref receivedPackets);
-            else if (kind == 3) Interlocked.Increment(ref nativeLossReports);
-            // Model reads include registration and visible-set membership.
-            // Text has its own sequence so changing a tooltip does not cancel
-            // an otherwise valid native action.
-            if (kind == 3 || (kind == 1 && data.Length >= 36 && (BitConverter.ToUInt32(data, 0) is 0 or 2 or 4
-                || (BitConverter.ToUInt32(data, 0) == 1 && (BitConverter.ToUInt32(data, 32) & 9) != 0))))
-                Interlocked.Increment(ref registrationPackets);
-            if (kind == 3) queuedTipModes.Clear();
-            else if (kind == 1 && data.Length >= 976)
+            if (kind is 5 or 6)
             {
-                var operation = BitConverter.ToUInt32(data, 0);
-                var flags = BitConverter.ToUInt32(data, 32);
-                var key = (flags & 0x20) != 0 ? new Guid(data.AsSpan(956, 16)).ToString()
-                    : $"{BitConverter.ToUInt32(data, 24):X8}:{BitConverter.ToUInt32(data, 28)}:{BitConverter.ToUInt32(data, 4)}";
-                if (operation is 0 or 1)
+                if (kind == 6)
                 {
-                    var showTip = (flags & 0x80) != 0;
-                    if (operation == 1 && ((flags & 4) != 0 || !queuedTipModes.TryGetValue(key, out var oldMode) || oldMode != showTip))
-                        Interlocked.Increment(ref metadataPackets);
-                    if (!queuedTipModes.ContainsKey(key) && queuedTipModes.Count >= 512) queuedTipModes.Clear();
-                    queuedTipModes[key] = showTip;
+                    if (pendingImageStatus is not { } previous || previous.Sequence < sequence)
+                        pendingImageStatus = (sequence, data);
                 }
-                else if (operation == 2) queuedTipModes.Remove(key);
+                else
+                {
+                    Interlocked.Increment(ref nativeImageReceived);
+                    var guid = new Guid(data.AsSpan(40, 16));
+                    var key = guid != Guid.Empty ? guid.ToString()
+                        : $"{BitConverter.ToUInt64(data, 16):X16}:{BitConverter.ToUInt32(data, 32)}:{BitConverter.ToUInt32(data, 24)}";
+                    var previous = pendingImages.GetValueOrDefault(key);
+                    if (previous.Sequence >= sequence) return;
+                    var bytes = pendingImageBytes - (previous.Data?.Length ?? 0) + data.Length;
+                    // Image pressure cannot evict registration messages or
+                    // manufacture a registration-loss recovery cycle.
+                    if ((!pendingImages.ContainsKey(key) && pendingImages.Count >= 16) || bytes > 2 * 1024 * 1024)
+                    { Interlocked.Increment(ref imageQueueDrops); return; }
+                    pendingImages[key] = (sequence, data); pendingImageBytes = bytes;
+                }
             }
-            if (pending.Count >= 256 || pendingBytes + data.Length > 8 * 1024 * 1024)
+            else
             {
-                Interlocked.Increment(ref interfaceLossReports); Interlocked.Increment(ref registrationPackets);
-                pending.Clear(); pendingBytes = 0; queuedTipModes.Clear(); pending.Enqueue((3, []));
+                if (kind is 1 or 4) Interlocked.Increment(ref receivedPackets);
+                else if (kind == 3) Interlocked.Increment(ref nativeLossReports);
+                // Model reads include registration and visible-set membership.
+                // Text has its own sequence so changing a tooltip does not cancel
+                // an otherwise valid native action.
+                if (kind == 3 || (kind == 1 && data.Length >= 36 && (BitConverter.ToUInt32(data, 0) is 0 or 2 or 4
+                    || (BitConverter.ToUInt32(data, 0) == 1 && (BitConverter.ToUInt32(data, 32) & 9) != 0))))
+                    Interlocked.Increment(ref registrationPackets);
+                if (kind == 3 || (kind == 1 && data.Length >= 36 && (BitConverter.ToUInt32(data, 0) is 0 or 2
+                    || (BitConverter.ToUInt32(data, 0) == 1 && (BitConverter.ToUInt32(data, 32) & 2) != 0))))
+                    Interlocked.Increment(ref imagePackets);
+                if (kind == 3) queuedTipModes.Clear();
+                else if (kind == 1 && data.Length >= 976)
+                {
+                    var operation = BitConverter.ToUInt32(data, 0);
+                    var flags = BitConverter.ToUInt32(data, 32);
+                    var key = (flags & 0x20) != 0 ? new Guid(data.AsSpan(956, 16)).ToString()
+                        : $"{BitConverter.ToUInt32(data, 24):X8}:{BitConverter.ToUInt32(data, 28)}:{BitConverter.ToUInt32(data, 4)}";
+                    if (operation is 0 or 1)
+                    {
+                        var showTip = (flags & 0x80) != 0;
+                        if (operation == 1 && ((flags & 4) != 0 || !queuedTipModes.TryGetValue(key, out var oldMode) || oldMode != showTip))
+                            Interlocked.Increment(ref metadataPackets);
+                        if (!queuedTipModes.ContainsKey(key) && queuedTipModes.Count >= 512) queuedTipModes.Clear();
+                        queuedTipModes[key] = showTip;
+                    }
+                    else if (operation == 2) queuedTipModes.Remove(key);
+                }
+                if (pending.Count >= 256 || pendingBytes + data.Length > 8 * 1024 * 1024)
+                {
+                    Interlocked.Increment(ref interfaceLossReports); Interlocked.Increment(ref registrationPackets);
+                    Interlocked.Increment(ref imagePackets);
+                    // Everything preceding this received record was dropped;
+                    // the current record is retained after the local barrier.
+                    pending.Clear(); pendingBytes = 0; queuedTipModes.Clear(); pending.Enqueue((3, sequence - 1, []));
+                    pendingImages.Clear(); pendingImageBytes = 0;
+                }
+                pending.Enqueue((kind, sequence, data));
+                pendingBytes += data.Length;
             }
-            pending.Enqueue((kind, data));
-            pendingBytes += data.Length;
             if (scheduled) return;
             scheduled = true;
         }
@@ -280,30 +331,53 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
 
     void Drain(CancellationTokenSource run, TrayHookSession session)
     {
-        if (draining) return;
-        (uint Kind, byte[] Data)[] batch;
+        if (draining) { drainDeferred = true; return; }
+        (uint Kind, ulong Sequence, byte[] Data)[] batch;
+        (ulong Sequence, byte[] Data)[] images;
+        (ulong Sequence, byte[] Data)? imageStatus;
         long batchSequence;
         long batchMetadata;
+        long batchImageRevision;
         lock (pendingLock)
         {
-            if (lifetime != run || !ReferenceEquals(activeSession, session)) return;
+            if (lifetime != run || !ReferenceEquals(activeSession, session) || !Ready) return;
             batch = pending.ToArray(); pending.Clear(); pendingBytes = 0; scheduled = false;
+            images = pendingImages.Values.OrderBy(item => item.Sequence).ToArray();
+            pendingImages.Clear(); pendingImageBytes = 0;
+            imageStatus = pendingImageStatus; pendingImageStatus = null;
             batchSequence = registrationPackets;
             batchMetadata = metadataPackets;
+            batchImageRevision = imagePackets;
         }
-        if (!Ready) return;
         draining = true;
         try
         {
-            foreach (var (kind, data) in batch)
+            foreach (var (kind, sequence, data) in batch)
             {
+                if (!Ready || !IsCurrent(run, session)) return;
                 if (kind == 3)
                 {
+                    imageBarrier = Math.Max(imageBarrier, sequence);
                     InvalidateProtocol(Icons.ToArray(), modelOnly: false);
+                    if (!Ready || !IsCurrent(run, session)) return;
                     bootstrapCandidates.Clear(); pendingVersions.Clear();
                     HasStatusNotice = true; Status = Loc.T("systemTrayUpdatesSkipped"); recovery.Start(); continue;
                 }
-                Apply(data, candidate: kind == 4);
+                // A completed native event may have been waiting to enqueue
+                // when the producer established a loss barrier. Do not let an
+                // older ADD/version record restore an invalid registration.
+                if (sequence > imageBarrier) Apply(data, sequence, candidate: kind == 4);
+            }
+            if (!Ready || !IsCurrent(run, session)) return;
+            if (imageStatus is { } report && report.Sequence > imageStatusSequence && report.Sequence > imageBarrier)
+            { ApplyImageStatus(report.Data); imageStatusSequence = report.Sequence; }
+            foreach (var (sequence, data) in images)
+            {
+                if (!Ready || !IsCurrent(run, session)) return;
+                if (batchImageRevision != Interlocked.Read(ref imagePackets)
+                    || batchSequence != Interlocked.Read(ref registrationPackets))
+                { ++nativeImageRejected; continue; }
+                ApplyNativeImage(sequence, data);
             }
         }
         catch (InvalidDataException) { Stop(); Status = Loc.T("systemTrayDataFailed"); }
@@ -315,11 +389,32 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
                 Interlocked.Exchange(ref processedMetadataPackets, batchMetadata);
             }
             draining = false;
+            if (drainDeferred)
+            {
+                drainDeferred = false;
+                // A nested dispatcher call may have consumed its queued wake
+                // while this batch was publishing notifications. Re-arm the
+                // current session, including a session started by a callback.
+                CancellationTokenSource? nextRun;
+                TrayHookSession? nextSession;
+                lock (pendingLock)
+                {
+                    nextRun = lifetime; nextSession = activeSession;
+                    if (!Ready || nextRun is null || nextSession is null
+                        || (pending.Count == 0 && pendingImages.Count == 0 && pendingImageStatus is null))
+                        nextRun = null;
+                    else scheduled = true;
+                }
+                if (nextRun is not null && nextSession is not null)
+                    dispatcher.BeginInvoke(DispatcherPriority.Background, () => Drain(nextRun, nextSession));
+            }
         }
     }
 
-    void Apply(byte[] bytes, bool candidate = false, bool presenceConfirmed = false)
+    void Apply(byte[] bytes, ulong sequence = 0, bool candidate = false, bool presenceConfirmed = false)
     {
+        if (lifetime is not { } applyingRun || activeSession is not { } applyingSession || !Ready) return;
+        bool Current() => Ready && IsCurrent(applyingRun, applyingSession);
         // Header is 20 bytes followed by the fixed 956-byte Explorer payload.
         if (bytes.Length < 976) throw new InvalidDataException();
         uint Read(int offset) => BitConverter.ToUInt32(bytes, offset);
@@ -335,7 +430,8 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
             : Icons.FirstOrDefault(i => i.Guid == Guid.Empty && i.Window == window && i.Id == id);
         var key = item?.Key ?? (useGuid ? guid.ToString() : $"{rawWindow:X8}:{id}:{pid}");
         if (!candidate && operation is 0 or 2)
-        { BumpRegistrationGeneration(); bootstrapCandidates.Remove(key); pendingVersions.Remove(key); }
+        { bootstrapCandidates.Remove(key); pendingVersions.Remove(key); BumpRegistrationGeneration(); }
+        if (!Current()) return;
         if (operation == 2) { if (item is not null && (useGuid || pid == 0 || item.ProcessId == pid)) Remove(item); return; }
         if (useGuid && !candidate && operation is 1 or 3 or 4)
         {
@@ -367,6 +463,7 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
         {
             if (candidate || operation is 3 or 4) return;
             Remove(item); item = null;
+            if (!Current()) return;
         }
         if (candidate && item is not null && (item.Window != window || item.Id != id)) return;
         if (operation == 3) { if (item is not null) FocusRequested?.Invoke(item); return; }
@@ -407,7 +504,11 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
             item.Callback = 0; item.CallbackObserved = true;
             item.Tip = ""; item.TipObserved = true; item.NativeTipObserved = false; item.ShowStandardTip = false; item.Hidden = false;
             item.HiddenObserved = true;
-            item.Icon = null; item.IconObserved = true;
+            if (sequence >= item.ImageSequence)
+            {
+                item.Icon = null; item.IconObserved = true;
+                item.ImageSequence = sequence; item.NativeImageObserved = false;
+            }
         }
         if ((flags & 1) != 0 && (!candidate || (item.Callback == 0 && !item.CallbackObserved)))
         {
@@ -426,10 +527,14 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
         { item!.Hidden = (state & 1) != 0; item.HiddenObserved = true; }
         if ((flags & 2) != 0 && (!candidate || (!item.IconObserved && item.Icon is null)))
         {
-            item!.Icon = pixels == 0 ? null : BitmapSource.Create((int)width, (int)height, 96, 96, PixelFormats.Pbgra32,
-                null, bytes.AsSpan(976).ToArray(), (int)width * 4);
-            item.Icon?.Freeze();
-            if (!candidate) item.IconObserved = true;
+            if (candidate || sequence >= item.ImageSequence)
+            {
+                item!.Icon = pixels == 0 ? null : BitmapSource.Create((int)width, (int)height, 96, 96, PixelFormats.Pbgra32,
+                    null, bytes.AsSpan(976).ToArray(), (int)width * 4);
+                item.Icon?.Freeze();
+                item.NativeImageObserved = false;
+                if (!candidate) { item.IconObserved = true; item.ImageSequence = sequence; }
+            }
         }
         if (!candidate && (flags & 0x50) == 0x10)
         {
@@ -443,10 +548,69 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
         }
         item!.Title = TrayIdentity.Name(item);
         item.Refresh();
+        if (!Current()) return;
         if (added) { Icons.Add(item); _ = ResolveIdentity(item); }
         else if (wasHidden != item.Hidden) LayoutChanged?.Invoke();
+        if (!Current()) return;
         if (operation == 1 && !item.RegistrationObserved && (!item.CallbackObserved || !item.VersionObserved))
             RequestRegistration(item.Window, item.ProcessId);
+    }
+
+    void ApplyNativeImage(ulong sequence, byte[] data)
+    {
+        var width = BitConverter.ToUInt32(data, 64); var height = BitConverter.ToUInt32(data, 68);
+        var stride = BitConverter.ToUInt32(data, 72); var pixels = BitConverter.ToUInt32(data, 76);
+        if (BitConverter.ToUInt32(data, 4) != 1 || BitConverter.ToUInt32(data, 36) != 0
+            || width is 0 or > 256 || height is 0 or > 256 || stride != width * 4
+            || pixels != stride * height || data.Length != 80 + pixels) throw new InvalidDataException();
+        var window = (nint)unchecked((long)BitConverter.ToUInt64(data, 16));
+        var pid = BitConverter.ToUInt32(data, 24); var tid = BitConverter.ToUInt32(data, 28);
+        var id = BitConverter.ToUInt32(data, 32); var guid = new Guid(data.AsSpan(40, 16));
+        var started = BitConverter.ToInt64(data, 56);
+        var item = guid != Guid.Empty ? Icons.FirstOrDefault(icon => icon.Guid == guid)
+            : Icons.FirstOrDefault(icon => icon.Guid == Guid.Empty && icon.Window == window && icon.Id == id && icon.ProcessId == pid);
+        // A frame only supplies pixels for an independently established owner.
+        // It cannot create a row, restore an invalid callback, or reassign a GUID.
+        if (item is null || sequence <= imageBarrier || sequence <= item.ImageSequence
+            || (!item.NativeModelObserved && !item.RegistrationObserved) || started <= 0 || item.ProcessStarted != started
+            || item.Window != window || item.ProcessId != pid || item.ThreadId != tid || item.Id != id
+            || !OwnerIsCurrent(window, pid, started, tid, item.OwnerClass))
+        { ++nativeImageRejected; return; }
+        var bitmap = BitmapSource.Create((int)width, (int)height, 96, 96, PixelFormats.Pbgra32,
+            null, data.AsSpan(80).ToArray(), (int)stride);
+        bitmap.Freeze();
+        item.Icon = bitmap; item.IconObserved = item.NativeImageObserved = true; item.ImageSequence = sequence;
+        ++nativeImageApplied; item.Refresh();
+    }
+
+    void ApplyImageStatus(byte[] data)
+    {
+        nativeImageStatus = BitConverter.ToUInt32(data, 4) switch
+        {
+            0 => "ready", 1 => "profile rejected", 2 => "thread mismatch", 3 => "boundary busy",
+            4 => "worker busy", 5 => "object unavailable", 6 => "pixels unavailable", 7 => "cancelled",
+            8 => "queue full", _ => throw new InvalidDataException()
+        };
+        // A nonblocking busy report may omit counters; successful counts are
+        // cumulative within this connection and must not move backwards.
+        nativeImageSampled = Math.Max(nativeImageSampled, BitConverter.ToUInt32(data, 16));
+        nativeImagePublished = Math.Max(nativeImagePublished, BitConverter.ToUInt32(data, 20));
+    }
+
+    void RequestNativeImages()
+    {
+        if (!Ready || !ProtocolCurrent || activeSession is not { } session || lifetime is not { } run
+            || !IsCurrent(run, session) || Icons.Count == 0 || Environment.TickCount64 < nextImageRequest) return;
+        if (session.RequestImages() && nativeImageStatus == "not requested") nativeImageStatus = "requested";
+        nextImageRequest = Environment.TickCount64 + (imageBurstRemaining > 0 ? 500 : 2_000);
+        if (imageBurstRemaining > 0) --imageBurstRemaining;
+    }
+
+    void ScheduleImageRefresh()
+    {
+        imageBurstRemaining = Math.Clamp((Icons.Count + 1) / 2, 1, 32);
+        nextImageRequest = 0;
+        RequestNativeImages();
     }
 
     void QueueBootstrap(string key, byte[] bytes, nint window, uint pid, uint id, Guid guid)
@@ -524,7 +688,11 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
 
     static string ReadText(byte[] data, int offset, int characters) => Encoding.Unicode.GetString(data, offset, characters * 2).Split('\0')[0];
     void Remove(SystemTrayItem item)
-    { BumpRegistrationGeneration(); bootstrapCandidates.Remove(item.Key); pendingVersions.Remove(item.Key); Icons.Remove(item); known.Remove(item.Key); }
+    {
+        if (!known.TryGetValue(item.Key, out var current) || !ReferenceEquals(current, item)) return;
+        bootstrapCandidates.Remove(item.Key); pendingVersions.Remove(item.Key); known.Remove(item.Key);
+        BumpRegistrationGeneration(); Icons.Remove(item);
+    }
     void ClearIcons()
     {
         BumpRegistrationGeneration();
@@ -604,6 +772,7 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
                         Drain(run, session);
                         retry = true; return;
                     }
+                    ScheduleImageRefresh();
                     if (!Icons.Any(item => (!item.IconObserved && item.Icon is null)
                         || (!item.TipObserved && !item.NativeTipObserved && item.Tip.Length == 0))) return;
                     // Current model identity/protocol can coexist with display
@@ -640,10 +809,12 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
 
     void InvalidateProtocol(IEnumerable<SystemTrayItem> items, bool modelOnly = true)
     {
+        if (lifetime is not { } run || activeSession is not { } session) return;
         var changed = false;
         var layoutChanged = false;
         foreach (var item in items)
         {
+            if (!Ready || !IsCurrent(run, session)) return;
             if ((modelOnly && !item.NativeModelObserved) || !known.TryGetValue(item.Key, out var current) || !ReferenceEquals(current, item)) continue;
             var wasHidden = item.Hidden;
             item.NativeModelObserved = item.CallbackObserved = item.VersionObserved = false;
@@ -653,8 +824,9 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
             layoutChanged |= wasHidden != item.Hidden;
             item.Refresh(); changed = true;
         }
+        if (!Ready || !IsCurrent(run, session)) return;
         if (changed) BumpRegistrationGeneration();
-        if (layoutChanged) LayoutChanged?.Invoke();
+        if (layoutChanged && Ready && IsCurrent(run, session)) LayoutChanged?.Invoke();
     }
 
     SystemTrayItem? MergeNativeModel(NativeTrayModelReader.Record record)
@@ -806,10 +978,11 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
             _ = completing.ContinueWith(_ => run.Dispose(), TaskScheduler.Default);
         runner = null;
         // The runner owns cancellation registrations until it completes.
-        prune.Stop(); recovery.Stop(); diagnosticTimer.Stop(); Ready = false; ClearIcons(); Hints.Clear(); retainedHints.Clear(); Status = Loc.T("systemTrayOff");
+        prune.Stop(); recovery.Stop(); diagnosticTimer.Stop(); imageTimer.Stop(); Ready = false; ClearIcons(); Hints.Clear(); retainedHints.Clear(); Status = Loc.T("systemTrayOff");
         lock (pendingLock)
         {
             activeSession = null; pending.Clear(); pendingBytes = 0; scheduled = false;
+            pendingImages.Clear(); pendingImageBytes = 0; pendingImageStatus = null;
             queuedTipModes.Clear();
             processedRegistrationPackets = registrationPackets; processedMetadataPackets = metadataPackets;
         }
@@ -837,8 +1010,16 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
         nativeModelCandidates = NativeTrayModelReader.CandidateCount,
         nativeModelValidated = NativeTrayModelReader.ValidatedCount,
         nativeModelFiltered = NativeTrayModelReader.Filters,
+        nativeModelOwnerAccessFailures = NativeTrayModelReader.OwnerAccessFailures,
         nativeModelRecords,
         nativeModelApplied,
+        nativeImageStatus,
+        nativeImageSampled,
+        nativeImagePublished,
+        nativeImageReceived = Interlocked.Read(ref nativeImageReceived),
+        nativeImageApplied,
+        nativeImageRejected,
+        imageQueueDrops = Interlocked.Read(ref imageQueueDrops),
         protocolCurrent = ProtocolCurrent,
         icons = Icons.Select(item => new
         {
@@ -865,6 +1046,7 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
             nativeTipObserved = item.NativeTipObserved,
             showStandardTip = item.ShowStandardTip,
             hasIcon = item.Icon is not null,
+            nativeImageObserved = item.NativeImageObserved,
             canInvoke = item.CanInvoke
         }).ToArray()
     });

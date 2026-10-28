@@ -107,15 +107,21 @@ PDB 下载自[微软符号服务器的精确 GUID/age 路径](https://msdl.micro
 
 `metadata.tooltipMode.field` 为 224，`minimumVersion` 为 4；它要求两个 getter 和既有 `modify` 函数的证据。读取器返回原始 `ShowStandardTip = (byte[+0xE0] == 0)`，版本判断继续由界面应用，不能把 getter 已经结合当前版本计算出的 false 当成原始状态。这样在版本 0 读取后收到 `SETVERSION 4`，仍能正确选择提示方式。运行时模式读取独立于 HSTRING 成功与否；它不更改回调地址、协议版本或系统显示集合。
 
+## 进程访问诊断
+
+进程访问失败会在 `tray-status.json` 的 `nativeModelOwnerAccessFailures` 中保存最多 16 条去重记录，包含窗口、PID、TID、窗口类、请求权限和系统错误码。读取器仍要求查询与等待权限（`0x101000`），以便持续持有进程句柄并确认存活；失败后另尝试一次最小查询权限（`0x1000`），仅记录能否读取身份及前后窗口归属是否一致。对照结果不用于放行图标，也不保存路径、窗口标题或提示文字。
+
+[`WaitForSingleObject`](https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-waitforsingleobject) 要求句柄具有 `SYNCHRONIZE` 权限；查询创建时间可使用 [`PROCESS_QUERY_LIMITED_INFORMATION`](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getprocesstimes)。[`GetExitCodeProcess`](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getexitcodeprocess) 返回的 259 也可能是应用实际退出码，不能据此替代存活证明。诊断将其保留为原始数值。
+
 ## 补充离线取证：当前图像
 
 `SetIcon`（`0x4CAE0`）通过 `NotifyIconUtilities::TryGetSoftwareBitmapFromHicon`（`0x4CDBC`）取得位图并更新图标实现 `+0xC8`。转换函数的本机符号和调用链明确使用 `ISoftwareBitmapNativeFactory` 与 `SoftwareBitmap`；当前代码检查/转换至 BGRA8、预乘 alpha。`get_Icon`（`0x1BEB0`）返回带 AddRef 的对象，其入口也调用 `FailFastIfNotUIThread`。
 
 图标实现 `+0x138` 确实另有 HICON：`SetIcon` 在它为零时调用 `USER32!CopyIcon`，并由 `DestroyIcon` 资源策略管理。但字段非零时，后续更新跳过该复制。因此这个句柄不能作为词脉等应用实时数据图标的可靠来源。直接读取 `+0xC8` 并调用 `CopyIcon` 则会把 COM 指针误当句柄。
 
-较完整的后续方案是在图标所属线程取得有效的 `SoftwareBitmap` 引用，核对实际尺寸、像素格式、alpha，再用公开的 [CopyToBuffer](https://learn.microsoft.com/en-us/uwp/api/windows.graphics.imaging.softwarebitmap.copytobuffer?view=winrt-26100) 复制为有界像素数据供 Dock 使用。[SoftwareBitmap](https://learn.microsoft.com/en-us/uwp/api/windows.graphics.imaging.softwarebitmap?view=winrt-26100) 标注 Agile 和 Both，可支持持有有效引用后的线程使用；这不意味着另一个进程取得的裸指针可直接调用。本轮没有证明现成的跨进程对象获取/封送入口，也未建立所属线程执行和对象寿命管理，故当前图像读取仍未实现。
+图像读取路径在所属线程取得有效的 `SoftwareBitmap` 引用，核对实际尺寸、像素格式、alpha，再用公开的 [CopyToBuffer](https://learn.microsoft.com/en-us/uwp/api/windows.graphics.imaging.softwarebitmap.copytobuffer?view=winrt-26100) 复制为有界像素数据供 Dock 使用。[SoftwareBitmap](https://learn.microsoft.com/en-us/uwp/api/windows.graphics.imaging.softwarebitmap?view=winrt-26100) 标注 Agile 和 Both，可支持持有有效引用后的线程使用；这不意味着另一个进程取得的裸指针可直接调用。图像实现和独立线程、引用证据见 [原生托盘图像](native-tray-images.md)，宿主仅接收带身份和序号的像素，不调用远端裸指针。
 
-最初的补充资料保存在被忽略的 `publish/checks/tray-model/metadata-disassembly.txt`、`metadata-code-evidence.json`、`metadata-vtables.json`，只读分析脚本为同目录的 `inspect-metadata.py`。已确认的分区和文字字段及其证据链现已纳入正式生成器；图像与原生动作仍只作后续研究。所有资料绑定本页同一份 PE/PDB；生成过程不执行 COM、进程读取或 UI 验证。
+最初的补充资料保存在被忽略的 `publish/checks/tray-model/metadata-disassembly.txt`、`metadata-code-evidence.json`、`metadata-vtables.json`，只读分析脚本为同目录的 `inspect-metadata.py`。已确认的分区和文字字段及其证据链现已纳入正式生成器；图像使用独立生成器，原生动作仍只作后续研究。所有资料绑定本页同一份 PE/PDB；生成过程不执行 COM、进程读取或 UI 验证。
 
 ## 原生操作入口的边界
 

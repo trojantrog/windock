@@ -11,14 +11,17 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
+#include "tray_images.h"
 
 #define MAGIC 0x52544457u
-#define PROTOCOL 5u
+#define PROTOCOL 6u
 #define QUEUE_SIZE 128
 #define PENDING_SIZE 32
 #define MAX_ICON 256
-#define START_MESSAGE L"WinDock.TrayHook.Connect.v5"
-#define STOP_MESSAGE L"WinDock.TrayHook.Disconnect.v5"
+#define START_MESSAGE L"WinDock.TrayHook.Connect.v6"
+#define STOP_MESSAGE L"WinDock.TrayHook.Disconnect.v6"
+#define IMAGE_OUTPUT_SIZE 8u
+#define IMAGE_OUTPUT_BYTES (2u * 1024u * 1024u)
 
 #pragma pack(push, 1)
 // Explorer's Shell_NotifyIcon wire representation is 32-bit on x64 as well.
@@ -37,19 +40,21 @@ typedef struct { DWORD signature, operation; IconData32 icon; } ShellTrayData;
 typedef struct { DWORD magic, version, kind, length; } Header;
 typedef struct {
     Header header;
+    uint64_t sequence;
     DWORD operation, ownerPid, width, height, pixelBytes;
     IconData32 icon;
 } IconPacket;
 #pragma pack(pop)
 _Static_assert(sizeof(IconData32) == 956, "Explorer notification wire layout changed");
-_Static_assert(sizeof(IconPacket) == 992, "WinDock tray protocol layout changed");
-typedef struct { DWORD kind, operation, ownerPid; IconData32 data; HICON icon; } QueuedIcon;
+_Static_assert(sizeof(IconPacket) == 1000, "WinDock tray protocol layout changed");
+typedef struct { DWORD kind, operation, ownerPid; uint64_t sequence; IconData32 data; HICON icon; } QueuedIcon;
 typedef struct {
     HWND window;
     WPARAM wParam;
     LPARAM lParam;
     unsigned int depth;
     BOOL completed;
+    uint64_t lossSequence;
     QueuedIcon event;
 } PendingMessage;
 
@@ -61,18 +66,87 @@ static unsigned int head, count;
 // owned snapshots under queueLock; it never accesses the message pointers.
 static PendingMessage pending[PENDING_SIZE];
 static unsigned int pendingCount, copyDepth;
+static unsigned int completionDepth;
 static volatile LONG stopped = 1, initialized, dropped;
+static volatile LONG64 sourceSequence, sourceMutation;
+static uint64_t lastLossSequence; // Protected by queueLock.
 static HANDLE wakeEvent;
 static DWORD hostPid, sessionNonce;
-static UINT startMessage, stopMessage;
+static UINT startMessage, stopMessage, imageMessage;
 static HWND verifiedTray;
+static SRWLOCK imageOutputLock = SRWLOCK_INIT;
+static TrayImageResult *imageOutput[IMAGE_OUTPUT_SIZE];
+static unsigned int imageCount, imageHead, imageBytes;
+static TrayImageStatus imageStatus;
+static BOOL imageStatusPending;
+static uint64_t imageStatusSequence;
 
-static void DiscardPending(unsigned int first) {
-    while (pendingCount > first) {
-        PendingMessage *message = &pending[--pendingCount];
-        if (message->event.icon) DestroyIcon(message->event.icon);
-        message->event.icon = NULL;
+uint64_t TrayHookNextSequence(void) {
+    uint64_t value = (uint64_t)InterlockedIncrement64(&sourceSequence);
+    return value ? value : (uint64_t)InterlockedIncrement64(&sourceSequence);
+}
+uint64_t TrayHookCurrentSequence(void) { return (uint64_t)InterlockedCompareExchange64(&sourceSequence, 0, 0); }
+uint64_t TrayHookCurrentMutation(void) { return (uint64_t)InterlockedCompareExchange64(&sourceMutation, 0, 0); }
+
+BOOL TrayHookImageBoundary(DWORD nonce) {
+    if (stopped || nonce != sessionNonce || copyDepth || completionDepth || !verifiedTray ||
+        GetCurrentThreadId() != GetWindowThreadProcessId(verifiedTray, NULL)) return FALSE;
+    if (!TryAcquireSRWLockExclusive(&queueLock)) return FALSE;
+    BOOL safe = !stopped && nonce == sessionNonce && !pendingCount;
+    ReleaseSRWLockExclusive(&queueLock);
+    return safe;
+}
+
+static void WakePipe(void) {
+    // Diagnostics can originate on the UI thread. A missed wake is harmless:
+    // the pipe worker polls; the UI must never wait on its queue lock.
+    if (!TryAcquireSRWLockExclusive(&queueLock)) return;
+    if (wakeEvent) SetEvent(wakeEvent);
+    ReleaseSRWLockExclusive(&queueLock);
+}
+
+BOOL TrayHookPublishImage(TrayImageResult *result) {
+    if (!result || result->body.pixelBytes > TRAY_IMAGE_MAX_BYTES) return FALSE;
+    unsigned int bytes = (unsigned int)sizeof(*result) + result->body.pixelBytes;
+    AcquireSRWLockExclusive(&imageOutputLock);
+    BOOL accepted = !stopped && result->body.nonce == sessionNonce &&
+        imageCount < IMAGE_OUTPUT_SIZE && bytes <= IMAGE_OUTPUT_BYTES - imageBytes;
+    if (accepted) {
+        imageOutput[(imageHead + imageCount++) % IMAGE_OUTPUT_SIZE] = result;
+        imageBytes += bytes;
     }
+    ReleaseSRWLockExclusive(&imageOutputLock);
+    if (accepted) WakePipe();
+    return accepted;
+}
+
+void TrayHookPublishImageStatus(TrayImageStatus status) {
+    if (!TryAcquireSRWLockExclusive(&imageOutputLock)) return;
+    BOOL accepted = !stopped && status.nonce == sessionNonce && status.sequence > imageStatusSequence;
+    if (accepted) {
+        imageStatus = status; imageStatusPending = TRUE; imageStatusSequence = status.sequence;
+    }
+    ReleaseSRWLockExclusive(&imageOutputLock);
+    if (accepted) WakePipe();
+}
+
+static TrayImageResult *TakeImage(void) {
+    AcquireSRWLockExclusive(&imageOutputLock);
+    TrayImageResult *result = NULL;
+    if (imageCount) {
+        result = imageOutput[imageHead]; imageHead = (imageHead + 1) % IMAGE_OUTPUT_SIZE; --imageCount;
+        imageBytes -= (unsigned int)sizeof(*result) + result->body.pixelBytes;
+    }
+    ReleaseSRWLockExclusive(&imageOutputLock);
+    return result;
+}
+
+static BOOL TakeImageStatus(TrayImageStatus *status) {
+    AcquireSRWLockExclusive(&imageOutputLock);
+    BOOL ready = imageStatusPending;
+    if (ready) { *status = imageStatus; imageStatusPending = FALSE; }
+    ReleaseSRWLockExclusive(&imageOutputLock);
+    return ready;
 }
 
 // Keep the original request order when Explorer pumps nested messages before
@@ -81,8 +155,16 @@ static void DiscardPending(unsigned int first) {
 static unsigned int TakeCompleted(QueuedIcon *events) {
     unsigned int consumed = 0, length = 0;
     while (consumed < pendingCount && pending[consumed].completed) {
-        QueuedIcon *event = &pending[consumed++].event;
-        if (event->kind) events[length++] = *event;
+        PendingMessage *saved = &pending[consumed++];
+        QueuedIcon *event = &saved->event;
+        // A nested update may have been lost while an outer ADD was still in
+        // Explorer. Its later return cannot establish a fresh version-0 icon.
+        if (saved->lossSequence != lastLossSequence) event->kind = 0;
+        if (event->kind) {
+            event->sequence = TrayHookNextSequence();
+            InterlockedIncrement64(&sourceMutation);
+            events[length++] = *event;
+        }
         else if (event->icon) DestroyIcon(event->icon);
     }
     if (consumed) {
@@ -189,6 +271,7 @@ static BOOL SendIcon(HANDLE pipe, HANDLE process, QueuedIcon *event) {
     IconPacket *packet = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, length);
     if (!packet) { if (pixels) HeapFree(GetProcessHeap(), 0, pixels); return FALSE; }
     packet->header = (Header){MAGIC, PROTOCOL, event->kind, length};
+    packet->sequence = event->sequence;
     packet->operation = event->operation; packet->ownerPid = event->ownerPid;
     packet->width = width; packet->height = height; packet->pixelBytes = bytes;
     packet->icon = event->data;
@@ -204,12 +287,32 @@ static BOOL SendIcon(HANDLE pipe, HANDLE process, QueuedIcon *event) {
     return ok;
 }
 
+static unsigned int DetachQueue(QueuedIcon *abandoned) {
+    unsigned int length = count;
+    for (unsigned int i = 0; i < length; ++i) abandoned[i] = queue[(head + i) % QUEUE_SIZE];
+    head = count = 0;
+    return length;
+}
+
+static void ReleaseIcons(QueuedIcon *events, unsigned int length) {
+    for (unsigned int i = 0; i < length; ++i) if (events[i].icon) DestroyIcon(events[i].icon);
+}
+
+static BOOL SendImage(HANDLE pipe, HANDLE process, TrayImageResult *result) {
+    if (result->body.nonce != sessionNonce || stopped) return TRUE;
+    Header header = {MAGIC, PROTOCOL, 5, sizeof(Header) + sizeof(TrayImageBody) + result->body.pixelBytes};
+    return WritePacket(pipe, process, &header, sizeof(header)) &&
+        WritePacket(pipe, process, result, sizeof(TrayImageBody) + result->body.pixelBytes);
+}
+
 static DWORD WINAPI Worker(void *unused) {
     (void)unused;
     WCHAR name[128];
     wsprintfW(name, L"\\\\.\\pipe\\WinDock.Tray.%lu.%08lX", hostPid, sessionNonce);
     HANDLE process = OpenProcess(SYNCHRONIZE, FALSE, hostPid);
     HANDLE pipe = INVALID_HANDLE_VALUE;
+    DWORD workerNonce = sessionNonce;
+    QueuedIcon abandoned[QUEUE_SIZE];
     for (int tries = 0; tries < 40 && !stopped; ++tries) {
         pipe = CreateFileW(name, GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL);
         if (pipe != INVALID_HANDLE_VALUE) break;
@@ -220,10 +323,26 @@ static DWORD WINAPI Worker(void *unused) {
         serverPid != hostPid || !ExpectedHost(serverPid)) goto finish;
     Header connected = { MAGIC, PROTOCOL, 2, sizeof(Header) };
     if (!WritePacket(pipe, process, &connected, sizeof(connected))) goto finish;
+    unsigned int protocolBurst = 0;
     while (!stopped && WaitForSingleObject(process, 0) == WAIT_TIMEOUT) {
-        if (InterlockedExchange(&dropped, 0)) {
-            Header loss = { MAGIC, PROTOCOL, 3, sizeof(Header) };
-            if (!WritePacket(pipe, process, &loss, sizeof(loss))) break;
+        if (dropped) {
+            unsigned int abandonedCount = 0;
+            uint64_t lossSequence = 0;
+            AcquireSRWLockExclusive(&queueLock);
+            if (InterlockedExchange(&dropped, 0)) {
+                // Never replay pre-loss ADD/version records after a new loss
+                // barrier. Detach under lock; release owned HICONs outside it.
+                abandonedCount = DetachQueue(abandoned);
+                lossSequence = TrayHookNextSequence();
+                lastLossSequence = lossSequence;
+                InterlockedIncrement64(&sourceMutation);
+            }
+            ReleaseSRWLockExclusive(&queueLock);
+            ReleaseIcons(abandoned, abandonedCount);
+            if (lossSequence) {
+                struct { Header header; uint64_t sequence; } loss = {{MAGIC, PROTOCOL, 3, 24}, lossSequence};
+                if (!WritePacket(pipe, process, &loss, sizeof(loss))) break;
+            }
         }
         QueuedIcon event = {0}; BOOL ready = FALSE;
         AcquireSRWLockExclusive(&queueLock);
@@ -233,20 +352,46 @@ static DWORD WINAPI Worker(void *unused) {
             BOOL ok = SendIcon(pipe, process, &event);
             if (event.icon) DestroyIcon(event.icon);
             if (!ok) break;
-        } else {
+            if (++protocolBurst < 8) continue;
+        }
+        protocolBurst = 0;
+        TrayImageResult *pixels = TakeImage();
+        if (pixels) {
+            BOOL ok = SendImage(pipe, process, pixels);
+            TrayImagesFreeResult(pixels);
+            if (!ok) break;
+        }
+        TrayImageStatus status;
+        BOOL hasStatus = TakeImageStatus(&status);
+        if (hasStatus && status.nonce == workerNonce && !stopped) {
+            struct { Header header; TrayImageStatus body; } packet = {{MAGIC, PROTOCOL, 6, 40}, status};
+            if (!WritePacket(pipe, process, &packet, sizeof(packet))) break;
+        }
+        if (!ready && !pixels && !hasStatus) {
             HANDLE waits[] = { wakeEvent, process };
             if (WaitForMultipleObjects(2, waits, FALSE, 250) == WAIT_OBJECT_0 + 1) break;
         }
     }
 finish:
-    AcquireSRWLockExclusive(&queueLock);
     InterlockedExchange(&stopped, 1);
-    DiscardPending(0);
-    while (count) { if (queue[head].icon) DestroyIcon(queue[head].icon); head = (head + 1) % QUEUE_SIZE; --count; }
-    head = 0;
+    TrayImagesCancel(workerNonce);
+    HICON pendingIcons[PENDING_SIZE];
+    unsigned int pendingIconCount = 0, abandonedCount = 0;
+    AcquireSRWLockExclusive(&queueLock);
+    while (pendingCount) {
+        HICON icon = pending[--pendingCount].event.icon;
+        if (icon) pendingIcons[pendingIconCount++] = icon;
+    }
+    abandonedCount = DetachQueue(abandoned);
     InterlockedExchange(&dropped, 0);
-    if (wakeEvent) { CloseHandle(wakeEvent); wakeEvent = NULL; }
     ReleaseSRWLockExclusive(&queueLock);
+    ReleaseIcons(abandoned, abandonedCount);
+    for (unsigned int i = 0; i < pendingIconCount; ++i) DestroyIcon(pendingIcons[i]);
+    TrayImageResult *discarded;
+    while ((discarded = TakeImage()) != NULL) TrayImagesFreeResult(discarded);
+    AcquireSRWLockExclusive(&imageOutputLock);
+    imageStatusPending = FALSE;
+    ReleaseSRWLockExclusive(&imageOutputLock);
     if (pipe != INVALID_HANDLE_VALUE) CloseHandle(pipe);
     if (process) CloseHandle(process);
     InterlockedExchange(&initialized, 0);
@@ -321,6 +466,9 @@ static void Enqueue(QueuedIcon *event) {
     // Never wait behind the worker's queue access on Explorer's window thread.
     if (!TryAcquireSRWLockExclusive(&queueLock)) { InterlockedIncrement(&dropped); return; }
     if (stopped) { ReleaseSRWLockExclusive(&queueLock); return; }
+    // A completed event may have left the pending lock just before the worker
+    // emitted a loss barrier. It must not re-enter the queue behind that barrier.
+    if (event->sequence <= lastLossSequence) { ReleaseSRWLockExclusive(&queueLock); return; }
     if (IconUpdate(event)) {
         for (unsigned int i = count; i > 0; --i) {
             QueuedIcon *prior = &queue[(head + i - 1) % QUEUE_SIZE];
@@ -367,7 +515,7 @@ static void BeginCopyData(const CWPSTRUCT *message) {
         }
         length = TakeCompleted(completed);
         if (!stopped && pendingCount < PENDING_SIZE) {
-            pending[pendingCount++] = (PendingMessage){message->hwnd, message->wParam, message->lParam, depth, FALSE, event};
+            pending[pendingCount++] = (PendingMessage){message->hwnd, message->wParam, message->lParam, depth, FALSE, lastLossSequence, event};
             event.icon = NULL;
         } else if (!stopped) InterlockedIncrement(&dropped);
         ReleaseSRWLockExclusive(&queueLock);
@@ -411,42 +559,53 @@ __declspec(dllexport) DWORD WINAPI WinDockTrayProtocol(void) { return PROTOCOL; 
 __declspec(dllexport) LRESULT CALLBACK WinDockTrayHook(int code, WPARAM wParam, LPARAM lParam) {
     if (code >= 0 && lParam) {
         const CWPSTRUCT *message = (const CWPSTRUCT *)lParam;
-        if (!startMessage) { startMessage = RegisterWindowMessageW(START_MESSAGE); stopMessage = RegisterWindowMessageW(STOP_MESSAGE); }
+        if (!startMessage) {
+            startMessage = RegisterWindowMessageW(START_MESSAGE); stopMessage = RegisterWindowMessageW(STOP_MESSAGE);
+            imageMessage = RegisterWindowMessageW(TRAY_IMAGE_REQUEST_MESSAGE);
+        }
         if ((message->message == startMessage || message->message == stopMessage ||
+            message->message == imageMessage ||
             message->message == WM_COPYDATA || message->message == WM_NCDESTROY) && ExplorerTray(message->hwnd)) {
             if (message->message == startMessage && !initialized && message->wParam && message->lParam && ExpectedHost((DWORD)message->wParam)) {
                 if (InterlockedCompareExchange(&initialized, 1, 0) == 0) {
                     hostPid = (DWORD)message->wParam; sessionNonce = (DWORD)message->lParam;
-                    wakeEvent = CreateEventW(NULL, FALSE, FALSE, NULL);
+                    // One event belongs to the DLL, not to a connection. Old
+                    // image completions can safely signal it while a new pipe
+                    // is starting; no failed-start path closes a shared handle.
+                    if (!wakeEvent) wakeEvent = CreateEventW(NULL, FALSE, FALSE, NULL);
                     HMODULE held = NULL;
                     if (wakeEvent && GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
                         (LPCWSTR)(ULONG_PTR)&WinDockTrayHook, &held)) {
                         InterlockedExchange(&stopped, 0);
                         HANDLE worker = CreateThread(NULL, 0, Worker, NULL, 0, NULL);
-                        if (worker) CloseHandle(worker);
+                        if (worker) {
+                            CloseHandle(worker);
+                            TrayImagesBegin(module, message->hwnd, hostPid, sessionNonce);
+                            // A failed pipe connection can finish before the UI
+                            // has started its optional image worker.
+                            if (stopped) TrayImagesCancel(sessionNonce);
+                        }
                         else {
                             InterlockedExchange(&stopped, 1);
-                            FreeLibrary(held); CloseHandle(wakeEvent); wakeEvent = NULL;
+                            FreeLibrary(held);
                             InterlockedExchange(&initialized, 0);
                         }
                     } else {
-                        if (wakeEvent) { CloseHandle(wakeEvent); wakeEvent = NULL; }
                         InterlockedExchange(&initialized, 0);
                     }
                 }
             } else if (message->message == stopMessage && message->wParam == hostPid && (DWORD)message->lParam == sessionNonce) {
-                AcquireSRWLockExclusive(&queueLock);
                 InterlockedExchange(&stopped, 1);
-                DiscardPending(0);
-                if (wakeEvent) SetEvent(wakeEvent);
-                ReleaseSRWLockExclusive(&queueLock);
+                TrayImagesCancel(sessionNonce);
+                WakePipe();
+            } else if (message->message == imageMessage && !stopped &&
+                message->wParam == hostPid && (DWORD)message->lParam == sessionNonce) {
+                TrayImagesRequest(message->hwnd, hostPid, sessionNonce);
             } else if (message->message == WM_COPYDATA) BeginCopyData(message);
             else if (message->message == WM_NCDESTROY) {
-                AcquireSRWLockExclusive(&queueLock);
                 InterlockedExchange(&stopped, 1);
-                DiscardPending(0);
-                if (wakeEvent) SetEvent(wakeEvent);
-                ReleaseSRWLockExclusive(&queueLock);
+                TrayImagesCancel(sessionNonce);
+                WakePipe();
                 verifiedTray = NULL;
             }
         }
@@ -457,7 +616,11 @@ __declspec(dllexport) LRESULT CALLBACK WinDockTrayHook(int code, WPARAM wParam, 
 __declspec(dllexport) LRESULT CALLBACK WinDockTrayReturnHook(int code, WPARAM wParam, LPARAM lParam) {
     if (code >= 0 && lParam) {
         const CWPRETSTRUCT *message = (const CWPRETSTRUCT *)lParam;
-        if (message->message == WM_COPYDATA && ExplorerTray(message->hwnd)) CompleteCopyData(message);
+        if (message->message == WM_COPYDATA && ExplorerTray(message->hwnd)) {
+            ++completionDepth;
+            CompleteCopyData(message);
+            --completionDepth;
+        }
     }
     return CallNextHookEx(NULL, code, wParam, lParam);
 }
@@ -465,5 +628,6 @@ __declspec(dllexport) LRESULT CALLBACK WinDockTrayReturnHook(int code, WPARAM wP
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, void *reserved) {
     (void)reserved;
     if (reason == DLL_PROCESS_ATTACH) { module = instance; DisableThreadLibraryCalls(instance); }
+    else if (reason == DLL_PROCESS_DETACH && wakeEvent) CloseHandle(wakeEvent);
     return TRUE;
 }

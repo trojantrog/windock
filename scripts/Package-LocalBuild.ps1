@@ -11,11 +11,11 @@ $motion = Get-Content -LiteralPath (Join-Path $release 'WinDock.Motion.manifest.
 foreach ($part in @($motion.payload, $motion.host)) {
     if ((Get-FileHash -LiteralPath (Join-Path $release $part.name)).Hash -ne $part.sha256) { throw 'Motion component checksum mismatch.' }
 }
-$tray = Join-Path $release 'WinDock.TrayHook.x64.dll'
+$tray = Join-Path $release 'WinDock.TrayHook.v6.x64.dll'
 if ((Get-FileHash -LiteralPath $tray).Hash -ne ([IO.File]::ReadAllText($tray + '.sha256')).Trim()) {
     throw 'Tray component checksum mismatch.'
 }
-$signatures = @(foreach ($name in @('WinDock.exe', 'WinDock.Motion.x64.dll', 'WinDock.MotionHost.exe', 'WinDock.TrayHook.x64.dll')) {
+$signatures = @(foreach ($name in @('WinDock.exe', 'WinDock.Motion.x64.dll', 'WinDock.MotionHost.exe', 'WinDock.TrayHook.v6.x64.dll')) {
     $file = Join-Path $release $name
     $bytes = [IO.File]::ReadAllBytes($file)
     $header = [BitConverter]::ToInt32($bytes, 0x3c)

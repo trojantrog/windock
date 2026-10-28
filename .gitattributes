@@ -1,0 +1,2 @@
+# Keep the reproducible generated profile identical after Windows checkouts.
+native/WinDock.TrayHook/tray_image_profile.h text eol=lf

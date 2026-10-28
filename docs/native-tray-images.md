@@ -2,9 +2,9 @@
 
 更新日期：2026-10-29。
 
-当前图像可以沿“Explorer 图标线程取得有效引用 → 后台复制 SoftwareBitmap 像素 → 现有管道传输”的方向继续实现。已有钩子提供了进入 Explorer 的消息线程的条件；直接将远程对象指针交给 Dock、读取初始 HICON 缓存或使用程序 EXE 图标，都不能取得应用当前绘制的数字和文字。
+当前图像路径采用“Explorer 图标线程取得有效引用 → 后台复制 SoftwareBitmap 像素 → 现有管道传输”。已有钩子提供了进入 Explorer 的消息线程的条件；直接将远程对象指针交给 Dock、读取初始 HICON 缓存或使用程序 EXE 图标，都不能取得应用当前绘制的数字和文字。
 
-本页记录源码检查、微软公开接口和本机 PE/PDB 的离线证据。尚未增加或运行图像获取代码，也未验证当前 Explorer 的线程值、像素输出、刷新速度或退出行为。
+本页记录源码检查、微软公开接口和本机 PE/PDB 的离线证据。图像采集、后台像素复制和版本校验已实现并通过离线编译，精确版本资料由离线生成器生成。尚未运行图像接入或 UI 验证；当前 Explorer 的实际线程值、像素输出、刷新速度和退出行为均待验证。
 
 ## 图像来源与版本范围
 
@@ -40,7 +40,7 @@
 可采用的引用顺序如下：
 
 1. 在已确认的图标线程上，重新核对根接口虚表及所有依赖函数，取得根的 IUnknown 引用。沿当前根读取 model、manager 和有界登记集合。此阶段连续执行，不发消息、不泵消息、不触发用户回调。
-2. 对每个候选核对集合边界、图标实现虚表、默认接口虚表和登记身份。默认接口为实现 `+0x10`。其 AddRef 槽 `0x68670` 调整 this 后进入 `0xA4A84`，后者只做原子计数操作；通过这个接口取得图标强引用，不手动增加私有字段。
+2. 每次最多取两个候选。先在连续的无回调阶段核对集合边界、图标实现虚表、默认接口虚表和登记身份，为本次全部候选取得强引用，再进入图像 getter 或公开 COM 调用。默认接口为实现 `+0x10`。其 AddRef 槽 `0x68670` 调整 this 后进入 `0xA4A84`，后者只做原子计数操作；通过这个接口取得图标强引用，不手动增加私有字段。开始 COM 调用后不再读取旧 manager 或 vector 的裸地址，避免重入期间集合变化留下悬空指针。
 3. 只通过完整校验过的默认接口槽 8 取得当前图像；检查 HRESULT 和空结果。成功后，图像引用独立于 manager 的后续删除或图标字段替换。释放图标和根引用也安排在所属线程；manager 不传入后台，不调用或仿造其私有 shared_ptr 复制/析构函数。
 4. 图像对象只在 Explorer 进程内部移交。后台最终释放自己取得的引用。不得对这个共享 `SoftwareBitmap` 调用 `Close`，也不得将 COM 指针、内部对象地址或位图数据地址放进跨进程协议。
 
@@ -54,15 +54,19 @@
 
 优先在 UI 线程确认公开 `ISoftwareBitmap` 与敏捷接口支持，然后交给专门的像素线程。该线程通过 [RoInitialize](https://learn.microsoft.com/en-us/windows/win32/api/roapi/nf-roapi-roinitialize) 初始化自己的 MTA，并平衡成功的初始化与释放；不能改变 Explorer UI 线程已有的 apartment 模式。敏捷性确认失败时先拒绝这一项。若将来需要支持非敏捷对象，可使用 [RoGetAgileReference / Resolve](https://learn.microsoft.com/en-us/windows/win32/api/combaseapi/nf-combaseapi-rogetagilereference)，但其代理调用可能回到原线程，不能把它当成无阻塞保证。
 
-使用公开 [`ISoftwareBitmap.CopyToBuffer`](https://learn.microsoft.com/en-us/uwp/api/windows.graphics.imaging.softwarebitmap.copytobuffer?view=winrt-26100) 和自己拥有的有界 IBuffer。自定义 IBuffer 还需提供 [`IBufferByteAccess`](https://learn.microsoft.com/en-us/windows/win32/api/robuffer/ns-robuffer-ibufferbyteaccess)。尺寸、格式和容量在分配前确认：宽高 1–256，BGRA8，预乘 alpha，stride 为经过溢出检查的 `width × 4`，数据长度为 `stride × height`，单图最多 262,144 字节。超过范围或格式不符要明确返回未获取，后续缩放支持须另用公开图像接口完成。
+使用公开 [`ISoftwareBitmap.CopyToBuffer`](https://learn.microsoft.com/en-us/uwp/api/windows.graphics.imaging.softwarebitmap.copytobuffer?view=winrt-26100)，由 `Windows.Storage.Streams.Buffer` 的 factory 创建有界缓冲区，再通过 [`IBufferByteAccess`](https://learn.microsoft.com/en-us/windows/win32/api/robuffer/ns-robuffer-ibufferbyteaccess) 读取自己持有的缓冲区。后台持有微软 SDK 对象，不把本 DLL 实现的 Buffer 回调交给图像对象。尺寸、格式和容量在分配前确认：宽高 1–256，BGRA8，预乘 alpha，stride 为经过溢出检查的 `width × 4`，数据长度为 `stride × height`，单图最多 262,144 字节。超过范围或格式不符返回未获取，后续缩放支持须另用公开图像接口完成。
 
 SDK ABI 以微软 [win32metadata 固定提交的 imaging.idl](https://github.com/microsoft/win32metadata/blob/64ed9177fb76eb244fc9051c74b8a93fdfe20873/generation/WinSDK/RecompiledIdlHeaders/winrt/windows.graphics.imaging.idl)为依据：`ISoftwareBitmap` IID 为 `689E0708-7EEF-483F-963F-DA938818E073`，继承 IInspectable，CopyToBuffer 在该接口的槽 18。实现应使用正式 SDK 声明，避免按方法名称猜槽位。
 
+C ABI 声明还对照同一提交的 [streams.idl](https://github.com/microsoft/win32metadata/blob/64ed9177fb76eb244fc9051c74b8a93fdfe20873/generation/WinSDK/RecompiledIdlHeaders/winrt/windows.storage.streams.idl)、[robuffer.h](https://github.com/microsoft/win32metadata/blob/64ed9177fb76eb244fc9051c74b8a93fdfe20873/generation/WinSDK/RecompiledIdlHeaders/winrt/robuffer.h) 和 [ObjIdlbase.Idl](https://github.com/microsoft/win32metadata/blob/64ed9177fb76eb244fc9051c74b8a93fdfe20873/generation/WinSDK/RecompiledIdlHeaders/um/ObjIdlbase.Idl)：IBuffer 和 IBufferFactory 继承 IInspectable，Factory.Create 为槽 6；IBufferByteAccess 和 IAgileObject 继承 IUnknown。图像格式取 IDL 中的 Bgra8 = 87、Premultiplied = 0，不依赖语言枚举名称的隐式转换。
+
 另有一个容易引入崩溃的 ABI 差异：微软 [interop SDK 头文件](https://github.com/microsoft/win32metadata/blob/64ed9177fb76eb244fc9051c74b8a93fdfe20873/generation/WinSDK/RecompiledIdlHeaders/um/windows.graphics.imaging.interop.h)明确 `ISoftwareBitmapNative` 继承 IInspectable，GetData 为槽 6；部分 Learn 页面将继承关系写成 IUnknown。若尝试 WIC 路径，以 SDK 为准，且 GetData 是否支持目标 IID 要检查 HRESULT。本方案不依赖该替代路径。
 
-像素线程与现有协议写入线程分开，避免一次图像复制阻塞应用登记、菜单协议及断线消息。只把已经拥有的像素数组交给现有 IPC 写入线程。队列、持有的图像总数和总字节均设置上限；每个图标最多保留一个等待任务，并合并为最近一次请求。模块引用持续到后台退出和全部 COM 引用释放为止。
+像素线程与现有协议写入线程分开，避免一次图像复制阻塞应用登记、菜单协议及断线消息。只把已经拥有的像素数组交给现有 IPC 写入线程。每次最多取得两个图标引用，单个像素线程仍忙时不积压新请求；完成后下一次请求沿游标继续。像素发送队列最多 8 项、合计最多 2 MiB，容量不足时丢弃本次图像并报告状态，不挤占应用登记或菜单事件。模块引用持续到后台退出和全部 COM 引用释放为止。
 
-新图像包使用独立类型和明确的协议版本，包含连接代际、登记身份、图像修订号、尺寸、格式及长度。修订号在图标线程取得当前引用时登记，并与成功的 ADD、DELETE、NIF_ICON 更新共用顺序来源。接收方只对仍然存在且代际、身份与修订号都有效的登记项更新图像；旧任务晚完成、窗口句柄复用、GUID 重新登记或丢包后的旧结果均须丢弃。图像包不能伪装为 NIM_MODIFY，也不能据此重新确认回调消息、协议版本或 owner。
+v6 的图像包使用独立 kind 5，状态包使用 kind 6，结构见 [`tray_images.h`](../native/WinDock.TrayHook/tray_images.h) 和[协议说明](tray-capture-protocol.md)。图像包包含连接标识、登记身份、图像修订号、尺寸、格式及长度。修订号在图标线程取得当前引用时登记，并与成功的 ADD、DELETE、NIF_ICON 更新共用顺序来源，后台像素复制完成时不重新编号。接收方只对仍然存在且代际、身份与修订号都有效的登记项更新图像；旧任务晚完成、窗口句柄复用、GUID 重新登记或丢包后的旧结果均须丢弃。图像包不能伪装为 NIM_MODIFY，也不能据此重新确认回调消息、协议版本或 owner。
+
+状态中的 `sampled` 表示本连接累计取得有效引用并入队的数量，`published` 表示累计成功交给发送队列的数量。它们均不表示 Dock 已完成绘制。取消连接不会强行终止 COM 调用：旧任务返回后释放引用，连接标识和内部代际不符的结果不能进入新会话。像素调用长时间未完成时保留一个工作线程，不反复创建替代线程。
 
 启动接入、断线恢复、队列丢失、托盘面板打开可触发有界重取；实时 NIF_ICON 继续驱动更新。仅做启动快照并不能覆盖所有图像变化。PDB 另有 `INotificationAreaIcon4::add_Changed`（`0xB78C0`）和 `remove_Changed`（`0x1488E0`），但其 IID、事件参数、撤销与对象寿命尚未形成完整证据，当前不能直接调用。完整事件接入完成前，可用受限的低频重取补充，并在开发记录中保留这一刷新限制。
 
@@ -74,16 +78,45 @@ SDK ABI 以微软 [win32metadata 固定提交的 imaging.idl](https://github.com
 
 [SendMessageTimeout](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendmessagetimeoutw)的等待超时不能作为接收线程中任意 COM 调用的执行时限。像素字节数有上限也不代表调用耗时有硬上限。发生长时间未完成的图像任务时停止追加任务并保留真实故障状态，不能强制结束 Explorer 线程。
 
-## 后续实现边界与证据文件
+## 可复现的版本资料
 
-实施前需要把线程全局、根/图标接口虚表、AddRef 路径及 getter 完整函数哈希纳入单独的图像能力资料，并在 Explorer 内重新验证加载映像。现有模型读取成功和 `capabilities.icon = false` 都不应被静默改写成已经具备图像能力。系统文件变化后重新取证，不用邻近版本或模式扫描猜地址。
+[`Generate-TrayImageProfile.py`](../scripts/Generate-TrayImageProfile.py) 从系统 PE 和匹配的微软 PDB 生成 [`tray_image_profile.h`](../native/WinDock.TrayHook/tray_image_profile.h)。输入必须同时匹配整文件 SHA-256、AMD64 PE 身份、唯一 RSDS GUID/age、PDB GUID/DBI age、PDB 文件哈希和 PE 节表。PDB Info age 3、DBI age 1 的匹配规则沿用 [Microsoft PDB 固定源码](https://github.com/microsoft/microsoft-pdb/blob/805655a28bd8198004be2ac27e6e0290121a5e89/PDB/dbi/pdb.cpp#L808)，不把 Info age 直接当成映像 age。目标映像或 PDB 变化时拒绝生成。
 
-本次新增的本地离线文件位于 Git 忽略目录 `publish/checks/tray-images/`：
+生成器通过精确公开符号选择函数，再按 PE 展开表或下一公开符号确定完整范围。少数尾跳转叶函数还须以同映像的命名代码为目标。匿名根释放函数通过已确认的 `g_trayUI` 读写、Release 槽访问及完整展开范围唯一确定。线程检查中的调用被解析到 PE 实际导入的 `GetCurrentThreadId`，不能只凭相似指令认作同一个 API。
 
-- `inspect-images.py`：只读取系统 PE、已有 PDB 并核对身份；不加载 Taskbar.dll、不调用 COM、不读取进程。
-- `image-code-evidence.json`：27 个完整函数范围、2 个完整虚表、全局符号与交叉引用，函数合计 7,775 字节。
-- `image-disassembly.txt`：上述函数的完整离线反汇编。无展开信息的叶函数按下一公开符号确定边界，并确认末尾为返回或已确认的跳转目标。
+发行头包括 36 个完整函数哈希、2 个完整虚表哈希，以及下列字段。函数范围共 9,345 字节；头文件本身不包含这些字节，也不包含 PDB 或反汇编。头文件 SHA-256 为 `7ac3d53965a4a0c17dbf480f6ef3021b875e754287511fba12c9ee5c4e72722a`。
 
-关键新增哈希：`FailFastIfNotUIThread` 为 `c56ffaafe479839af0e557fad85fc2eba4edde38b6fd3fe7f3602a129611de9f`；manager 析构为 `276c4cdff323c04dfee79767ff2765c938d04543d84360e16876f718f1a061fb`；图标 AddRef 实体为 `9c198385d1eb90d1a517f447f2254616f823a39a19847ab19760276636483556`；根完整 ITrayUI 虚表为 `725c8256255b00235b09bfdaeafc247c50d0ab418e7769c82f6b139a33ef7b46`。虚表指针比较须处理加载基址重定位。
+| 字段 | 本机值 | 独立依据 |
+| --- | --- | --- |
+| UI 线程号全局 | RVA `0x23D0B8` | PDB 类型、构造时写入与 fail-fast 比较均对应实际 GetCurrentThreadId 导入 |
+| 根全局、根 ITrayUI 虚表 | RVA `0x23E998`、`0x1CE030` | PDB ComPtr 类型、构造/替换/释放及完整 63 槽虚表 |
+| 根接口 → model → manager | `+0x270`、`+0x248` | ITrayUI 槽 31 的 HandleCopyData 中通知与位置查询两条路径相同；根构造/析构及 model 的 shared_ptr 赋值交叉核对 |
+| manager 登记集合 | begin `+0`、end `+8`、capacity `+0x10` | GetRect/findIdentity 的逐项查找与 AddIcon 的追加、容量判断 |
+| 图标实现与默认接口虚表 | RVA `0x1C6048`、`0x1C7FD8` | PDB 类型与完整 15 槽默认接口；每槽都在同映像可执行节并有 DIR64 重定位 |
+| 图标默认接口 / 图像 getter | 实现 `+0x10` / 槽 8 | AddRef、Release 调整 this；getter 与 SetIcon 一致指向实现 `+0xC8` |
+| 图标 HWND、uID、GUID | 实现 `+0x50`、`+0x58`、`+0x5C` | Identity 返回结构与 findIdentity 的比较字段一致 |
 
-资料中的私有布局来自本机映像和匹配的微软 PDB，公开 ABI 来自微软 SDK，没有引入 GPL 项目的实现。当前尚未实现取图模块；像素更新、退出和桌面交互也未验证。
+新增的释放证据包括根 Release 调整入口 `0xDFAB0`、实体 `0x836E0`、原子递减 `0x1ECC8`，以及图标 `subtract_final_reference 0x58624`、弱引用递减 `0x52CD8`。引用获取路径单独检查：根和图标 AddRef 的主体只进行原子计数，根可调用已确认的原子递增函数；它们不发送窗口消息或调用图标 owner。Release 可能触发对象析构，必须保留前述线程和清理顺序。
+
+安装 pefile、capstone 后，在项目根目录可复现生成。已有 PDB 默认从 `publish/checks/tray-model/` 读取；缺失时 `--download` 只使用精确的微软符号服务器地址。`--decoder-path` 可指定已有 Python 依赖目录。
+
+```powershell
+python scripts/Generate-TrayImageProfile.py --download
+python scripts/Generate-TrayImageProfile.py --check
+```
+
+`--check` 对照生成结果，不改发行头。生成和检查仅解析磁盘文件、解码指令和修饰符号名，不加载目标 DLL，不枚举或读取当前进程，不调用 COM，不安装钩子。本轮离线检查确认：生成头可重复得到相同字节；原有 27 函数和 2 虚表的 RVA、范围、哈希与早期证据逐项一致。未运行图像模块或进行桌面交互测试。
+
+本地完整证据保存在 Git 忽略目录 `publish/checks/tray-images/`：
+
+- `generated-image-evidence.json`：36 函数、2 虚表、完整字节、PDB 身份、全局交叉引用和生成头哈希。
+- `generated-image-disassembly.txt`：上述函数的完整离线反汇编。
+- `image-code-evidence.json`、`image-disassembly.txt`：最初 27 函数 / 2 虚表的对照证据。
+
+运行时还须重新验证磁盘映像、加载函数哈希和完整虚表。虚表的磁盘哈希检查之后，逐槽将首选基址指针换算为实际加载地址，再与当前槽值比较。`g_trayUI` 与线程号属于可变数据，不对其当前值套用磁盘哈希。单纯模型登记读取成功不能代表图像能力已经可用。
+
+[`tray_image_verify.c`](../native/WinDock.TrayHook/tray_image_verify.c) 实现了独立的校验组件。后台创建时仅取得已经加载的 Taskbar.dll 引用，核对模块路径和文件最终路径均为系统目录中的 Taskbar.dll，再检查整文件 SHA-256、PE/RSDS、完整函数和完整虚表。哈希采用 [BCryptCreateHash](https://learn.microsoft.com/en-us/windows/win32/api/bcrypt/nf-bcrypt-bcryptcreatehash) 及配对的销毁接口；文件读取、哈希、分配均在创建阶段完成。
+
+通过校验后，组件保留 9,969 字节的预期加载内容。图标线程每次只用固定 1,024 字节栈缓冲比较这些范围，不进行磁盘读取、哈希、堆分配或等待后台。[ReadProcessMemory](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-readprocessmemory) 限定当前进程，单次最多 4,096 字节，要求完整返回；它只提供可读性判断。持有模块直到后台结束且所有 UI 使用已退出，才释放缓存和模块引用。这一组件已通过 C11 严格警告编译检查，尚未执行。
+
+资料中的私有布局来自本机映像和匹配的微软 PDB，公开 ABI 来自微软 SDK，没有引入 GPL 项目的实现。系统文件变化后重新取证，不套用邻近版本偏移。SEH、指针可读性和等待超时均不能保证对象寿命，也不能限制 COM 调用耗时；异常后不能重新使用已失去所有权依据的指针。像素更新、退出及应用兼容性仍需实际验证。

@@ -76,20 +76,21 @@ internal static class SystemTrayInterop
 
 internal sealed class TrayHookSession : IDisposable
 {
-    const uint Magic = 0x52544457, Version = 5;
+    const uint Magic = 0x52544457, Version = 6;
     readonly CancellationToken token;
     readonly uint nonce = BitConverter.ToUInt32(RandomNumberGenerator.GetBytes(4)) | 1;
     NamedPipeServerStream? pipe;
     nint module, hook, returnHook, target;
     internal nint ExplorerWindow => target;
     internal uint ExplorerProcess { get; private set; }
+    internal uint Nonce => nonce;
     public TrayHookSession(CancellationToken token) => this.token = token;
 
-    public async Task ReadAsync(Action<uint, byte[]> receive, Action connected)
+    public async Task ReadAsync(Action<uint, ulong, byte[]> receive, Action connected)
     {
         if (RuntimeInformation.ProcessArchitecture != Architecture.X64 || RuntimeInformation.OSArchitecture != Architecture.X64 ||
             !OperatingSystem.IsWindowsVersionAtLeast(10, 0, 19041)) throw new NotSupportedException(Loc.T("systemTrayUnsupported"));
-        var path = Path.Combine(AppContext.BaseDirectory, "WinDock.TrayHook.x64.dll");
+        var path = Path.Combine(AppContext.BaseDirectory, "WinDock.TrayHook.v6.x64.dll");
         if (!File.Exists(path) || !File.Exists(path + ".sha256")) throw new FileNotFoundException(Loc.T("systemTrayMissing"));
         using (var stream = File.OpenRead(path))
         {
@@ -110,7 +111,7 @@ internal sealed class TrayHookSession : IDisposable
         if (returnHook == 0) throw new IOException(Loc.T("systemTrayHookFailed"));
         hook = SystemTrayInterop.SetWindowsHookExW(4, NativeLibrary.GetExport(module, "WinDockTrayHook"), module, explorer.Thread);
         if (hook == 0) throw new IOException(Loc.T("systemTrayHookFailed"));
-        var connectMessage = SystemTrayInterop.RegisterWindowMessage("WinDock.TrayHook.Connect.v5");
+        var connectMessage = SystemTrayInterop.RegisterWindowMessage("WinDock.TrayHook.Connect.v6");
         if (SystemTrayInterop.SendMessageTimeoutW(target, connectMessage, (nuint)Environment.ProcessId, (nint)nonce, 0x3, 250, out _) == 0)
             throw new IOException(Loc.T("systemTrayHookFailed"));
         await connection.WaitAsync(TimeSpan.FromSeconds(4), token);
@@ -123,7 +124,7 @@ internal sealed class TrayHookSession : IDisposable
             await pipe.ReadExactlyAsync(header, token);
             var magic = BitConverter.ToUInt32(header, 0); var version = BitConverter.ToUInt32(header, 4);
             var kind = BitConverter.ToUInt32(header, 8); var length = BitConverter.ToUInt32(header, 12);
-            if (magic != Magic || version != Version || length < 16 || length > 36 + 956 + 256 * 256 * 4 || kind is < 1 or > 4)
+            if (magic != Magic || version != Version || length < 16 || length > 1000 + 256 * 256 * 4 || kind is < 1 or > 6)
                 throw new InvalidDataException(Loc.T("systemTrayDataFailed"));
             byte[] body = new byte[length - 16];
             if (body.Length > 0) await pipe.ReadExactlyAsync(body, token);
@@ -134,10 +135,28 @@ internal sealed class TrayHookSession : IDisposable
             }
             else
             {
-                if (!ready || (kind == 3 && body.Length != 0)) throw new InvalidDataException(Loc.T("systemTrayDataFailed"));
-                receive(kind, body);
+                if (!ready || (kind is 1 or 4 && body.Length < 984) || (kind == 3 && body.Length != 8)
+                    || (kind == 5 && body.Length < 80) || (kind == 6 && body.Length != 24))
+                    throw new InvalidDataException(Loc.T("systemTrayDataFailed"));
+                var sequence = BitConverter.ToUInt64(body, kind is 5 or 6 ? 8 : 0);
+                if (sequence == 0 || (kind is 5 or 6 && BitConverter.ToUInt32(body, 0) != nonce))
+                    throw new InvalidDataException(Loc.T("systemTrayDataFailed"));
+                // Registration parsing keeps its existing, audited offsets.
+                // Images retain the complete identity and session envelope.
+                receive(kind, sequence, kind is 1 or 4 ? body.AsSpan(8).ToArray() : body);
             }
         }
+    }
+
+    internal bool RequestImages()
+    {
+        var window = target;
+        if (window == 0 || token.IsCancellationRequested) return false;
+        var thread = Native.GetWindowThreadProcessId(window, out var process);
+        return thread != 0 && process == ExplorerProcess && Native.ClassOf(window) == "Shell_TrayWnd"
+            && SystemTrayInterop.SendNotifyMessageW(window,
+                SystemTrayInterop.RegisterWindowMessage("WinDock.TrayHook.Images.v6"),
+                (nuint)Environment.ProcessId, (nint)nonce);
     }
 
     public void Dispose()
@@ -145,7 +164,7 @@ internal sealed class TrayHookSession : IDisposable
         // Remove only our own hook. Never mutate Explorer's window procedure,
         // taskbar visibility, registry, or another application's hook chain.
         if (target != 0 && hook != 0)
-            SystemTrayInterop.SendMessageTimeoutW(target, SystemTrayInterop.RegisterWindowMessage("WinDock.TrayHook.Disconnect.v5"),
+            SystemTrayInterop.SendMessageTimeoutW(target, SystemTrayInterop.RegisterWindowMessage("WinDock.TrayHook.Disconnect.v6"),
                 (nuint)Environment.ProcessId, (nint)nonce, 0x3, 150, out _);
         if (hook != 0) { SystemTrayInterop.UnhookWindowsHookEx(hook); hook = 0; }
         if (returnHook != 0) { SystemTrayInterop.UnhookWindowsHookEx(returnHook); returnHook = 0; }
