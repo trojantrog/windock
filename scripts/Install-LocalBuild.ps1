@@ -114,15 +114,22 @@ function Save-SettingsWithNativeTaskbar([string]$Raw, [bool]$EnableNativeAnimati
         $updated = [regex]::Replace($updated, $animationPattern, '"nativeWindowAnimations": true')
     }
     $temporary = $settingsFile + '.' + [Guid]::NewGuid().ToString('N') + '.tmp'
+    $previous = $temporary + '.previous'
+    $replaced = $false
     try {
         [IO.File]::WriteAllText($temporary, $updated, [Text.UTF8Encoding]::new($false))
         $parsed = Get-Content -LiteralPath $temporary -Raw | ConvertFrom-Json
         if ($parsed.dock.replaceTaskbar -ne $false -or [IO.File]::ReadAllText($temporary) -cne $updated) {
             throw 'Temporary settings readback failed.'
         }
-        [IO.File]::Replace($temporary, $settingsFile, $null)
+        if (Test-Path -LiteralPath $settingsFile) { [IO.File]::Replace($temporary, $settingsFile, $previous) }
+        else { [IO.File]::Move($temporary, $settingsFile) }
+        $replaced = $true
     }
-    finally { if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary } }
+    finally {
+        if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary }
+        if ($replaced -and (Test-Path -LiteralPath $previous)) { Remove-Item -LiteralPath $previous }
+    }
 }
 try {
     if ($running.Count) {

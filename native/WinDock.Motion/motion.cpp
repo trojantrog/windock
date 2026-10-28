@@ -422,8 +422,10 @@ DWORD WINAPI Initialize(void*) {
     HANDLE statusMap = OpenFileMappingW(FILE_MAP_WRITE | FILE_MAP_READ, FALSE, name);
     if (!statusMap) return 3;
     status = static_cast<Status*>(MapViewOfFile(statusMap, FILE_MAP_WRITE | FILE_MAP_READ, 0, 0, sizeof(Status)));
-    CloseHandle(statusMap);
-    if (!status) return 4;
+    if (!status) { CloseHandle(statusMap); return 4; }
+    // Keep the named section handles for this compositor's lifetime. A view alone
+    // must not be the only owner after Dock exits: the next Dock must reopen these
+    // same named sections, rather than create fresh disconnected mappings.
     ZeroMemory(status, sizeof(*status));
     status->magic = Magic; status->version = Protocol; status->bytes = sizeof(Status);
     status->pid = GetCurrentProcessId(); status->build = Build;
@@ -431,8 +433,7 @@ DWORD WINAPI Initialize(void*) {
     HANDLE configMap = OpenFileMappingW(FILE_MAP_READ, FALSE, name);
     if (configMap) {
         sharedConfig = static_cast<Config*>(MapViewOfFile(configMap, FILE_MAP_READ, 0, 0, sizeof(Config)));
-        if (!sharedConfig) status->reserved = GetLastError();
-        CloseHandle(configMap);
+        if (!sharedConfig) { status->reserved = GetLastError(); CloseHandle(configMap); }
     } else status->reserved = GetLastError();
     if (!sharedConfig) { status->error = 10; InterlockedExchange(&status->state, 3); }
     else if (Install()) InterlockedExchange(&status->state, 1);

@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Security.Principal;
@@ -13,16 +14,17 @@ namespace WinDock.Services;
 
 sealed class NativeWindowMotion : IDisposable
 {
-    const int ConfigBytes = 12384, StatusBytes = 96, ActivationBytes = 64, Capacity = 256, Build = 11;
+    const int ConfigBytes = 12384, StatusBytes = 96, ActivationBytes = 64, Capacity = 256, Build = 12;
     const uint Magic = 0x4d444e57;
     const string SystemHash = "de3a7bacdcbb49a98bfff41010e772d18a329b77d9bc6b2416e1bc9f5b415863";
     public static NativeWindowMotion Shared { get; } = new();
     public readonly record struct Anchor(nint Window, uint Pid, string? Exe, Rect Bounds, uint Flags = 0, int Screen = 0);
     sealed record Remembered(Anchor Anchor, long Until);
     sealed record Request(uint Pid, bool Minimized, long Until);
-    sealed record MotionDiagnostic(bool Connected, uint PublishedFlags, int ComponentPid, int ComponentBuild,
+    sealed record PreviousComponent(int Pid, int Build);
+    sealed record MotionDiagnostic(bool Connected, bool StatusHeaderValid, bool LoginEnabled, uint PublishedFlags, int ComponentPid, int ComponentBuild,
         int ComponentState, int ComponentError, long Opened, long Closed, long Minimized, long Restored,
-        long Hidden, long Skipped, long Failed);
+        long Hidden, long Skipped, long Failed, int PreviousComponentPid, int PreviousComponentBuild);
 
     readonly Dictionary<object, Func<IEnumerable<Anchor>>> providers = [];
     readonly Dictionary<(nint, uint, ulong, int), Remembered> history = [];
@@ -33,7 +35,7 @@ sealed class NativeWindowMotion : IDisposable
     SharedMap? config;
     SharedMap? status;
     bool activating, disposed, suspended;
-    bool configuringLogin, refreshingLogin;
+    bool configuringLogin, refreshingLogin, inspectingPrevious = true;
     int sequence;
     string? errorKey;
     string? failureCode;
@@ -41,6 +43,7 @@ sealed class NativeWindowMotion : IDisposable
     MotionDiagnostic? lastDiagnostic;
     Task? diagnosticWrite;
     long diagnosticWrittenAt;
+    PreviousComponent? previousComponent;
 
     public void Initialize(DockOptions value)
     {
@@ -64,7 +67,7 @@ sealed class NativeWindowMotion : IDisposable
         timer.Tick += Tick;
         timer.Start();
         Publish();
-        _ = RefreshLoginAsync(true);
+        _ = RestoreConnectionAsync();
     }
 
     void LanguageChanged(object? sender, PropertyChangedEventArgs e) => UpdateStatus();
@@ -137,7 +140,7 @@ sealed class NativeWindowMotion : IDisposable
         history[(anchor.Window, anchor.Pid, PathHash(anchor.Exe), anchor.Screen)] = new(anchor, Environment.TickCount64 + lifetime);
     }
 
-    uint Flags => options is { NativeWindowAnimations: true, Enabled: true } && !suspended
+    uint Flags => options is { NativeWindowAnimations: true, Enabled: true } && !suspended && !inspectingPrevious
         && !IncompatibleComponent
         && SystemParameters.ClientAreaAnimation && SystemParameters.MinimizeAnimation
         ? 1u | (options.WindowOpenAnimation ? 2u : 0) | (options.WindowCloseAnimation ? 4u : 0)
@@ -190,21 +193,92 @@ sealed class NativeWindowMotion : IDisposable
     void Float(int offset, double value) => BinaryPrimitives.WriteSingleLittleEndian(packet.AsSpan(offset, 4), (float)value);
     void Bounds(int offset, Rect rect) { Float(offset, rect.X); Float(offset + 4, rect.Y); Float(offset + 8, rect.Width); Float(offset + 12, rect.Height); }
 
-    bool Connected => status is not null && unchecked((uint)Marshal.ReadInt32(status.View)) == Magic
-        && Marshal.ReadInt32(status.View, 4) == 1 && Marshal.ReadInt32(status.View, 8) == StatusBytes
-        && Environment.TickCount64 - Marshal.ReadInt64(status.View, 32) is >= 0 and < 1500;
+    bool StatusHeaderValid => status is not null && unchecked((uint)Marshal.ReadInt32(status.View)) == Magic
+        && Marshal.ReadInt32(status.View, 4) == 1 && Marshal.ReadInt32(status.View, 8) == StatusBytes;
 
-    bool IncompatibleComponent => Connected && Marshal.ReadInt32(status!.View, 24) != Build;
+    bool Connected => StatusHeaderValid
+        && Environment.TickCount64 - Marshal.ReadInt64(status!.View, 32) is >= 0 and < 1500;
+
+    bool IncompatibleComponent => StatusHeaderValid ? Marshal.ReadInt32(status!.View, 24) != Build
+        : previousComponent is { } previous && previous.Build != Build;
+
+    async Task RestoreConnectionAsync()
+    {
+        previousComponent = await Task.Run(ReadPreviousComponent);
+        inspectingPrevious = false;
+        if (disposed) return;
+        Publish();
+        await RefreshLoginAsync(true);
+    }
+
+    static PreviousComponent? ReadPreviousComponent()
+    {
+        try
+        {
+            var path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "WinDock", "motion-activation.json");
+            using var record = JsonDocument.Parse(File.ReadAllText(path));
+            var root = record.RootElement;
+            if (root.GetProperty("outcome").GetString() != "nativeMotionReady" || root.GetProperty("componentState").GetInt32() != 1) return null;
+            var at = root.GetProperty("at").GetDateTimeOffset();
+            var now = DateTimeOffset.Now;
+            if (at > now || at < now - TimeSpan.FromMilliseconds(Environment.TickCount64)) return null;
+            var pid = root.GetProperty("compositorPid").GetInt32();
+            var build = root.GetProperty("componentBuild").GetInt32();
+            if (pid <= 4 || build <= 0) return null;
+            using var current = Process.GetCurrentProcess();
+            if (!SameCompositor(pid, current.SessionId, at)) return null;
+            // A successful activation is historical evidence, not a live heartbeat.
+            // Keep it separate so a lost mapping cannot be displayed as a never-loaded component.
+            return new(pid, build);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or JsonException or KeyNotFoundException
+            or InvalidOperationException or ArgumentException or Win32Exception or FormatException) { return null; }
+    }
+
+    static bool SameCompositor(int pid, int session, DateTimeOffset observed)
+    {
+        var objects = new List<object>();
+        dynamic Keep(object value) { objects.Add(value); return value; }
+        try
+        {
+            var type = Type.GetTypeFromProgID("WbemScripting.SWbemLocator");
+            if (type is null) return false;
+            dynamic locator = Keep(Activator.CreateInstance(type)!);
+            dynamic services = Keep((object)locator.ConnectServer(".", "root\\cimv2"));
+            dynamic results = Keep((object)services.ExecQuery(
+                $"SELECT ProcessId, SessionId, Name, CreationDate FROM Win32_Process WHERE ProcessId={pid}", "WQL", 0x30));
+            foreach (var item in (System.Collections.IEnumerable)results)
+            {
+                dynamic process = Keep(item);
+                if ((int)process.ProcessId != pid || (int)process.SessionId != session
+                    || !string.Equals((string)process.Name, "dwm.exe", StringComparison.OrdinalIgnoreCase)) continue;
+                var value = (string)process.CreationDate;
+                if (value.Length != 25 || value[21] is not ('+' or '-')) return false;
+                var created = DateTime.ParseExact(value[..21], "yyyyMMddHHmmss.ffffff", CultureInfo.InvariantCulture);
+                var minutes = int.Parse(value[22..], CultureInfo.InvariantCulture) * (value[21] == '-' ? -1 : 1);
+                return new DateTimeOffset(created, TimeSpan.FromMinutes(minutes)) <= observed;
+            }
+            return false;
+        }
+        catch (Exception e) when (e is COMException or InvalidOperationException or ArgumentException or FormatException
+            or OverflowException or Microsoft.CSharp.RuntimeBinder.RuntimeBinderException) { return false; }
+        finally
+        {
+            for (var i = objects.Count - 1; i >= 0; --i)
+                if (Marshal.IsComObject(objects[i])) Marshal.FinalReleaseComObject(objects[i]);
+        }
+    }
 
     void UpdateStatus()
     {
         if (options is null) return;
         string key;
-        if (activating) key = "nativeMotionActivating";
+        if (activating || inspectingPrevious) key = "nativeMotionActivating";
         else if (!options.NativeWindowAnimations) key = "nativeMotionOff";
         else if (errorKey is not null) key = errorKey;
         else if (suspended) key = "nativeMotionPaused";
         else if (IncompatibleComponent) key = "nativeMotionSignOut";
+        else if (StatusHeaderValid && !Connected) key = "nativeMotionNoResponse";
         else if (Flags == 0) key = "nativeMotionSystemOff";
         else if (!Connected) key = "nativeMotionNeedsActivation";
         else key = Marshal.ReadInt32(status!.View, 16) switch
@@ -232,10 +306,12 @@ sealed class NativeWindowMotion : IDisposable
         var now = Environment.TickCount64;
         if (now - diagnosticWrittenAt < 2000 || diagnosticWrite is { IsCompleted: false }) return;
         var connected = Connected;
-        int Read32(int offset) => connected ? Marshal.ReadInt32(status!.View, offset) : 0;
-        long Read64(int offset) => connected ? Marshal.ReadInt64(status!.View, offset) : 0;
-        var snapshot = new MotionDiagnostic(connected, publishedFlags, Read32(12), Read32(24), Read32(16), Read32(20),
-            Read64(40), Read64(48), Read64(56), Read64(64), Read64(72), Read64(80), Read64(88));
+        var headerValid = StatusHeaderValid;
+        int Read32(int offset) => headerValid ? Marshal.ReadInt32(status!.View, offset) : 0;
+        long Read64(int offset) => headerValid ? Marshal.ReadInt64(status!.View, offset) : 0;
+        var snapshot = new MotionDiagnostic(connected, headerValid, options?.WindowAnimationLoginEnabled == true,
+            publishedFlags, Read32(12), Read32(24), Read32(16), Read32(20), Read64(40), Read64(48), Read64(56), Read64(64),
+            Read64(72), Read64(80), Read64(88), previousComponent?.Pid ?? 0, previousComponent?.Build ?? 0);
         if (snapshot == lastDiagnostic) return;
         lastDiagnostic = snapshot;
         diagnosticWrittenAt = now;
@@ -318,11 +394,11 @@ sealed class NativeWindowMotion : IDisposable
             dynamic principal = Keep((object)definition.Principal);
             dynamic actions = Keep((object)definition.Actions);
             dynamic triggers = Keep((object)definition.Triggers);
-            if (!(bool)task.Enabled || (string)principal.UserId != sid || (int)principal.LogonType != 3
+            if (!(bool)task.Enabled || !SameUser((string)principal.UserId, identity.User!) || (int)principal.LogonType != 3
                 || (int)principal.RunLevel != 1 || (int)actions.Count != 1 || (int)triggers.Count != 1) return false;
             dynamic action = Keep((object)actions[1]);
             dynamic trigger = Keep((object)triggers[1]);
-            if ((int)action.Type != 0 || (int)trigger.Type != 9 || (string)trigger.UserId != sid || !(bool)trigger.Enabled
+            if ((int)action.Type != 0 || (int)trigger.Type != 9 || !SameUser((string)trigger.UserId, identity.User!) || !(bool)trigger.Enabled
                 || !expected.Equals((string)action.Path, StringComparison.OrdinalIgnoreCase)
                 || !directory.Equals((string)action.WorkingDirectory, StringComparison.OrdinalIgnoreCase)
                 || (string)action.Arguments != "--login " + sid) return false;
@@ -336,6 +412,19 @@ sealed class NativeWindowMotion : IDisposable
             for (var i = objects.Count - 1; i >= 0; --i)
                 if (Marshal.IsComObject(objects[i])) Marshal.FinalReleaseComObject(objects[i]);
         }
+    }
+
+    static bool SameUser(string? account, SecurityIdentifier expected)
+    {
+        if (string.IsNullOrWhiteSpace(account)) return false;
+        try
+        {
+            IdentityReference identity = account.StartsWith("S-1-", StringComparison.OrdinalIgnoreCase)
+                ? new SecurityIdentifier(account) : new NTAccount(account);
+            return expected.Equals(identity.Translate(typeof(SecurityIdentifier)));
+        }
+        catch (SystemException e) when (e is IdentityNotMappedException or ArgumentException or System.Security.SecurityException
+            || e.GetType() == typeof(SystemException)) { return false; }
     }
 
     public async Task SetLoginEnabledAsync(bool enabled)

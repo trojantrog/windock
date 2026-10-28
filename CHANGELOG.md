@@ -13,6 +13,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Use verified product metadata for tray application names and record capture status without notification content.
 - Read the correct native extended window style before selecting windows for animation.
 - Install verified release files and update the login entry together, with a backup and the native taskbar retained.
+- Resolve the account names returned by Windows before checking the animation login task.
+- Preserve animation communication when Dock restarts, and identify components that need the next Windows login.
 
 ### Added
 - Enable window animations at login through a protected helper, with a setting to remove the login task.
