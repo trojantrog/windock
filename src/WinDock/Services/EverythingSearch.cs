@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows.Interop;
@@ -17,6 +18,9 @@ public static class EverythingSearch
     struct CopyData { public nuint Id; public int Size; public nint Data; }
     [DllImport("user32.dll", SetLastError = true)]
     static extern nint SendMessageTimeout(nint window, uint message, nint sender, ref CopyData data, uint flags, uint timeout, out nint result);
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    static extern bool ChangeWindowMessageFilterEx(nint window, uint message, uint action, nint filter);
 
     public static Task<EverythingBatch> QueryAsync(string query, string? instance, CancellationToken cancellation)
     {
@@ -38,8 +42,11 @@ public static class EverythingSearch
             var target = Native.FindWindow(name, null);
             if (target == 0) throw new InvalidOperationException(Loc.T("everythingUnavailable"));
             Native.GetWindowThreadProcessId(target, out var targetProcess);
+            if (targetProcess == 0) throw new InvalidOperationException(Loc.T("everythingUnavailable"));
             using var receiver = new HwndSource(new HwndSourceParameters("WinDock Everything reply")
             { ParentWindow = new nint(-3), WindowStyle = 0, Width = 0, Height = 0 });
+            if (!ChangeWindowMessageFilterEx(receiver.Handle, CopyDataMessage, 1, 0))
+                throw new Win32Exception(Marshal.GetLastWin32Error());
             var replyId = (uint)Random.Shared.Next(1, int.MaxValue);
             receiver.AddHook((nint window, int message, nint sender, nint data, ref bool handled) =>
             {

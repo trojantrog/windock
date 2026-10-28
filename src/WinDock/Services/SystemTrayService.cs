@@ -104,7 +104,7 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
                 await session.ReadAsync((kind, data) => Queue(run, kind, data), () => dispatcher.BeginInvoke(() =>
                 {
                     if (lifetime != run) return;
-                    HasStatusNotice = false; Ready = true; Status = Loc.T("systemTrayConnected"); RequestRefresh();
+                    HasStatusNotice = false; Ready = true; Status = Loc.T("systemTrayConnected"); refreshAt = default; RequestRefresh();
                 }));
             }
             catch (OperationCanceledException) when (token.IsCancellationRequested) { break; }
@@ -279,7 +279,9 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
             SystemTrayInterop.AllowSetForegroundWindow((uint)pid);
         nuint wParam = item.Version >= 4 ? unchecked((uint)(ushort)x | ((uint)(ushort)y << 16)) : item.Id;
         nint lParam = item.Version >= 4 ? unchecked((nint)((item.Id & 0xFFFF) << 16 | (message & 0xFFFF))) : (nint)message;
-        return SystemTrayInterop.SendNotifyMessageW(item.Window, item.Callback, wParam, lParam);
+        return pid == Environment.ProcessId
+            ? SystemTrayInterop.PostMessageW(item.Window, item.Callback, wParam, lParam)
+            : SystemTrayInterop.SendNotifyMessageW(item.Window, item.Callback, wParam, lParam);
     }
 
     public void Stop()

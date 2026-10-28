@@ -301,7 +301,7 @@
                                           Content="{TemplateBinding SelectionBoxItem}" ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"/>
                         <TextBlock Text="&#xE70D;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="9" Foreground="{StaticResource Muted}"
                                    HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,13,0" IsHitTestVisible="False"/>
-                        <Popup IsOpen="{TemplateBinding IsDropDownOpen}" Placement="Bottom" AllowsTransparency="True" Focusable="False" PopupAnimation="Fade">
+                        <Popup x:Name="PART_Popup" IsOpen="{TemplateBinding IsDropDownOpen}" Placement="Bottom" AllowsTransparency="True" Focusable="False" PopupAnimation="Fade">
                             <Border Margin="0,4,0,0" Padding="4" CornerRadius="12" Background="#FA1B1D26" BorderBrush="#26FFFFFF" BorderThickness="1"
                                     MinWidth="{Binding ActualWidth, RelativeSource={RelativeSource TemplatedParent}}">
                                 <ScrollViewer MaxHeight="340" VerticalScrollBarVisibility="Auto">

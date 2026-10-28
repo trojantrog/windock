@@ -65,7 +65,8 @@ public abstract class DesktopToolWindow : Window
         });
         SourceInitialized += (_, _) => backdrop = new GlassBackdrop(this, surface);
         Loaded += (_, _) => { if (CenterOnOpen) CenterOnPointer(); DesktopMotion.Enter(Layout); };
-        PreviewKeyDown += (_, e) => { if (e.Key == Key.Escape) { e.Handled = true; Close(); } };
+        PopupInteraction.For(this);
+        KeyDown += (_, e) => { if (e.Key == Key.Escape && !PopupInteraction.HasChildPopup(this)) { e.Handled = true; Close(); } };
         Closed += (_, _) => { backdrop?.Dispose(); Lifetime.Cancel(); Lifetime.Dispose(); };
     }
 

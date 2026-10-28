@@ -1,6 +1,7 @@
 #pragma once
 #include <windows.h>
 #include <stdint.h>
+#include <stddef.h>
 
 namespace motion::abi {
 constexpr uintptr_t StartAnimation = 0xc684;
@@ -14,13 +15,16 @@ constexpr uintptr_t Release = 0x506f0;
 constexpr uintptr_t FloatVtable = 0xff180;
 constexpr uintptr_t RelativeRect = 0x2eb04;
 constexpr uintptr_t AdvanceTimelines = 0x17000;
+constexpr uintptr_t WindowStateLock = 0x12bd10;
 constexpr size_t AllocationSize = 0x78;
-constexpr size_t Master = 0x140, Tracks = 0x158, WindowData = 0x120;
+constexpr size_t Master = 0x140, AnimationKind = 0x150, Tracks = 0x158, WindowData = 0x120;
 constexpr size_t Secondary = 0x128, CachedRect = 0x110, Origin = 0x1dc, SpecialClip = 0x238;
 constexpr size_t Current = 0x30, Finished = 0x48;
 
 struct Interpolation { uint32_t mode, padding; double x1, y1, x2, y2; };
 static_assert(sizeof(Interpolation) == 40);
+static_assert(sizeof(CRITICAL_SECTION) == 40);
+static_assert(offsetof(CRITICAL_SECTION, RecursionCount) == 12 && offsetof(CRITICAL_SECTION, OwningThread) == 16);
 
 template<class T> inline T& Field(void* object, size_t offset) {
     return *reinterpret_cast<T*>(static_cast<BYTE*>(object) + offset);

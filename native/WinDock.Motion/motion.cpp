@@ -22,7 +22,6 @@ abi::Ctor construct;
 abi::ReleaseObject release;
 abi::GetRelative relativeRect;
 abi::Stop delayHide;
-volatile LONG sceneThread;
 thread_local unsigned depth;
 thread_local bool advancing;
 
@@ -46,7 +45,23 @@ bool Valid(const Rect& rect) {
     return Finite(rect.x) && Finite(rect.y) && Finite(rect.width) && Finite(rect.height)
         && rect.width >= 1 && rect.height >= 1 && rect.width <= 32768 && rect.height <= 32768;
 }
-bool OnSceneThread() { return static_cast<DWORD>(InterlockedCompareExchange(&sceneThread, 0, 0)) == GetCurrentThreadId(); }
+bool OwnsWindowState() {
+    if (!image) return false;
+    auto* lock = reinterpret_cast<const volatile CRITICAL_SECTION*>(reinterpret_cast<const BYTE*>(image) + abi::WindowStateLock);
+    return lock->OwningThread == reinterpret_cast<HANDLE>(static_cast<uintptr_t>(GetCurrentThreadId())) && lock->RecursionCount > 0;
+}
+
+bool Skip(TransitionReason reason) {
+    const auto value = static_cast<LONG>(reason);
+    auto previous = InterlockedCompareExchange(&status->error, 0, 0);
+    if (BlocksTransition(value)) InterlockedExchange(&status->error, value);
+    else while (!BlocksTransition(previous)) {
+        const auto observed = InterlockedCompareExchange(&status->error, value, previous);
+        if (observed == previous) break;
+        previous = observed;
+    }
+    return false;
+}
 
 bool ReadConfig(Config& result) {
     if (!sharedConfig || !status || InterlockedCompareExchange(&status->state, 0, 0) != 1) return false;
@@ -76,7 +91,7 @@ Active* Find(void* window) {
 Active* Reserve(void* window) {
     if (auto* found = Find(window)) return found;
     for (auto& item : active) if (!item.window || (item.stopped && GetTickCount64() - item.stopped > 1000)) {
-        item = {}; item.window = window; return &item;
+        return &item;
     }
     return nullptr;
 }
@@ -87,7 +102,7 @@ double Current(void* window, unsigned index, double fallback) {
 }
 
 void Remember(void* window) {
-    if (!OnSceneThread()) return;
+    if (!OwnsWindowState()) return;
     auto* item = Find(window);
     if (!item || !item->master || item->master != Field<void*>(window, abi::Master)
         || item->data != Field<void*>(window, abi::WindowData)) return;
@@ -126,8 +141,10 @@ bool Candidate(void* window, const Config& config, HWND& handle, DWORD& pid) {
     return true;
 }
 
-bool Eligible(void* window, const Config& config, HWND& handle, DWORD& pid, Rect& base) {
+bool Eligible(void* window, const Config& config, HWND& handle, DWORD& pid, Rect& base, TransitionReason& reason) {
+    reason = TransitionReason::WindowExcluded;
     if (!Candidate(window, config, handle, pid)) return false;
+    reason = TransitionReason::SurfaceUnavailable;
     void* secondary = Field<void*>(window, abi::Secondary);
     if (!secondary) return false;
     const auto style = Field<DWORD>(Field<void*>(window, abi::WindowData), 0x74);
@@ -136,6 +153,7 @@ bool Eligible(void* window, const Config& config, HWND& handle, DWORD& pid, Rect
     const auto original = Field<RECT>(window, abi::CachedRect);
     base = { static_cast<float>(original.left + relative.left), static_cast<float>(original.top + relative.top),
         static_cast<float>(relative.right - relative.left), static_cast<float>(relative.bottom - relative.top) };
+    reason = TransitionReason::GeometryExcluded;
     if (!Valid(base) || base.width < 160 || base.height < 80) return false;
     MONITORINFO info{sizeof(MONITORINFO)};
     RECT rect{static_cast<LONG>(base.x), static_cast<LONG>(base.y), static_cast<LONG>(base.x + base.width), static_cast<LONG>(base.y + base.height)};
@@ -186,13 +204,17 @@ double BaseAlpha(void* window) {
 }
 
 bool ReplaceTracks(void* window, const Config& config, int kind) {
-    if (!OnSceneThread() || advancing) { InterlockedExchange(&status->error, 7); return false; }
-    if (!Field<void*>(window, abi::Master)) return false;
+    if (!OwnsWindowState()) return Skip(TransitionReason::WindowLockNotOwned);
+    if (advancing) return Skip(TransitionReason::TimelineTraversal);
     HWND handle; DWORD pid; Rect base;
-    if (!Eligible(window, config, handle, pid, base)) return false;
+    TransitionReason reason;
+    if (!Eligible(window, config, handle, pid, base, reason)) return Skip(reason);
+    void* master = Field<void*>(window, abi::Master);
+    if (!master || Field<BYTE>(master, abi::Finished)) return Skip(TransitionReason::TimelineUnavailable);
+    if (Field<int>(window, abi::AnimationKind) != kind) return Skip(TransitionReason::NativeActionMismatch);
     const auto anchor = AnchorFor(config, handle, pid, base);
     const double ox = Field<float>(window, abi::Origin), oy = Field<float>(window, abi::Origin + 4);
-    if (!Finite(ox) || !Finite(oy)) return false;
+    if (!Finite(ox) || !Finite(oy)) return Skip(TransitionReason::InvalidPose);
     const double alpha = BaseAlpha(window);
     Pose full{base.x + base.width * .5, base.y + base.height * .5, 1, alpha};
     Pose small{anchor.x + anchor.width * .5, anchor.y + anchor.height * .5,
@@ -213,11 +235,12 @@ bool ReplaceTracks(void* window, const Config& config, int kind) {
         && (previous->kind == 1 || previous->kind == 3 || previous->kind == 5 || previous->kind == 8)
         && std::abs(previous->base.width - base.width) < 2 && std::abs(previous->base.height - base.height) < 2)
         from = previous->last;
-    if (!Finite(from.x) || !Finite(from.y) || !Finite(from.scale) || from.scale <= 0 || !Finite(from.alpha)) return false;
+    if (!Finite(from.x) || !Finite(from.y) || !Finite(from.scale) || from.scale <= 0 || !Finite(from.alpha))
+        return Skip(TransitionReason::InvalidPose);
     if (kind == 6 || kind == 8)
         to = {from.x, from.y + config.closeDistance, std::min(from.scale, static_cast<double>(config.closeScale)), 0};
     Active* record = Reserve(window);
-    if (!record) return false;
+    if (!record) return Skip(TransitionReason::TrackingCapacity);
     const double begin[5] = {
         from.x - base.x - base.width * (ox * (1 - from.scale) + from.scale * .5),
         from.y - base.y - base.height * (oy * (1 - from.scale) + from.scale * .5), from.scale, from.scale, from.alpha
@@ -232,7 +255,7 @@ bool ReplaceTracks(void* window, const Config& config, int kind) {
         if (!value) {
             for (auto raw : prepared) if (raw) freeBlock(raw);
             InterlockedIncrement64(&status->failed);
-            return false;
+            return Skip(TransitionReason::AllocationFailed);
         }
     }
     const double duration = milliseconds / 1000.;
@@ -293,7 +316,7 @@ HRESULT StopHook(void* window) {
 }
 
 HRESULT ShowHook(void* window, bool visible, bool initial) {
-    if (!visible && depth == 0 && OnSceneThread() && !advancing) {
+    if (!visible && depth == 0 && OwnsWindowState() && !advancing) {
         Config config;
         void* data = Field<void*>(window, abi::WindowData);
         if (data && ReadConfig(config) && (config.flags & Hiding)
@@ -312,7 +335,7 @@ HRESULT ShowHook(void* window, bool visible, bool initial) {
             }
         }
     }
-    if (visible && depth == 0 && OnSceneThread()) {
+    if (visible && depth == 0 && OwnsWindowState()) {
         auto* item = Find(window);
         if (item && item->kind == 8 && item->master && item->master == Field<void*>(window, abi::Master)
             && item->data == Field<void*>(window, abi::WindowData)) initial = true;
@@ -321,7 +344,6 @@ HRESULT ShowHook(void* window, bool visible, bool initial) {
 }
 
 void AdvanceHook(void* manager, double time) {
-    InterlockedExchange(&sceneThread, static_cast<LONG>(GetCurrentThreadId()));
     const bool previous = advancing;
     advancing = true;
     advanceOriginal(manager, time);
@@ -340,9 +362,10 @@ bool Install() {
     const BYTE showBytes[]{0x48,0x89,0x5c,0x24,0x08,0x48,0x89,0x6c,0x24,0x10};
     const BYTE advanceBytes[]{0x48,0x83,0xec,0x68,0x48,0x8b,0x05};
     const BYTE delayBytes[]{0x48,0x89,0x5c,0x24,0x08,0x57};
+    const BYTE lockReference[]{0x4c,0x8d,0x3d,0x10,0xb4,0x0a,0x00};
     if (!Prolog(abi::StartAnimation,startBytes,sizeof(startBytes)) || !Prolog(abi::StopAnimation,stopBytes,sizeof(stopBytes))
         || !Prolog(abi::ShowWindow,showBytes,sizeof(showBytes)) || !Prolog(abi::AdvanceTimelines,advanceBytes,sizeof(advanceBytes))
-        || !Prolog(abi::StartDelayHide,delayBytes,sizeof(delayBytes))) {
+        || !Prolog(abi::StartDelayHide,delayBytes,sizeof(delayBytes)) || !Prolog(0x808f9,lockReference,sizeof(lockReference))) {
         status->state = 2; status->error = 3; return false;
     }
     allocate = abi::Function<abi::Alloc>(image, abi::Allocate);

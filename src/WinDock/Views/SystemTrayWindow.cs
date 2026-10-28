@@ -3,6 +3,7 @@ using System.ComponentModel;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
+using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Shell;
@@ -24,9 +25,13 @@ public sealed class SystemTrayWindow : Window
     int capacity = 4;
     bool dark;
     readonly Button more;
+    readonly PopupInteraction interaction;
+    bool renderPending, renderQueued, closed;
     public SystemTrayWindow(SystemTrayHub hub)
     {
         this.hub = hub; dark = DockTheme.Find(hub.Options.Theme).Dark;
+        interaction = PopupInteraction.For(this);
+        interaction.Changed += () => { if (renderPending && !interaction.IsBusy) QueueRender(); };
         Title = Loc.T("systemTrayTitle"); ShowInTaskbar = false; ShowActivated = false;
         WindowStyle = WindowStyle.None; ResizeMode = ResizeMode.NoResize;
         Background = Brushes.Transparent; Topmost = true; SizeToContent = SizeToContent.WidthAndHeight;
@@ -56,8 +61,12 @@ public sealed class SystemTrayWindow : Window
         AutomationProperties.SetName(more, Loc.T("systemTrayTitle"));
         more.Click += (_, _) =>
         {
+            if (PopupInteraction.WasAnchorDismissed(more)) return;
             if (panel is not null) { panel.Close(); panel = null; return; }
-            panel = new TrayPanel(dark); panel.Closed += (_, _) => panel = null;
+            var opened = new TrayPanel(dark) { Owner = this };
+            panel = opened;
+            opened.Interaction.Anchor = more;
+            opened.Closed += (_, _) => { if (panel == opened) panel = null; };
             var corner = more.PointToScreen(new Point(more.ActualWidth / 2, 0));
             panel.ShowAt(corner.X, corner.Y, Forms.Screen.FromPoint(new System.Drawing.Point((int)corner.X, (int)corner.Y)));
         };
@@ -74,6 +83,7 @@ public sealed class SystemTrayWindow : Window
         position.Tick += (_, _) => Place();
         Closed += (_, _) =>
         {
+            closed = true;
             position.Stop(); panel?.Close(); backdrop?.Dispose();
             hub.Service.Icons.CollectionChanged -= IconsChanged; hub.Service.PropertyChanged -= StatusChanged;
             hub.Service.LayoutChanged -= Render; hub.PresentationChanged -= OptionsChanged;
@@ -95,17 +105,40 @@ public sealed class SystemTrayWindow : Window
     void StatusChanged(object? sender, PropertyChangedEventArgs e) =>
         more.ToolTip = hub.Service.Ready ? Loc.T("systemTrayTitle") : Loc.T("systemTrayTitle") + "\n" + hub.Service.Status;
     void IconsChanged(object? sender, NotifyCollectionChangedEventArgs e) => Render();
+    void QueueRender()
+    {
+        if (closed || renderQueued) return;
+        renderQueued = true;
+        Dispatcher.BeginInvoke(DispatcherPriority.Background, () => { renderQueued = false; Render(); });
+    }
     void Render()
     {
+        if (closed) return;
+        if (interaction.IsBusy) { renderPending = true; return; }
+        renderPending = false;
+        var oldButtons = row.Children.OfType<SystemTrayIconButton>().ToList();
+        var focusedButton = Keyboard.FocusedElement as SystemTrayIconButton;
+        var focusedIndex = focusedButton is null ? -1 : oldButtons.IndexOf(focusedButton);
+        var moreFocused = more.IsKeyboardFocusWithin;
         row.Children.Clear();
         var buttonSize = Math.Max(36, hub.Options.TrayIconSize + 16);
         more.Height = buttonSize + 4;
         foreach (var item in hub.OrderedIcons().Where(hub.IsPinned).Take(capacity))
             row.Children.Add(new SystemTrayIconButton(hub.Service, item, dark, iconSize: hub.Options.TrayIconSize));
         row.Children.Add(more);
+        if (!IsActive) return;
+        if (moreFocused) more.Focus();
+        else if (focusedIndex >= 0)
+        {
+            var buttons = row.Children.OfType<SystemTrayIconButton>().Where(button => button.IsEnabled).ToList();
+            var replacement = buttons.FirstOrDefault(button => button.Item == focusedButton!.Item)
+                ?? buttons.ElementAtOrDefault(Math.Min(focusedIndex, buttons.Count - 1));
+            if (replacement is not null) replacement.Focus(); else more.Focus();
+        }
     }
     void Place()
     {
+        if (closed || interaction.IsBusy || panel?.Interaction.IsBusy == true) return;
         var screen = Forms.Screen.PrimaryScreen;
         if (screen is null) return;
         var hwnd = new WindowInteropHelper(this).Handle;
@@ -119,13 +152,16 @@ public sealed class SystemTrayWindow : Window
         foreach (var dock in Application.Current.Windows.OfType<DockWindow>().Where(w => w.IsVisible))
             if (Native.GetWindowRect(new WindowInteropHelper(dock).Handle, out var rect) && rect.Right > left && rect.Left < bounds.Right && rect.Top < bottom && rect.Bottom > bottom - 160 * scale)
                 available = Math.Min(available, rect.Left - left - 12 * scale);
-        if (available < 42 * scale) { if (IsVisible) Hide(); return; }
+        if (available < 42 * scale) { if (IsVisible && panel is null) Hide(); return; }
         var slot = Math.Max(36, hub.Options.TrayIconSize + 16) + 4;
         var next = Math.Clamp((int)((available / scale - 42) / slot), 0, 12);
         if (capacity != next) { capacity = next; Render(); UpdateLayout(); }
         var foreground = Native.GetForegroundWindow();
-        bool fullScreen = foreground != 0 && foreground != hwnd && Native.ClassOf(foreground) is not ("Progman" or "WorkerW" or "Shell_TrayWnd") &&
-            Native.GetWindowRect(foreground, out var front) && front.Left <= bounds.Left && front.Top <= bounds.Top && front.Right >= bounds.Right && front.Bottom >= bounds.Bottom;
+        Native.GetWindowThreadProcessId(foreground, out var foregroundPid);
+        bool fullScreen = foreground != 0 && foregroundPid != Environment.ProcessId &&
+            Native.ClassOf(foreground) is not ("Progman" or "WorkerW" or "Shell_TrayWnd" or "Shell_SecondaryTrayWnd") &&
+            Native.GetWindowRect(foreground, out var front) && front.Left <= bounds.Left && front.Top <= bounds.Top &&
+            front.Right >= bounds.Right && front.Bottom >= bounds.Bottom && WindowMotionNative.IsFullscreen(foreground);
         if (fullScreen) { if (IsVisible && panel is null) Hide(); return; }
         if (!IsVisible) Show();
         Native.SetWindowPos(hwnd, Native.HWND_TOPMOST, left, bottom - (int)Math.Ceiling(ActualHeight * scale) - (int)(10 * scale), 0, 0, Native.SWP_NOSIZE | Native.SWP_NOACTIVATE);

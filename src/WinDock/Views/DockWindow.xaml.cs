@@ -38,7 +38,9 @@ public partial class DockWindow : Window
     int taskbarCreated, appBarMessage;
     bool appBar;
     Native.Rect? reserved;
-    bool fullscreen, concealed, menuOpen;
+    bool fullscreen, concealed;
+    readonly PopupInteraction interaction;
+    bool menuOpen => interaction.HasMenu;
     int away, peekAway, revealOrder;
     double fit = 1;
     DateTime revealBurst, lastWheel;
@@ -46,9 +48,9 @@ public partial class DockWindow : Window
     PreviewWindow? preview;
     Rect previewAnchor = Rect.Empty;
     Flyout? flyout;
-    (object Item, Type Kind)? flyoutKey, closedKey;
-    DateTime closedAt, menuClosedAt;
+    (object Item, Type Kind)? flyoutKey;
     FrameworkElement? pressedElement;
+    MouseButton? pressedButton;
     AppTile? pressed;
     Point pressAt;
     bool dragging, dragOut;
@@ -61,6 +63,13 @@ public partial class DockWindow : Window
         this.openSettings = openSettings;
         this.screenName = screenName;
         InitializeComponent();
+        interaction = PopupInteraction.For(this);
+        interaction.Changed += CheckFullscreen;
+        AddHandler(Mouse.MouseUpEvent, new MouseButtonEventHandler((_, e) =>
+        {
+            if (!dragging && pressedButton == e.ChangedButton) ClearPressed();
+        }), true);
+        Deactivated += (_, _) => { if (dragging) EndDrag(null); else ClearPressed(); };
         ((FaceSelector)Resources["Faces"]).On = vm.Options.CompactWidgets;
         DataContext = vm;
 
@@ -93,13 +102,6 @@ public partial class DockWindow : Window
         DragOver += OnDragOver;
         DragLeave += (_, _) => HideName();
         Drop += OnDrop;
-        PreviewMouseUp += (_, e) =>
-        {
-            if (DateTime.Now - menuClosedAt > TimeSpan.FromMilliseconds(400) || dragging) return;
-            e.Handled = true;
-            if (pressedElement is { } element) element.Opacity = 1;
-            pressed = null;
-        };
         toastTimer.Tick += (_, _) => HideToast();
         DpiChanged += (_, _) =>
         {
@@ -347,6 +349,8 @@ public partial class DockWindow : Window
     {
         if (panel is null) return;
         if (!dragging) panel.Pointer = e.GetPosition(panel).X;
+        if (!dragging && pressedElement is { } down && pressedButton == MouseButton.Left)
+            down.Opacity = new Rect(down.RenderSize).Contains(e.GetPosition(down)) ? 0.72 : 1;
         if (pressed is null || pressedElement is null || e.LeftButton != MouseButtonState.Pressed) return;
         var at = e.GetPosition(Root);
         if (!dragging)
@@ -379,14 +383,13 @@ public partial class DockWindow : Window
         hovered = pressedElement;
         pressedElement!.Opacity = 0.9;
         Panel.SetZIndex(Container(pressedElement), 10);
-        pressedElement.CaptureMouse();
-        pressedElement.LostMouseCapture += OnDragLost;
         panel?.BeginAnimation(LensPanel.AmplitudeProperty, new DoubleAnimation(0, TimeSpan.FromMilliseconds(120)));
     }
 
     void OnDragLost(object sender, MouseEventArgs e)
     {
-        if (dragging) EndDrag(null);
+        if (pressedElement is null || Mouse.Captured == pressedElement) return;
+        if (dragging) EndDrag(null); else ClearPressed();
     }
 
     void EndDrag(Point? at)
@@ -394,9 +397,7 @@ public partial class DockWindow : Window
         var app = pressed!;
         var element = pressedElement!;
         dragging = false;
-        pressed = null;
-        element.LostMouseCapture -= OnDragLost;
-        element.ReleaseMouseCapture();
+        ClearPressed();
         var shift = Shift(element);
         shift.X = 0;
         shift.Y = 0;
@@ -580,25 +581,43 @@ public partial class DockWindow : Window
 
     void OnTileDown(object sender, MouseButtonEventArgs e)
     {
-        if (e.ChangedButton != MouseButton.Left) return;
+        if (dragging || e.ChangedButton is not (MouseButton.Left or MouseButton.Right or MouseButton.Middle)) return;
+        ClearPressed();
         var element = (FrameworkElement)sender;
-        element.Opacity = 0.72;
+        if (e.ChangedButton == MouseButton.Left) element.Opacity = 0.72;
         pressedElement = element;
-        pressed = element.DataContext is AppTile { IsPinned: true } app ? app : null;
+        pressedButton = e.ChangedButton;
+        pressed = e.ChangedButton == MouseButton.Left && element.DataContext is AppTile { IsPinned: true } app ? app : null;
         pressAt = e.GetPosition(Root);
+        element.LostMouseCapture += OnDragLost;
+        if (!Mouse.Capture(element, CaptureMode.SubTree)) ClearPressed();
+    }
+
+    void ClearPressed()
+    {
+        var element = pressedElement;
+        pressed = null;
+        pressedElement = null;
+        pressedButton = null;
+        if (element is null) return;
+        element.LostMouseCapture -= OnDragLost;
+        if (Mouse.Captured == element) element.ReleaseMouseCapture();
+        element.Opacity = 1;
     }
 
     void OnTileUp(object sender, MouseButtonEventArgs e)
     {
         var element = (FrameworkElement)sender;
+        if (pressedElement != element || pressedButton != e.ChangedButton) return;
         e.Handled = true;
         if (dragging)
         {
             EndDrag(e.GetPosition(Root));
             return;
         }
-        pressed = null;
-        element.Opacity = 1;
+        var releasedInside = new Rect(element.RenderSize).Contains(e.GetPosition(element));
+        ClearPressed();
+        if (!releasedInside) return;
         switch (element.DataContext)
         {
             case AppTile app:
@@ -814,9 +833,8 @@ public partial class DockWindow : Window
     void ShowFlyout(Flyout next, FrameworkElement element)
     {
         var key = (element.DataContext ?? element, next.GetType());
-        if ((flyout is not null && flyoutKey == key) || (closedKey == key && DateTime.Now - closedAt < TimeSpan.FromMilliseconds(400)))
+        if ((flyout is not null && flyoutKey == key) || PopupInteraction.WasAnchorDismissed(element))
         {
-            closedKey = null;
             flyout?.Close();
             next.Close();
             return;
@@ -825,13 +843,13 @@ public partial class DockWindow : Window
         preview?.Hide();
         flyout?.Close();
         flyout = next;
+        next.Owner = this;
+        next.Interaction.Anchor = element;
         flyoutKey = key;
         next.Closed += (_, _) =>
         {
             if (flyout != next) return;
             flyout = null;
-            closedKey = key;
-            closedAt = DateTime.Now;
         };
         var topLeft = element.PointToScreen(new Point(0, 0));
         var bottomRight = element.PointToScreen(new Point(element.ActualWidth, element.ActualHeight));
@@ -843,13 +861,18 @@ public partial class DockWindow : Window
     {
         if (vm.Tiles.OfType<AppTile>().Skip(n - 1).FirstOrDefault() is not { } app) return false;
         var element = Strip.ItemContainerGenerator.ContainerFromItem(app) as FrameworkElement ?? Root;
-        Dispatcher.BeginInvoke(() => OnApp(app, element, fresh ? MouseButton.Middle : MouseButton.Left));
+        Dispatcher.BeginInvoke(() =>
+        {
+            PopupInteraction.ResetDismissalGesture();
+            OnApp(app, element, fresh ? MouseButton.Middle : MouseButton.Left);
+        });
         return true;
     }
 
     public bool ShowTour()
     {
         if (panel is null || !IsVisible || fullscreen) return false;
+        PopupInteraction.ResetDismissalGesture();
         ShowFlyout(new TourPanel(Dark), panel);
         return true;
     }
@@ -963,7 +986,7 @@ public partial class DockWindow : Window
             if (edge) Reveal();
             return;
         }
-        var busy = menuOpen || dragging || undo is not null || (panel?.IsMouseOver ?? false) || preview is { IsVisible: true } || flyout is not null;
+        var busy = interaction.IsBusy || dragging || undo is not null || (panel?.IsMouseOver ?? false) || preview is { IsVisible: true } || flyout is not null;
         away = busy || edge ? Math.Min(away, 0) : away + 1;
         if (away > 7) Conceal();
     }
@@ -988,6 +1011,7 @@ public partial class DockWindow : Window
 
     void CheckFullscreen()
     {
+        if (interaction.IsBusy || flyout?.Interaction.IsBusy == true) return;
         var now = IsFullscreen(Native.GetForegroundWindow());
         if (now == fullscreen) return;
         fullscreen = now;
@@ -1121,15 +1145,9 @@ public partial class DockWindow : Window
 
     void Open(ContextMenu menu)
     {
-        menuOpen = true;
         menu.Placement = PlacementMode.MousePoint;
         Native.SetForegroundWindow(hwnd);
-        menu.Closed += (_, _) =>
-        {
-            menuOpen = false;
-            menuClosedAt = DateTime.Now;
-        };
-        menu.IsOpen = true;
+        PopupInteraction.Open(menu, this);
     }
 
     void OnDragOver(object sender, DragEventArgs e)

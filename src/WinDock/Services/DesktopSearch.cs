@@ -10,8 +10,34 @@ public sealed record SearchBatch(IReadOnlyList<SearchHit> Hits, bool EverythingA
 
 public sealed class DesktopSearch
 {
-    readonly Lazy<Task<List<CatalogEntry>>> applications = new(() => Task.Run(Catalog.Load));
-    public Task WarmAsync() => applications.Value;
+    readonly object catalogGate = new();
+    Task<List<CatalogEntry>>? applications;
+    public Task WarmAsync() => ApplicationCatalog();
+
+    Task<List<CatalogEntry>> ApplicationCatalog()
+    {
+        lock (catalogGate)
+        {
+            if (applications is null || applications.IsFaulted || applications.IsCanceled)
+                applications = Task.Run(Catalog.Load);
+            return applications;
+        }
+    }
+
+    async Task<(List<SearchHit> Hits, string? Error)> SearchApplicationsAsync(string query, CancellationToken cancellation)
+    {
+        try
+        {
+            var catalog = await ApplicationCatalog().WaitAsync(TimeSpan.FromSeconds(2), cancellation);
+            var hits = await Task.Run(() => catalog.Where(a => MatchScore(query, a.Name) > 0)
+                .OrderByDescending(a => MatchScore(query, a.Name)).Take(30)
+                .Select(a => new SearchHit(a.Name, a.Category, "app", a.IconSource ?? "", a.Make())).ToList(), cancellation)
+                .WaitAsync(TimeSpan.FromSeconds(2), cancellation);
+            return (hits, null);
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { throw; }
+        catch (Exception) { return ([], Loc.T("searchAppsUnavailable")); }
+    }
 
     public async Task<SearchBatch> SearchAsync(string query, string? instance, CancellationToken cancellation, SearchFilter? filter = null)
     {
@@ -19,22 +45,27 @@ public sealed class DesktopSearch
         if (query.Length == 0) return new SearchBatch([], true, false);
         if (query.Length > 512) query = query[..512];
         filter ??= new SearchFilter();
-        var catalog = filter.IncludeApplications ? await applications.Value.WaitAsync(cancellation) : [];
-        var apps = await Task.Run(() => catalog.Where(a => MatchScore(query, a.Name) > 0)
-            .OrderByDescending(a => MatchScore(query, a.Name)).Take(30)
-            .Select(a => new SearchHit(a.Name, a.Category, "app", a.IconSource ?? "", a.Make())).ToList(), cancellation);
-        if (filter.Category == SearchCategory.Applications) return new SearchBatch(apps, false, apps.Count >= 30);
-        EverythingBatch indexed;
+        var applicationSearch = filter.IncludeApplications ? SearchApplicationsAsync(query, cancellation)
+            : Task.FromResult<(List<SearchHit> Hits, string? Error)>(([], null));
+        EverythingBatch indexed = new([], 0);
         string? error = null;
-        try { indexed = await EverythingSearch.QueryAsync(filter.Query(query), instance, cancellation); }
-        catch (OperationCanceledException) { throw; }
-        catch (Exception e) { indexed = new EverythingBatch([], 0); error = e.Message; }
+        var everythingAvailable = false;
+        if (filter.Category != SearchCategory.Applications)
+        {
+            try { indexed = await EverythingSearch.QueryAsync(filter.Query(query), instance, cancellation); everythingAvailable = true; }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception e) { error = e.Message; }
+        }
+        var (apps, applicationError) = await applicationSearch;
+        if (applicationError is not null) error = error is null ? applicationError : error + " · " + applicationError;
         cancellation.ThrowIfCancellationRequested();
         var all = apps.Concat(indexed.Hits).Where(filter.Accepts)
             .DistinctBy(h => h.Kind == "app" ? $"app:{h.Application?.AppId ?? h.Application?.Target}|{h.Application?.Args}" : h.Path, StringComparer.OrdinalIgnoreCase)
             .OrderByDescending(h => MatchScore(query, h.Name) + (h.Kind == "app" ? 200 : 0))
             .ThenBy(h => h.Name, StringComparer.CurrentCultureIgnoreCase).Take(100).ToList();
-        return new SearchBatch(all, error is null, indexed.Total > indexed.Hits.Count || indexed.Hits.Count + apps.Count > 100, error);
+        var limited = filter.Category == SearchCategory.Applications ? apps.Count >= 30
+            : indexed.Total > indexed.Hits.Count || indexed.Hits.Count + apps.Count > 100;
+        return new SearchBatch(all, everythingAvailable, limited, error);
     }
 
     public static int MatchScore(string query, string name)

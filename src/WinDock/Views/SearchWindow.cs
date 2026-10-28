@@ -71,11 +71,11 @@ public sealed class SearchWindow : DesktopToolWindow
         results.MouseDoubleClick += (_, _) => OpenSelection();
         results.SelectionChanged += (_, _) => reveal.IsEnabled = Selected is not null;
         results.KeyDown += (_, e) => { if (e.Key == Key.Enter) { e.Handled = true; OpenSelection(); } };
-        KeyDown += (_, e) => { if (e.Key == Key.Escape) Close(); };
         Loaded += async (_, _) =>
         {
             query.Focus();
-            try { await search.WarmAsync(); } catch (Exception) { Status.Text = Loc.T("searchAppsUnavailable"); }
+            try { await search.WarmAsync(); }
+            catch (Exception) { if (IsVisible && string.IsNullOrWhiteSpace(query.Text)) Status.Text = Loc.T("searchAppsUnavailable"); }
         };
         Closed += (_, _) => { pending?.Cancel(); pending?.Dispose(); pending = null; };
         RenderResults();
@@ -108,7 +108,12 @@ public sealed class SearchWindow : DesktopToolWindow
         catch (OperationCanceledException) { }
         catch (Exception e)
         {
-            if (current == version) Status.Text = Loc.F("failed", e.Message);
+            if (current == version && !token.IsCancellationRequested)
+            {
+                hits = [];
+                RenderResults();
+                Status.Text = Loc.F("failed", e.Message);
+            }
         }
     }
 
@@ -173,7 +178,7 @@ public sealed class SearchWindow : DesktopToolWindow
             var picker = new Microsoft.Win32.OpenFolderDialog { Title = Loc.T("searchScopeChoose"), Multiselect = false };
             if (picker.ShowDialog(this) == true) ChooseScope(picker.FolderName, Path.GetFileName(picker.FolderName.TrimEnd('\\')));
         };
-        menu.Items.Add(custom); menu.IsOpen = true;
+        menu.Items.Add(custom); PopupInteraction.Open(menu, scope);
     }
 
     void ChooseScope(string? folder, string name)

@@ -23,8 +23,8 @@ public sealed class TrayPanel : Flyout
     readonly StackPanel footer = new() { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
     readonly ScrollViewer iconScroll, hintScroll;
     ContextMenu? menu;
-    bool arranging, dragging, showingHints, renderQueued;
-    protected override bool KeepOpenOnDeactivate => dragging || menu?.IsOpen == true || icons.Children.OfType<SystemTrayIconButton>().Any(button => button.ContextMenu?.IsOpen == true);
+    bool arranging, dragging, showingHints, renderQueued, renderPending, closed;
+    protected override bool KeepOpenOnDeactivate => dragging;
 
     public TrayPanel(bool dark) : base(dark, glass: true)
     {
@@ -45,6 +45,7 @@ public sealed class TrayPanel : Flyout
         KeyboardNavigation.SetDirectionalNavigation(icons, KeyboardNavigationMode.Contained);
         icons.AllowDrop = true; icons.DragOver += OnDragOver; icons.Drop += OnDrop;
         PreviewKeyDown += Navigate;
+        Interaction.Changed += () => { if (renderPending && !dragging && !Interaction.IsBusy) QueueRender(); };
         if (hub is not null)
         {
             hub.Service.Icons.CollectionChanged += RefreshIcons; hub.Service.Hints.CollectionChanged += RefreshHints;
@@ -54,6 +55,7 @@ public sealed class TrayPanel : Flyout
         Loaded += (_, _) => icons.Children.OfType<SystemTrayIconButton>().FirstOrDefault()?.Focus();
         Closed += (_, _) =>
         {
+            closed = true;
             if (menu is not null) menu.IsOpen = false;
             if (hub is null) return;
             hub.Service.Icons.CollectionChanged -= RefreshIcons; hub.Service.Hints.CollectionChanged -= RefreshHints;
@@ -63,17 +65,32 @@ public sealed class TrayPanel : Flyout
         Render();
     }
 
-    void RefreshStatus(object? sender, PropertyChangedEventArgs e) => RenderStatus();
+    void RefreshStatus(object? sender, PropertyChangedEventArgs e)
+    {
+        if (closed) return;
+        if (dragging || Interaction.IsBusy) { renderPending = true; return; }
+        RenderStatus();
+    }
     void RefreshIcons(object? sender, NotifyCollectionChangedEventArgs e) => QueueRender();
-    void RefreshHints(object? sender, NotifyCollectionChangedEventArgs e) { if (showingHints) RenderHints(); }
+    void RefreshHints(object? sender, NotifyCollectionChangedEventArgs e) { if (showingHints) QueueRender(); }
     void QueueRender()
     {
-        if (renderQueued) return;
+        if (closed || renderQueued) return;
         renderQueued = true;
-        Dispatcher.BeginInvoke(DispatcherPriority.Background, () => { renderQueued = false; if (IsLoaded) Render(); });
+        Dispatcher.BeginInvoke(DispatcherPriority.Background, () => { renderQueued = false; if (!closed && IsLoaded) Render(); });
     }
     void Render()
     {
+        if (closed) return;
+        if (dragging || Interaction.IsBusy) { renderPending = true; return; }
+        renderPending = false;
+        var previousButtons = icons.Children.OfType<SystemTrayIconButton>().ToList();
+        var focusedButton = Keyboard.FocusedElement as SystemTrayIconButton;
+        var focusedIndex = focusedButton is null ? -1 : previousButtons.IndexOf(focusedButton);
+        var focusedLabel = Keyboard.FocusedElement is Button control && Window.GetWindow(control) == this
+            ? AutomationProperties.GetName(control) : null;
+        var scroll = iconScroll.VerticalOffset;
+        var hintOffset = hintScroll.VerticalOffset;
         var options = hub?.Options;
         var tile = (options?.TrayShowNames == true ? Math.Max(78, options.TrayIconSize + 44) : Math.Max(36, (options?.TrayIconSize ?? 22) + 16)) + 4;
         var columns = options?.TrayColumns ?? 5;
@@ -118,6 +135,19 @@ public sealed class TrayPanel : Flyout
             footer.Children.Add(more);
         }
         RenderStatus(); if (showingHints) RenderHints();
+        if (IsActive && focusedIndex >= 0)
+        {
+            var buttons = icons.Children.OfType<SystemTrayIconButton>().Where(button => button.IsEnabled).ToList();
+            var replacement = buttons.FirstOrDefault(button => button.Item == focusedButton!.Item)
+                ?? buttons.ElementAtOrDefault(Math.Min(focusedIndex, buttons.Count - 1));
+            if (replacement is not null) replacement.Focus();
+            else footer.Children.OfType<Button>().FirstOrDefault(button => button.IsEnabled)?.Focus();
+        }
+        else if (IsActive && !string.IsNullOrEmpty(focusedLabel))
+            heading.Children.OfType<Button>().Concat(footer.Children.OfType<Button>())
+                .FirstOrDefault(button => button.IsEnabled && AutomationProperties.GetName(button) == focusedLabel)?.Focus();
+        iconScroll.ScrollToVerticalOffset(scroll);
+        hintScroll.ScrollToVerticalOffset(hintOffset);
     }
     void RenderStatus()
     {
@@ -180,12 +210,12 @@ public sealed class TrayPanel : Flyout
         Add(menu, Loc.T("trayRecentHints"), () => { showingHints = true; arranging = false; Render(); });
         Add(menu, Loc.T("systemTrayRefresh"), () => { if (hub.Service.Ready) hub.Service.RequestRefresh(); else hub.Retry(); });
         menu.Closed += (_, _) => MenuClosed(target);
-        menu.IsOpen = true;
+        PopupInteraction.Open(menu, target);
     }
     void MenuClosed(FrameworkElement target) => Dispatcher.BeginInvoke(DispatcherPriority.Background, () =>
     {
         if (!IsVisible) return;
-        if (!IsActive && !KeepOpenOnDeactivate) { SafeClose(); return; }
+        if (!IsActive || Interaction.IsBusy) return;
         if (target.IsLoaded) target.Focus(); else icons.Children.OfType<SystemTrayIconButton>().FirstOrDefault()?.Focus();
     });
     static void Add(ContextMenu menu, string title, Action action, bool? value = null)
@@ -223,6 +253,7 @@ public sealed class TrayPanel : Flyout
     }
     void Navigate(object sender, KeyEventArgs e)
     {
+        if (PopupInteraction.HasChildPopup(this)) return;
         if (e.Key == Key.Escape && (arranging || showingHints)) { e.Handled = true; arranging = false; showingHints = false; Render(); return; }
         if (Keyboard.Modifiers != ModifierKeys.None || Keyboard.FocusedElement is not SystemTrayIconButton current) return;
         var buttons = icons.Children.OfType<SystemTrayIconButton>().Where(button => button.IsEnabled).ToList();

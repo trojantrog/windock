@@ -36,7 +36,8 @@ public partial class ConfigWindow : Window
         DesktopHub.ShortcutChanged += RegisterSearchHotkey;
         vm.Dock.Changed += OnDesktopOption;
 
-        KeyDown += (_, e) => { if (e.Key == Key.Escape) Hide(); };
+        PopupInteraction.For(this);
+        KeyDown += (_, e) => { if (e.Key == Key.Escape && !PopupInteraction.HasChildPopup(this)) { e.Handled = true; Hide(); } };
         usageTimer.Tick += (_, _) => ShowUsage();
         IsVisibleChanged += (_, _) =>
         {

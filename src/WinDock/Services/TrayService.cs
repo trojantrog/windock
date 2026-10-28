@@ -77,11 +77,13 @@ public sealed class TrayService : IDisposable
         menu.Add(language);
         menu.Add(new Separator());
         menu.Add(Item(Loc.T("trayExit"), () => Application.Current.Shutdown()));
-        contextMenu.Opened += (_, _) =>
+        var opened = contextMenu;
+        opened.Opened += (_, _) =>
         {
-            if (PresentationSource.FromVisual(contextMenu) is HwndSource source) Native.SetForegroundWindow(source.Handle);
+            if (PresentationSource.FromVisual(opened) is HwndSource source) Native.SetForegroundWindow(source.Handle);
         };
-        contextMenu.IsOpen = true;
+        opened.Closed += (_, _) => { if (contextMenu == opened) contextMenu = null; };
+        PopupInteraction.Open(opened, PopupInteraction.TrayCallbackOwner ?? window);
     }
 
     static MenuItem Item(string label, Action click, bool check = false, bool enabled = true)

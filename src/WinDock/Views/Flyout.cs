@@ -16,11 +16,14 @@ public abstract class Flyout : Window
     readonly bool glass;
     GlassBackdrop? backdrop;
     bool closing;
+    internal PopupInteraction Interaction { get; }
     (double CenterX, double BarTop, Forms.Screen Screen)? anchor;
 
     protected Flyout(bool dark, bool glass = false)
     {
         Dark = dark; this.glass = glass;
+        Interaction = PopupInteraction.For(this);
+        Interaction.DismissOnOutside(SafeClose, () => KeepOpenOnDeactivate);
         WindowStyle = WindowStyle.None;
         AllowsTransparency = !glass;
         Background = Brushes.Transparent;
@@ -59,18 +62,10 @@ public abstract class Flyout : Window
             if (glass) backdrop = new GlassBackdrop(this, face, dark);
         };
         SizeChanged += (_, _) => Place();
-        Deactivated += (_, _) => Dispatcher.BeginInvoke(() =>
-        {
-            if (!IsActive && !KeepOpenOnDeactivate && !IsMouseCaptureWithin) SafeClose();
-        });
-        LostMouseCapture += (_, _) => Dispatcher.BeginInvoke(() =>
-        {
-            if (!IsActive && !KeepOpenOnDeactivate) SafeClose();
-        });
-        Closed += (_, _) => backdrop?.Dispose();
+        Closed += (_, _) => { closing = true; backdrop?.Dispose(); };
         KeyDown += (_, e) =>
         {
-            if (e.Key == Key.Escape) SafeClose();
+            if (e.Key == Key.Escape && !PopupInteraction.HasChildPopup(this)) { e.Handled = true; SafeClose(); }
         };
     }
 
@@ -119,7 +114,7 @@ public abstract class Flyout : Window
         var b = screen.Bounds;
         var x = (int)Math.Clamp(centerX - w / 2.0, b.Left, Math.Max(b.Left, b.Right - w));
         var y = (int)Math.Max(b.Top, barTop - h + 6 * scale);
-        Native.SetWindowPos(new WindowInteropHelper(this).Handle, Native.HWND_TOPMOST, x, y, 0, 0, Native.SWP_NOSIZE);
+        Native.SetWindowPos(new WindowInteropHelper(this).Handle, Native.HWND_TOPMOST, x, y, 0, 0, Native.SWP_NOSIZE | Native.SWP_NOACTIVATE);
     }
 
     protected void SafeClose()

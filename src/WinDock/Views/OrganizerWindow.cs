@@ -132,7 +132,7 @@ public sealed class OrganizerWindow : DesktopToolWindow
         {
             var item = new MenuItem { Header = Loc.T(key) }; item.Click += (_, _) => action(); menu.Items.Add(item);
         }
-        menu.IsOpen = true;
+        PopupInteraction.Open(menu, anchor);
     }
 
     void EditName(bool rename)

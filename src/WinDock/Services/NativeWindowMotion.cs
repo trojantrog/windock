@@ -13,13 +13,16 @@ namespace WinDock.Services;
 
 sealed class NativeWindowMotion : IDisposable
 {
-    const int ConfigBytes = 12384, StatusBytes = 96, ActivationBytes = 64, Capacity = 256, Build = 8;
+    const int ConfigBytes = 12384, StatusBytes = 96, ActivationBytes = 64, Capacity = 256, Build = 9;
     const uint Magic = 0x4d444e57;
     const string SystemHash = "de3a7bacdcbb49a98bfff41010e772d18a329b77d9bc6b2416e1bc9f5b415863";
     public static NativeWindowMotion Shared { get; } = new();
     public readonly record struct Anchor(nint Window, uint Pid, string? Exe, Rect Bounds, uint Flags = 0, int Screen = 0);
     sealed record Remembered(Anchor Anchor, long Until);
     sealed record Request(uint Pid, bool Minimized, long Until);
+    sealed record MotionDiagnostic(bool Connected, uint PublishedFlags, int ComponentPid, int ComponentBuild,
+        int ComponentState, int ComponentError, long Opened, long Closed, long Minimized, long Restored,
+        long Hidden, long Skipped, long Failed);
 
     readonly Dictionary<object, Func<IEnumerable<Anchor>>> providers = [];
     readonly Dictionary<(nint, uint, ulong, int), Remembered> history = [];
@@ -34,6 +37,9 @@ sealed class NativeWindowMotion : IDisposable
     string? errorKey;
     string? failureCode;
     long started;
+    MotionDiagnostic? lastDiagnostic;
+    Task? diagnosticWrite;
+    long diagnosticWrittenAt;
 
     public void Initialize(DockOptions value)
     {
@@ -128,6 +134,7 @@ sealed class NativeWindowMotion : IDisposable
     }
 
     uint Flags => options is { NativeWindowAnimations: true, Enabled: true } && !suspended
+        && !IncompatibleComponent
         && SystemParameters.ClientAreaAnimation && SystemParameters.MinimizeAnimation
         ? 1u | (options.WindowOpenAnimation ? 2u : 0) | (options.WindowCloseAnimation ? 4u : 0)
             | (options.WindowMotion ? 8u : 0) | (options.WindowRestoreAnimation ? 16u : 0)
@@ -136,18 +143,19 @@ sealed class NativeWindowMotion : IDisposable
     public void Publish()
     {
         if (disposed || options is null) return;
+        var flags = Flags;
         if (config is not null)
         {
             var now = Environment.TickCount64;
             foreach (var key in history.Where(pair => pair.Value.Until < now).Select(pair => pair.Key).ToArray()) history.Remove(key);
             foreach (var key in requests.Where(pair => pair.Value.Until < now).Select(pair => pair.Key).ToArray()) requests.Remove(key);
-            if (Flags != 0)
+            if (flags != 0)
                 foreach (var provider in providers.Values)
                     foreach (var anchor in provider()) Add(anchor, 1500);
             var anchors = history.Values.OrderByDescending(a => a.Until).Take(Capacity).Select(a => a.Anchor).ToArray();
             Array.Clear(packet);
             U32(0, Magic); U32(4, 1); U32(8, ConfigBytes);
-            U32(16, (uint)Environment.ProcessId); U32(20, Flags); U64(24, (ulong)now);
+            U32(16, (uint)Environment.ProcessId); U32(20, flags); U64(24, (ulong)now);
             U32(32, (uint)options.WindowOpenDuration); U32(36, (uint)options.WindowCloseDuration);
             U32(40, (uint)options.WindowMotionDuration); U32(44, (uint)options.WindowRestoreDuration);
             Float(48, options.WindowCloseDistance); Float(52, options.WindowCloseScale); Float(56, options.WindowFadeHold);
@@ -170,6 +178,7 @@ sealed class NativeWindowMotion : IDisposable
             Marshal.WriteInt32(config.View, 12, sequence);
         }
         UpdateStatus();
+        RecordStatus(flags);
     }
 
     void U32(int offset, uint value) => BinaryPrimitives.WriteUInt32LittleEndian(packet.AsSpan(offset, 4), value);
@@ -181,6 +190,8 @@ sealed class NativeWindowMotion : IDisposable
         && Marshal.ReadInt32(status.View, 4) == 1 && Marshal.ReadInt32(status.View, 8) == StatusBytes
         && Environment.TickCount64 - Marshal.ReadInt64(status.View, 32) is >= 0 and < 1500;
 
+    bool IncompatibleComponent => Connected && Marshal.ReadInt32(status!.View, 24) != Build;
+
     void UpdateStatus()
     {
         if (options is null) return;
@@ -189,17 +200,53 @@ sealed class NativeWindowMotion : IDisposable
         else if (!options.NativeWindowAnimations) key = "nativeMotionOff";
         else if (errorKey is not null) key = errorKey;
         else if (suspended) key = "nativeMotionPaused";
+        else if (IncompatibleComponent) key = "nativeMotionSignOut";
         else if (Flags == 0) key = "nativeMotionSystemOff";
         else if (!Connected) key = "nativeMotionNeedsActivation";
-        else if (Marshal.ReadInt32(status!.View, 24) != Build) key = "nativeMotionSignOut";
-        else key = Marshal.ReadInt32(status.View, 16) switch
+        else key = Marshal.ReadInt32(status!.View, 16) switch
         {
-            1 => "nativeMotionReady",
+            1 => MotionActivityKey(),
             2 => "nativeMotionUnsupported",
             3 => "nativeMotionInitializationFailed",
             _ => "nativeMotionActivating"
         };
         options.WindowAnimationStatus = Loc.T(key) + (errorKey == key && failureCode is not null ? $" ({failureCode})" : "");
+    }
+
+    string MotionActivityKey()
+    {
+        if ((Flags & 62) == 0) return "nativeMotionActionsOff";
+        if (Marshal.ReadInt32(status!.View, 20) is 8 or 9 or 11 or 13 or 15 or 16 or 17 or 18)
+            return "nativeMotionFallback";
+        var processed = Enumerable.Range(0, 5).Sum(index => Marshal.ReadInt64(status!.View, 40 + index * 8));
+        if (processed > 0) return "nativeMotionProcessing";
+        return Marshal.ReadInt64(status!.View, 80) > 0 ? "nativeMotionNotProcessing" : "nativeMotionWaitingForWindow";
+    }
+
+    void RecordStatus(uint publishedFlags)
+    {
+        var now = Environment.TickCount64;
+        if (now - diagnosticWrittenAt < 2000 || diagnosticWrite is { IsCompleted: false }) return;
+        var connected = Connected;
+        int Read32(int offset) => connected ? Marshal.ReadInt32(status!.View, offset) : 0;
+        long Read64(int offset) => connected ? Marshal.ReadInt64(status!.View, offset) : 0;
+        var snapshot = new MotionDiagnostic(connected, publishedFlags, Read32(12), Read32(24), Read32(16), Read32(20),
+            Read64(40), Read64(48), Read64(56), Read64(64), Read64(72), Read64(80), Read64(88));
+        if (snapshot == lastDiagnostic) return;
+        lastDiagnostic = snapshot;
+        diagnosticWrittenAt = now;
+        var entry = new { at = DateTimeOffset.Now, clientBuild = Build, status = snapshot };
+        diagnosticWrite = Task.Run(() =>
+        {
+            try
+            {
+                var directory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "WinDock");
+                Directory.CreateDirectory(directory);
+                File.WriteAllText(Path.Combine(directory, "motion-status.json"),
+                    JsonSerializer.Serialize(entry, new JsonSerializerOptions { WriteIndented = true }));
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+        });
     }
 
     public async Task ActivateAsync()
@@ -208,13 +255,13 @@ sealed class NativeWindowMotion : IDisposable
         if (config is null || status is null) { errorKey = "nativeMotionMappingFailed"; UpdateStatus(); return; }
         options.NativeWindowAnimations = true;
         options.Flush();
-        if (Flags == 0) { UpdateStatus(); return; }
         if (Connected)
         {
             errorKey = Marshal.ReadInt32(status.View, 24) != Build ? "nativeMotionSignOut" : null;
             failureCode = null;
             UpdateStatus(); return;
         }
+        if (Flags == 0) { UpdateStatus(); return; }
         activating = true; errorKey = null; failureCode = null; Publish();
         SharedMap? report = null;
         int? exitCode = null, helperPid = null, windowsError = null;
@@ -312,7 +359,14 @@ sealed class NativeWindowMotion : IDisposable
             componentState = connected ? Marshal.ReadInt32(status!.View, 16) : (int?)null,
             componentError = connected ? Marshal.ReadInt32(status!.View, 20) : (int?)null,
             componentWindowsError = connected ? Marshal.ReadInt32(status!.View, 28) : (int?)null,
-            componentBuild = connected ? Marshal.ReadInt32(status!.View, 24) : (int?)null
+            componentBuild = connected ? Marshal.ReadInt32(status!.View, 24) : (int?)null,
+            opened = connected ? Marshal.ReadInt64(status!.View, 40) : (long?)null,
+            closed = connected ? Marshal.ReadInt64(status!.View, 48) : (long?)null,
+            minimized = connected ? Marshal.ReadInt64(status!.View, 56) : (long?)null,
+            restored = connected ? Marshal.ReadInt64(status!.View, 64) : (long?)null,
+            hidden = connected ? Marshal.ReadInt64(status!.View, 72) : (long?)null,
+            skipped = connected ? Marshal.ReadInt64(status!.View, 80) : (long?)null,
+            failed = connected ? Marshal.ReadInt64(status!.View, 88) : (long?)null
         };
         try
         {

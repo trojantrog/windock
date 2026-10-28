@@ -89,24 +89,35 @@ public sealed class SystemTrayIconButton : Border
         hover.Tick += (_, _) =>
         {
             hover.Stop();
-            if (!IsMouseOver || editing || !IsEnabled) return;
+            if (!IsMouseOver || editing || !IsEnabled || pressed is not null || Interaction?.IsBusy == true) return;
             Send(0x2A1); // WM_MOUSEHOVER
             if (item.Version >= 4 && !item.ShowStandardTip) { Send(0x406); popupOpen = true; }
         };
         MouseEnter += (_, _) => { Background = hoverBrush; if (!editing) { Send(0x200); hover.Start(); } };
         MouseLeave += (_, _) =>
         {
-            Background = IsKeyboardFocusWithin ? hoverBrush : Brushes.Transparent; hover.Stop();
-            if (!editing) { Send(0x2A3); if (popupOpen) Send(0x407); popupOpen = false; }
+            Background = IsKeyboardFocusWithin ? hoverBrush : Brushes.Transparent;
+            if (!editing) Send(0x2A3);
+            EndHover();
         };
         GotKeyboardFocus += (_, _) => Background = hoverBrush;
         LostKeyboardFocus += (_, _) => { if (!IsMouseOver) Background = Brushes.Transparent; };
-        Unloaded += (_, _) => { hover.Stop(); if (popupOpen) Send(0x407); popupOpen = false; };
+        Unloaded += (_, _) =>
+        {
+            pressed = null;
+            if (IsMouseCaptured) ReleaseMouseCapture();
+            EndHover();
+        };
         MouseMove += OnMove;
         MouseDown += OnDown;
         MouseUp += OnUp;
         KeyDown += OnKey;
-        LostMouseCapture += (_, _) => { if (!dragging) pressed = null; };
+        LostMouseCapture += (_, _) =>
+        {
+            if (dragging || pressed is null) return;
+            pressed = null;
+            if (!editing) Interaction?.CompleteTrayMenu(true);
+        };
     }
 
     static void AddMenu(ContextMenu menu, string title, Action action, bool enabled)
@@ -116,18 +127,20 @@ public sealed class SystemTrayIconButton : Border
     }
     void OnDown(object sender, MouseButtonEventArgs e)
     {
+        if (e.ChangedButton is not (MouseButton.Left or MouseButton.Right or MouseButton.Middle) || pressed is not null) return;
         if (editing && e.ChangedButton != MouseButton.Left) return; // WPF edit menu
         e.Handled = true; Focus(); pressed = e.ChangedButton; clicks = e.ClickCount; pressedAt = e.GetPosition(this);
-        CaptureMouse();
+        if (!CaptureMouse()) { pressed = null; EndHover(); return; }
         if (editing) return;
-        hover.Stop();
+        Interaction?.BeginTrayMenu(item);
+        EndHover();
         uint message = e.ChangedButton switch
         {
             MouseButton.Left => e.ClickCount == 2 ? 0x203u : 0x201u,
             MouseButton.Right => e.ClickCount == 2 ? 0x206u : 0x204u,
             MouseButton.Middle => e.ClickCount == 2 ? 0x209u : 0x207u, _ => 0
         };
-        if (message != 0) Send(message);
+        if (message != 0 && !Send(message)) Interaction?.CompleteTrayMenu(false);
     }
     void OnMove(object sender, MouseEventArgs e)
     {
@@ -148,22 +161,30 @@ public sealed class SystemTrayIconButton : Border
     {
         if (pressed != e.ChangedButton) return;
         e.Handled = true; pressed = null;
+        var releasedInside = new Rect(RenderSize).Contains(e.GetPosition(this));
+        ReleaseMouseCapture();
+        if (!releasedInside)
+        {
+            if (!editing) Interaction?.CompleteTrayMenu(false);
+            return;
+        }
         if (editing)
         {
-            if (!dragging && clicks == 1 && IsMouseOver && item.StableId.Length > 0) PinRequested?.Invoke(item);
+            if (!dragging && clicks == 1 && item.StableId.Length > 0) PinRequested?.Invoke(item);
         }
         else
         {
             // Explorer, ManagedShell and YASB send both the legacy up and the
             // version-3+ semantic callback. Do not additionally invoke/open.
+            var sent = false;
             switch (e.ChangedButton)
             {
-                case MouseButton.Left: Send(0x202); if (item.Version >= 3) Send(0x400); service.MarkSeen(item); break;
-                case MouseButton.Right: Send(0x205); if (item.Version >= 3) Send(0x7B); break;
-                case MouseButton.Middle: Send(0x208); break;
+                case MouseButton.Left: sent = Send(0x202); if (item.Version >= 3) sent |= Send(0x400); service.MarkSeen(item); break;
+                case MouseButton.Right: sent = Send(0x205); if (item.Version >= 3) sent |= Send(0x7B); break;
+                case MouseButton.Middle: sent = Send(0x208); break;
             }
+            Interaction?.CompleteTrayMenu(sent);
         }
-        ReleaseMouseCapture();
     }
     void OnKey(object sender, KeyEventArgs e)
     {
@@ -178,20 +199,36 @@ public sealed class SystemTrayIconButton : Border
         if (e.Key is Key.Enter or Key.Space)
         {
             e.Handled = true;
-            if (item.Version >= 3) Send(0x401, true); else { Send(0x201, true); Send(0x202, true); }
+            Interaction?.BeginTrayMenu(item);
+            EndHover();
+            var sent = item.Version >= 3 ? Send(0x401, true) : Send(0x201, true) & Send(0x202, true);
+            Interaction?.CompleteTrayMenu(sent);
             service.MarkSeen(item);
         }
         else if (e.Key == Key.Apps || (e.Key == Key.F10 && Keyboard.Modifiers.HasFlag(ModifierKeys.Shift)))
         {
             e.Handled = true;
-            if (item.Version >= 3) Send(0x7B, true); else { Send(0x204, true); Send(0x205, true); }
+            Interaction?.BeginTrayMenu(item);
+            EndHover();
+            var sent = item.Version >= 3 ? Send(0x7B, true) : Send(0x204, true) & Send(0x205, true);
+            Interaction?.CompleteTrayMenu(sent);
         }
     }
-    void Send(uint message, bool keyboard = false)
+    PopupInteraction? Interaction => Window.GetWindow(this) is { } window ? PopupInteraction.For(window) : null;
+
+    void EndHover()
+    {
+        hover.Stop();
+        if (!popupOpen) return;
+        popupOpen = false;
+        Send(0x407);
+    }
+
+    bool Send(uint message, bool keyboard = false)
     {
         Point point;
         if (keyboard) point = PointToScreen(new Point(0, 0));
         else { Native.GetCursorPos(out var cursor); point = new Point(cursor.X, cursor.Y); }
-        service.Invoke(item, message, point);
+        return service.Invoke(item, message, point);
     }
 }

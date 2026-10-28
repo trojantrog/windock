@@ -13,11 +13,11 @@
 #include <string.h>
 
 #define MAGIC 0x52544457u
-#define PROTOCOL 1u
+#define PROTOCOL 2u
 #define QUEUE_SIZE 128
 #define MAX_ICON 256
-#define START_MESSAGE L"WinDock.TrayHook.Connect.v1"
-#define STOP_MESSAGE L"WinDock.TrayHook.Disconnect.v1"
+#define START_MESSAGE L"WinDock.TrayHook.Connect.v2"
+#define STOP_MESSAGE L"WinDock.TrayHook.Disconnect.v2"
 
 #pragma pack(push, 1)
 // Explorer's Shell_NotifyIcon wire representation is 32-bit on x64 as well.
@@ -83,14 +83,17 @@ static BOOL ExpectedHost(DWORD pid) {
     return lstrcmpiW(actual, expected) == 0;
 }
 
-static BOOL WritePacket(HANDLE pipe, const void *data, DWORD length) {
+static BOOL WritePacket(HANDLE pipe, HANDLE process, const void *data, DWORD length) {
     OVERLAPPED operation = {0};
     operation.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
     if (!operation.hEvent) return FALSE;
     DWORD written = 0;
     BOOL ok = WriteFile(pipe, data, length, &written, &operation);
     if (!ok && GetLastError() == ERROR_IO_PENDING) {
-        if (WaitForSingleObject(operation.hEvent, 200) != WAIT_OBJECT_0) CancelIoEx(pipe, &operation);
+        HANDLE waits[] = { operation.hEvent, process };
+        DWORD wait = WAIT_TIMEOUT;
+        while (!stopped && (wait = WaitForMultipleObjects(2, waits, FALSE, 200)) == WAIT_TIMEOUT) {}
+        if (wait != WAIT_OBJECT_0) CancelIoEx(pipe, &operation);
         ok = GetOverlappedResult(pipe, &operation, &written, TRUE);
     }
     CloseHandle(operation.hEvent);
@@ -141,7 +144,7 @@ done:
     return pixels;
 }
 
-static BOOL SendIcon(HANDLE pipe, QueuedIcon *event) {
+static BOOL SendIcon(HANDLE pipe, HANDLE process, QueuedIcon *event) {
     DWORD width = 0, height = 0;
     BYTE *pixels = IconPixels(event->icon, &width, &height);
     DWORD bytes = width * height * 4, length = sizeof(IconPacket) + bytes;
@@ -154,7 +157,7 @@ static BOOL SendIcon(HANDLE pipe, QueuedIcon *event) {
     // Never send handles belonging to Explorer to the host process.
     packet->icon.icon = 0; packet->icon.balloonIcon = 0;
     if (pixels) { CopyMemory((BYTE *)packet + sizeof(IconPacket), pixels, bytes); HeapFree(GetProcessHeap(), 0, pixels); }
-    BOOL ok = WritePacket(pipe, packet, length);
+    BOOL ok = WritePacket(pipe, process, packet, length);
     HeapFree(GetProcessHeap(), 0, packet);
     return ok;
 }
@@ -174,18 +177,18 @@ static DWORD WINAPI Worker(void *unused) {
     if (!process || pipe == INVALID_HANDLE_VALUE || !GetNamedPipeServerProcessId(pipe, &serverPid) ||
         serverPid != hostPid || !ExpectedHost(serverPid)) goto finish;
     Header connected = { MAGIC, PROTOCOL, 2, sizeof(Header) };
-    if (!WritePacket(pipe, &connected, sizeof(connected))) goto finish;
+    if (!WritePacket(pipe, process, &connected, sizeof(connected))) goto finish;
     while (!stopped && WaitForSingleObject(process, 0) == WAIT_TIMEOUT) {
         if (InterlockedExchange(&dropped, 0)) {
             Header loss = { MAGIC, PROTOCOL, 3, sizeof(Header) };
-            if (!WritePacket(pipe, &loss, sizeof(loss))) break;
+            if (!WritePacket(pipe, process, &loss, sizeof(loss))) break;
         }
         QueuedIcon event = {0}; BOOL ready = FALSE;
         AcquireSRWLockExclusive(&queueLock);
         if (count) { event = queue[head]; head = (head + 1) % QUEUE_SIZE; --count; ready = TRUE; }
         ReleaseSRWLockExclusive(&queueLock);
         if (ready) {
-            BOOL ok = SendIcon(pipe, &event);
+            BOOL ok = SendIcon(pipe, process, &event);
             if (event.icon) DestroyIcon(event.icon);
             if (!ok) break;
         } else {
@@ -197,10 +200,13 @@ finish:
     AcquireSRWLockExclusive(&queueLock);
     InterlockedExchange(&stopped, 1);
     while (count) { if (queue[head].icon) DestroyIcon(queue[head].icon); head = (head + 1) % QUEUE_SIZE; --count; }
+    head = 0;
+    InterlockedExchange(&dropped, 0);
     if (wakeEvent) { CloseHandle(wakeEvent); wakeEvent = NULL; }
     ReleaseSRWLockExclusive(&queueLock);
     if (pipe != INVALID_HANDLE_VALUE) CloseHandle(pipe);
     if (process) CloseHandle(process);
+    InterlockedExchange(&initialized, 0);
     // The Windows hook owns a separate module reference until the host unhooks.
     FreeLibraryAndExitThread(module, 0);
     return 0;
@@ -255,8 +261,15 @@ __declspec(dllexport) LRESULT CALLBACK WinDockTrayHook(int code, WPARAM wParam, 
                         InterlockedExchange(&stopped, 0);
                         HANDLE worker = CreateThread(NULL, 0, Worker, NULL, 0, NULL);
                         if (worker) CloseHandle(worker);
-                        else { InterlockedExchange(&stopped, 1); FreeLibrary(held); CloseHandle(wakeEvent); wakeEvent = NULL; }
-                    } else if (wakeEvent) { CloseHandle(wakeEvent); wakeEvent = NULL; }
+                        else {
+                            InterlockedExchange(&stopped, 1);
+                            FreeLibrary(held); CloseHandle(wakeEvent); wakeEvent = NULL;
+                            InterlockedExchange(&initialized, 0);
+                        }
+                    } else {
+                        if (wakeEvent) { CloseHandle(wakeEvent); wakeEvent = NULL; }
+                        InterlockedExchange(&initialized, 0);
+                    }
                 }
             } else if (message->message == stopMessage && message->wParam == hostPid && (DWORD)message->lParam == sessionNonce) {
                 AcquireSRWLockExclusive(&queueLock);

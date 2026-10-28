@@ -1,6 +1,6 @@
 # Native whole-window transitions
 
-This preview adapts one exact x64 uDWM image. It has been compiled and statically reviewed; successful activation and visual behavior have not been confirmed. User-facing operation and rollback are described in [the animation guide](../../docs/native-window-animation.md).
+This preview adapts one exact x64 uDWM image. Build 8 was observed connected with zero replaced transitions, 23 skipped transitions and error 7. That error combined thread identity and reentrancy, so the observation does not distinguish those branches. Build 9 corrects the overly restrictive thread check and separates the diagnostics; its runtime and visual behavior have not been verified. User-facing operation and rollback are described in [the animation guide](../../docs/native-window-animation.md).
 
 ## Source and build
 
@@ -33,16 +33,19 @@ Matching PDB: GUID `28cf5a3b-d2bc-549f-2f4e-4efcb7fbf89c`, image age 1, DBI age 
 | Secondary relative window rectangle | `0x2eb04` |
 | Master / fifteen timeline slots | window `+0x140` / `+0x158` |
 | Timeline allocation / current / finished | `0x78` bytes / `+0x30` / `+0x48` |
+| CDesktopManager::s_csDwmInstance | `0x12bd10`, x64 CRITICAL_SECTION |
 
 `native_26100_9949.h` is deliberately version-specific. Installation verifies the file hash, loaded PE metadata and entry bytes. Unknown images and conflicting entry patches are rejected. The DLL also verifies that its host executable is the system `dwm.exe`.
 
 ## Lifecycle and ownership
 
-StartAnimation runs first to preserve native resource preparation and action semantics. Raw types 1, 6, 3 and 5 correspond to ordinary showing, destruction, minimizing and restoring on this image. The callback then prepares six native heap blocks: X/Y translation, X/Y scale, opacity and a new master timeline. Allocation failure leaves the original timelines intact. Only after all blocks exist are native constructors called and all window slots replaced. The replacement is one scene-thread operation, not a hardware-atomic sixteen-pointer transaction.
+StartAnimation runs first to preserve native resource preparation and action semantics. Raw types 1, 6, 3 and 5 correspond to ordinary showing, destruction, minimizing and restoring on this image. The callback then prepares six native heap blocks: X/Y translation, X/Y scale, opacity and a new master timeline. Allocation failure leaves the original timelines intact. Only after all blocks exist are native constructors called and all window slots replaced. Replacement happens while the caller already owns the native window-state critical section; the sixteen pointer assignments are not hardware-atomic.
 
 The initial native reference on each constructed timeline is transferred to the window. Retired references are released through the original Release method. That method schedules deletion on a subsequent native timeline advance; constructed objects must not be directly freed. Ordinary transitions clear unused rotation and special-clip slots. Windows currently using the special-clip path are excluded before replacement.
 
-The compositor thread is identified by AdvanceTimelines. Changes from another thread, or reentrant changes during timeline advancement, are skipped. Configuration reads require successful installation. Failed hook activation keeps its trampoline allocation resident, avoiding unloading code that a partially activated hook might still reference.
+Build 8 restricted replacement to the thread most recently observed in AdvanceTimelines. That was stronger than the native synchronization contract and could exclude valid window actions. Build 9 checks ownership of CDesktopManager::s_csDwmInstance through the x64 CRITICAL_SECTION OwningThread and RecursionCount fields. It does not acquire or release this lock. Calls without ownership and reentrant replacement during timeline advancement remain excluded. Configuration reads require successful installation. Failed hook activation keeps its trampoline allocation resident, avoiding unloading code that a partially activated hook might still reference.
+
+The pinned image uses this critical section in ProcessAnimationTick (`0x16d90`), before UpdateGlobalTime (`0x16f40`) calls AdvanceTimelines (`0x17000`), and in HandleThreadMessage, CWindowList::UpdateScene, ForceUpdateScene and DestroySprite. The `lea r15` reference at `0x808f9` identifies the same critical-section base passed directly to EnterCriticalSection; its bytes are included in activation validation. Offline records are `work/native-motion-symbols/udwm-animation-lock-ownership.txt` and `udwm-critical-section-references.txt` outside the source tree. Microsoft describes [critical-section ownership](https://learn.microsoft.com/en-us/windows-hardware/drivers/debugger/displaying-a-critical-section); the uDWM address remains private and constrained to the exact image hash.
 
 Hide-to-tray calls the native StartDelayHideAnimation entry, which hides the original representation, stops the previous transition, and starts raw type 8. Calling StartAnimation(8) directly would omit those native state changes. Repeated hide calls preserve the existing delayed hide. Re-showing a window during this custom hide requests the native show transition so it can replace the pending hide. No WM_CLOSE, DestroyWindow or process termination is generated by the module.
 
@@ -58,7 +61,21 @@ Configuration is 12384 bytes. The sequence at byte 12 is odd while the UI publis
 
 Anchors match HWND/PID first, then executable path/PID, then the nearest Dock center. Path identity is FNV-1a over UTF-16 code units, with ASCII case and slash normalization shared by C++ and C#. Explicit Dock actions have priority over passive positions. Multiple-screen positions are retained separately. Closed-window anchors expire after 1.5 seconds; explicit launch anchors after 8 seconds. The heartbeat is published every 150 ms. Missing or stale configuration after two seconds disables new custom actions.
 
-Status is 96 bytes. State 1 means hooks installed, 2 image/entry mismatch, 3 initialization failure. Counters at bytes 40–88 count replaced opening, closing, minimizing, restoring and hiding timelines, skipped replacements and allocation failures. These are code-path counters, not rendered-frame measurements. Error 7 records a scene-thread/reentrancy exclusion. The status heartbeat is refreshed every 250 ms.
+Status is 96 bytes. State 1 means hooks installed, 2 image/entry mismatch, 3 initialization failure. Counters at bytes 40–88 count replaced opening, closing, minimizing, restoring and hiding timelines, skipped replacements and allocation failures. These are code-path counters, not rendered-frame measurements. Build 8 used error 7 for the combined thread/reentrancy exclusion, without per-reason counters. The status heartbeat is refreshed every 250 ms. The UI distinguishes waiting for a transition, zero recorded replacements, recorded replacements, and a later transition falling back to Windows.
+
+Build 9 records these transition reasons:
+
+| Value | Reason |
+| --- | --- |
+| 8 / 9 | Caller does not own the window-state lock / timeline traversal is in progress |
+| 11 / 18 | No unfinished native master timeline / native action type differs from the requested action |
+| 12 / 14 | Excluded window / excluded geometry |
+| 13 / 15 | No secondary window representation / invalid pose |
+| 16 / 17 | Tracking slots exhausted / allocation failed |
+
+Normal window and geometry exclusions do not erase a blocking reason; a successful replacement clears it. A tracking slot is recorded only after all allocations and replacement succeed. The action check uses window `+0x150`, written by StartAnimation at RVA `0xc7d0`. The master finished byte is checked before replacement, but is not a presentation acknowledgment.
+
+`%APPDATA%\WinDock\motion-status.json` contains one latest status/counter snapshot, written in the background only on change and at most once per two seconds. It contains no window titles or contents. When an incompatible resident component responds, the UI publishes disabled flags and requests sign-out; it does not attempt a live unload.
 
 ## Activation and failure behavior
 

@@ -1,6 +1,8 @@
+using System.ComponentModel;
 using System.IO.Pipes;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using System.Security.Principal;
 using System.Text;
 using Microsoft.Win32.SafeHandles;
 
@@ -13,9 +15,42 @@ internal static class SystemTrayInterop
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] internal static extern uint RegisterWindowMessage(string name);
     [DllImport("user32.dll", SetLastError = true)] internal static extern nint SendMessageTimeoutW(nint window, uint message, nuint wParam, nint lParam, uint flags, uint timeout, out nuint result);
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] internal static extern bool SendNotifyMessageW(nint window, uint message, nuint wParam, nint lParam);
+    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] internal static extern bool PostMessageW(nint window, uint message, nuint wParam, nint lParam);
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] internal static extern bool AllowSetForegroundWindow(uint processId);
     [DllImport("kernel32.dll")] [return: MarshalAs(UnmanagedType.Bool)] internal static extern bool GetNamedPipeClientProcessId(SafePipeHandle pipe, out uint processId);
     [UnmanagedFunctionPointer(CallingConvention.Winapi)] internal delegate uint ProtocolVersion();
+
+    internal static NamedPipeServerStream CreateTrayPipe(string name)
+    {
+        using var identity = WindowsIdentity.GetCurrent();
+        var user = identity.User?.Value ?? throw new UnauthorizedAccessException();
+        var logon = identity.Groups?.OfType<SecurityIdentifier>()
+            .FirstOrDefault(group => group.Value.StartsWith("S-1-5-5-", StringComparison.Ordinal))?.Value ?? user;
+        var sddl = $"O:{user}D:P(A;;GA;;;{logon})S:(ML;;NW;;;ME)";
+        if (!ConvertStringSecurityDescriptorToSecurityDescriptor(sddl, 1, out var descriptor, out _)) throw new Win32Exception();
+        try
+        {
+            var security = new SecurityAttributes { Length = Marshal.SizeOf<SecurityAttributes>(), Descriptor = descriptor };
+            var handle = CreateNamedPipe(@"\\.\pipe\" + name, 0x40080001, 0x8, 1, 0, 65536, 0, ref security);
+            if (handle.IsInvalid)
+            {
+                var error = Marshal.GetLastWin32Error();
+                handle.Dispose(); throw new Win32Exception(error);
+            }
+            try { return new NamedPipeServerStream(PipeDirection.In, true, false, handle); }
+            catch { handle.Dispose(); throw; }
+        }
+        finally { LocalFree(descriptor); }
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct SecurityAttributes { public int Length; public nint Descriptor; public int Inherit; }
+    [DllImport("advapi32.dll", EntryPoint = "ConvertStringSecurityDescriptorToSecurityDescriptorW", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool ConvertStringSecurityDescriptorToSecurityDescriptor(string value, uint revision, out nint descriptor, out uint bytes);
+    [DllImport("kernel32.dll", EntryPoint = "CreateNamedPipeW", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern SafePipeHandle CreateNamedPipe(string name, uint openMode, uint pipeMode, uint instances, uint outputSize, uint inputSize, uint timeout,
+        ref SecurityAttributes attributes);
+    [DllImport("kernel32.dll")] static extern nint LocalFree(nint memory);
 
     internal static (nint Window, uint Process, uint Thread) ExplorerTray()
     {
@@ -41,7 +76,7 @@ internal static class SystemTrayInterop
 
 internal sealed class TrayHookSession : IDisposable
 {
-    const uint Magic = 0x52544457, Version = 1;
+    const uint Magic = 0x52544457, Version = 2;
     readonly CancellationToken token;
     readonly uint nonce = BitConverter.ToUInt32(RandomNumberGenerator.GetBytes(4)) | 1;
     NamedPipeServerStream? pipe;
@@ -63,17 +98,14 @@ internal sealed class TrayHookSession : IDisposable
         var explorer = SystemTrayInterop.ExplorerTray();
         if (explorer.Window == 0 || explorer.Thread == 0) throw new IOException(Loc.T("systemTrayExplorerMissing"));
         target = explorer.Window;
-        // CurrentUserOnly verifies the connecting identity; the PID check below
-        // additionally restricts incoming data to this verified Explorer instance.
-        pipe = new NamedPipeServerStream($"WinDock.Tray.{Environment.ProcessId}.{nonce:X8}", PipeDirection.In, 1,
-            PipeTransmissionMode.Byte, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly, 65536, 0);
+        pipe = SystemTrayInterop.CreateTrayPipe($"WinDock.Tray.{Environment.ProcessId}.{nonce:X8}");
         var connection = pipe.WaitForConnectionAsync(token);
         module = NativeLibrary.Load(path);
         var protocol = Marshal.GetDelegateForFunctionPointer<SystemTrayInterop.ProtocolVersion>(NativeLibrary.GetExport(module, "WinDockTrayProtocol"));
         if (protocol() != Version) throw new InvalidDataException(Loc.T("systemTrayVersionFailed"));
         hook = SystemTrayInterop.SetWindowsHookExW(4, NativeLibrary.GetExport(module, "WinDockTrayHook"), module, explorer.Thread);
         if (hook == 0) throw new IOException(Loc.T("systemTrayHookFailed"));
-        var connectMessage = SystemTrayInterop.RegisterWindowMessage("WinDock.TrayHook.Connect.v1");
+        var connectMessage = SystemTrayInterop.RegisterWindowMessage("WinDock.TrayHook.Connect.v2");
         if (SystemTrayInterop.SendMessageTimeoutW(target, connectMessage, (nuint)Environment.ProcessId, (nint)nonce, 0x3, 250, out _) == 0)
             throw new IOException(Loc.T("systemTrayHookFailed"));
         await connection.WaitAsync(TimeSpan.FromSeconds(4), token);
@@ -108,7 +140,7 @@ internal sealed class TrayHookSession : IDisposable
         // Remove only our own hook. Never mutate Explorer's window procedure,
         // taskbar visibility, registry, or another application's hook chain.
         if (target != 0 && hook != 0)
-            SystemTrayInterop.SendMessageTimeoutW(target, SystemTrayInterop.RegisterWindowMessage("WinDock.TrayHook.Disconnect.v1"),
+            SystemTrayInterop.SendMessageTimeoutW(target, SystemTrayInterop.RegisterWindowMessage("WinDock.TrayHook.Disconnect.v2"),
                 (nuint)Environment.ProcessId, (nint)nonce, 0x3, 150, out _);
         if (hook != 0) { SystemTrayInterop.UnhookWindowsHookEx(hook); hook = 0; }
         pipe?.Dispose(); pipe = null;
