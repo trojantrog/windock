@@ -5,18 +5,19 @@ using System.Security.Cryptography;
 namespace WinDock.Services;
 
 // This is an ordinary second instance of our executable, not code injected into
-// the application being animated. It owns the temporary alpha change, so a crash
+// the application being animated. It owns the temporary region clip, so a crash
 // or a blocked UI in the Dock cannot leave another application's window hidden.
 sealed class WindowMotionGuard : IDisposable
 {
-    const int PacketSize = 45;
+    const int PacketSize = 61;
     const int LeaseMilliseconds = 1400;
     const byte Acquire = 1, Release = 2;
     readonly SemaphoreSlim exchange = new(1);
     NamedPipeServerStream? pipe;
     Task<bool>? starting;
     bool disposed;
-    public bool Failed => disposed || (starting is { IsCompletedSuccessfully: true } && !starting.Result);
+    public bool Failed => disposed || (starting is { IsCompleted: true } && (!starting.IsCompletedSuccessfully || !starting.Result));
+    public bool Ready => !disposed && starting is { IsCompletedSuccessfully: true } && starting.Result;
 
     public Task<bool> Prepare() => starting ??= Task.Run(Start);
 
@@ -48,7 +49,7 @@ sealed class WindowMotionGuard : IDisposable
             accepted = ready[0] == 1 && !disposed;
             return accepted;
         }
-        catch (Exception e) when (e is IOException or OperationCanceledException or InvalidOperationException
+        catch (Exception e) when (e is IOException or OperationCanceledException or InvalidOperationException or ObjectDisposedException
             or System.ComponentModel.Win32Exception or UnauthorizedAccessException) { return false; }
         finally
         {
@@ -56,7 +57,8 @@ sealed class WindowMotionGuard : IDisposable
         }
     }
 
-    public async Task<Lease?> Hide(nint window, int pid, nint operation, CancellationToken cancellation)
+    public async Task<Lease?> Hide(nint window, int pid, nint operation, nint surface, CancellationToken cancellation,
+        long acquireBefore = long.MaxValue)
     {
         if (!await Prepare().WaitAsync(cancellation)) return null;
         long started;
@@ -67,7 +69,7 @@ sealed class WindowMotionGuard : IDisposable
         }
         catch (Exception e) when (e is ArgumentException or InvalidOperationException or System.ComponentModel.Win32Exception) { return null; }
         var token = RandomNumberGenerator.GetInt32(1, int.MaxValue);
-        var lease = new Lease(this, window, pid, started, token, operation);
+        var lease = new Lease(this, window, pid, started, token, operation, surface, acquireBefore);
         if (await Send(Acquire, lease, cancellation)) return lease;
         return null;
     }
@@ -88,6 +90,8 @@ sealed class WindowMotionGuard : IDisposable
             BitConverter.TryWriteBytes(packet.AsSpan(21), (long)lease.Token);
             BitConverter.TryWriteBytes(packet.AsSpan(29), Environment.TickCount64 + LeaseMilliseconds);
             BitConverter.TryWriteBytes(packet.AsSpan(37), (long)lease.Operation);
+            BitConverter.TryWriteBytes(packet.AsSpan(45), (long)lease.Surface);
+            BitConverter.TryWriteBytes(packet.AsSpan(53), lease.AcquireBefore);
             await channel.WriteAsync(packet, deadline.Token);
             var answer = new byte[1];
             await channel.ReadExactlyAsync(answer, deadline.Token);
@@ -109,16 +113,22 @@ sealed class WindowMotionGuard : IDisposable
         pipe?.Dispose();
     }
 
-    internal sealed class Lease(WindowMotionGuard owner, nint window, int pid, long started, nint token, nint operation) : IAsyncDisposable
+    internal sealed class Lease(WindowMotionGuard owner, nint window, int pid, long started, nint token, nint operation,
+        nint surface, long acquireBefore) : IAsyncDisposable
     {
         public nint Window { get; } = window;
         public int Pid { get; } = pid;
         public long Started { get; } = started;
         public nint Token { get; } = token;
         public nint Operation { get; } = operation;
+        public nint Surface { get; } = surface;
+        public long AcquireBefore { get; } = acquireBefore;
         public bool IsHeld => WindowMotionNative.SameWindow(Window, Pid)
             && WindowMotionNative.GetProp(Window, WindowMotionNative.LeaseProperty) == Token
-            && WindowMotionNative.GetProp(Window, WindowMotionNative.OperationProperty) == Operation;
+            && WindowMotionNative.GetProp(Window, WindowMotionNative.OperationProperty) == Operation
+            && WindowMotionNative.RegionKind(Window) == 1 /* NULLREGION */
+            && WindowMotionNative.SameWindow(Surface, Environment.ProcessId)
+            && WindowMotionNative.GetProp(Surface, WindowMotionNative.SurfaceProperty) == Token;
         public async ValueTask DisposeAsync() => await owner.Send(Release, this, CancellationToken.None);
     }
 
@@ -151,15 +161,17 @@ sealed class WindowMotionGuard : IDisposable
                 var token = (nint)BitConverter.ToInt64(packet, 21);
                 var requestedDeadline = BitConverter.ToInt64(packet, 29);
                 var operation = (nint)BitConverter.ToInt64(packet, 37);
+                var surface = (nint)BitConverter.ToInt64(packet, 45);
+                var acquireBefore = BitConverter.ToInt64(packet, 53);
                 var accepted = false;
                 if (packet[0] == Acquire)
                 {
                     if (held is not null && held.Restore()) held = null;
-                    if (held is null && requestedDeadline > Environment.TickCount64)
+                    if (held is null && requestedDeadline > Environment.TickCount64 && acquireBefore > Environment.TickCount64)
                     {
-                        // Remember the recovery obligation before the first style
+                        // Remember the recovery obligation before the first clip
                         // mutation. A failed partial acquisition is restored too.
-                        held = new GuardedWindow(window, pid, started, token, operation,
+                        held = new GuardedWindow(window, pid, started, token, operation, surface, parentPid, acquireBefore,
                             Math.Min(requestedDeadline, Environment.TickCount64 + LeaseMilliseconds));
                         accepted = held.Hide();
                         if (!accepted && held.Restore()) held = null;
@@ -182,18 +194,19 @@ sealed class WindowMotionGuard : IDisposable
             or ArgumentException or UnauthorizedAccessException or System.ComponentModel.Win32Exception) { }
         finally
         {
-            // Retry transient compositor/style failures. The helper never
-            // terminates while it still owns an alpha-zero window.
+            // Retry transient failures. Never abandon an owned clipped window.
             while (held is not null && !held.Restore()) await Task.Delay(50);
         }
     }
 
-    sealed class GuardedWindow(nint window, int pid, long started, nint token, nint operation, long deadline)
+    sealed class GuardedWindow(nint window, int pid, long started, nint token, nint operation,
+        nint surface, int parentPid, long acquireBefore, long deadline)
     {
         public nint Window { get; } = window;
         public nint Token { get; } = token;
         public long Deadline { get; } = deadline;
         bool marked;
+        bool surfaceMarked;
         nint processHandle;
 
         bool SameProcess()
@@ -212,22 +225,30 @@ sealed class WindowMotionGuard : IDisposable
 
         public bool Hide()
         {
-            if (!SameProcess() || !WindowMotionNative.CanAnimate(Window, true, out var current) || current != pid
+            if (Environment.TickCount64 >= acquireBefore || !SameProcess()
+                || !WindowMotionNative.CanAnimate(Window, true, out var current) || current != pid
                 || WindowMotionNative.GetProp(Window, WindowMotionNative.OperationProperty) != operation
-                || WindowMotionNative.GetProp(Window, WindowMotionNative.LeaseProperty) != 0) return false;
-            var style = (long)Native.GetWindowLongPtr(Window, Native.GWL_EXSTYLE);
-            if ((style & WindowMotionNative.Layered) != 0) return false;
+                || WindowMotionNative.GetProp(Window, WindowMotionNative.LeaseProperty) != 0
+                || !WindowMotionNative.SameWindow(surface, parentPid)
+                || WindowMotionNative.RegionKind(surface) != 1
+                || WindowMotionNative.GetProp(surface, WindowMotionNative.SurfaceProperty) != 0) return false;
+            if (!WindowMotionNative.SetProp(surface, WindowMotionNative.SurfaceProperty, Token)) return false;
+            surfaceMarked = true;
             if (!WindowMotionNative.SetProp(Window, WindowMotionNative.LeaseProperty, Token)) return false;
             marked = true;
-            Native.SetWindowLongPtr(Window, Native.GWL_EXSTYLE, (nint)(style | WindowMotionNative.Layered));
-            if (Environment.TickCount64 >= Deadline || !SameProcess()
+            // The source had no explicit region. Keep every style/alpha bit as
+            // the application set it; no redirection surface is rebuilt.
+            if (WindowMotionNative.RegionKind(Window) != 0 || !WindowMotionNative.Mask(Window)) return false;
+            if (Environment.TickCount64 >= Math.Min(Deadline, acquireBefore) || !SameProcess()
                 || WindowMotionNative.GetProp(Window, WindowMotionNative.LeaseProperty) != Token
                 || WindowMotionNative.GetProp(Window, WindowMotionNative.OperationProperty) != operation) return false;
             if (WindowMotionNative.GetWindowDisplayAffinity(Window, out var affinity) && affinity != 0) return false;
-            if (!WindowMotionNative.SetLayeredWindowAttributes(Window, 0, 0, 2 /* LWA_ALPHA */)) return false;
+            // Both halves of the handoff execute in this helper, with no pipe
+            // round trip between them. The overlay was already rendered while
+            // clipped, so it never covers the source before the source is ready.
+            if (!SameSurface() || WindowMotionNative.SetWindowRgn(surface, 0, false) == 0) return false;
             return Environment.TickCount64 < Deadline
-                && WindowMotionNative.GetLayeredWindowAttributes(Window, out _, out var alpha, out var flags)
-                && alpha == 0 && (flags & 2) != 0;
+                && WindowMotionNative.RegionKind(Window) == 1;
         }
 
         public bool Restore()
@@ -243,23 +264,34 @@ sealed class WindowMotionGuard : IDisposable
 
         bool RestoreCore()
         {
-            if (!marked || !WindowMotionNative.SameWindow(Window, pid)
-                || WindowMotionNative.GetProp(Window, WindowMotionNative.LeaseProperty) != Token) return true;
-            if (processHandle == 0 || WindowMotionNative.ProcessWait(processHandle, 0) != 258) return true;
-            var style = (long)Native.GetWindowLongPtr(Window, Native.GWL_EXSTYLE);
-            if ((style & WindowMotionNative.Layered) != 0)
+            if (marked && WindowMotionNative.SameWindow(Window, pid)
+                && WindowMotionNative.GetProp(Window, WindowMotionNative.LeaseProperty) == Token
+                && processHandle != 0 && WindowMotionNative.ProcessWait(processHandle, 0) == 258)
             {
-                // The window was not layered before acquisition; therefore it
-                // had no layered alpha/color-key state to overwrite. Preserve
-                // every unrelated style bit the application changed meanwhile.
-                WindowMotionNative.SetLayeredWindowAttributes(Window, 0, 255, 2);
-                Native.SetWindowLongPtr(Window, Native.GWL_EXSTYLE, (nint)(style & ~WindowMotionNative.Layered));
-                if (((long)Native.GetWindowLongPtr(Window, Native.GWL_EXSTYLE) & WindowMotionNative.Layered) != 0) return false;
-                WindowMotionNative.RedrawWindow(Window, 0, 0, 0x0001 | 0x0004 | 0x0080 | 0x0400);
+                // If the application replaced our empty clip, keep its newer
+                // region. Otherwise remove only the clip we own.
+                var kind = WindowMotionNative.RegionKind(Window);
+                if (kind < 0) return false;
+                if (kind <= 1 && WindowMotionNative.SetWindowRgn(Window, 0, false) == 0) return false;
+                if (WindowMotionNative.RegionKind(Window) == 1) return false;
+                // No RDW_ERASE: asking GPU windows to erase their background is
+                // precisely what can produce a blank flash during a handoff.
+                WindowMotionNative.RedrawWindow(Window, 0, 0, 0x0001 | 0x0400);
+                WindowMotionNative.RemoveProp(Window, WindowMotionNative.LeaseProperty);
             }
-            WindowMotionNative.RemoveProp(Window, WindowMotionNative.LeaseProperty);
             marked = false;
+            if (SameSurface())
+            {
+                // Also hide the overlay on timeout or parent UI hangs. A dead
+                // parent cannot leave a stale picture covering the real window.
+                if (!WindowMotionNative.Mask(surface)) return false;
+                WindowMotionNative.RemoveProp(surface, WindowMotionNative.SurfaceProperty);
+            }
+            surfaceMarked = false;
             return true;
         }
+
+        bool SameSurface() => surfaceMarked && WindowMotionNative.SameWindow(surface, parentPid)
+            && WindowMotionNative.GetProp(surface, WindowMotionNative.SurfaceProperty) == Token;
     }
 }

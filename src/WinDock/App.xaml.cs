@@ -92,6 +92,7 @@ public partial class App : System.Windows.Application
     protected override void OnExit(ExitEventArgs e)
     {
         WinKeys.Enable(false);
+        WindowLaunchObserver.Shared.Dispose();
         WindowTransitions.Shared.Dispose();
         main?.Dock.Flush();
         systemTray?.Dispose();

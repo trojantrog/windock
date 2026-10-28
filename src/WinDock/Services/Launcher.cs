@@ -7,6 +7,8 @@ namespace WinDock.Services;
 
 public static class Launcher
 {
+    internal readonly record struct LaunchReceipt(int Pid, long StartedUtcTicks);
+    internal static event Action<LaunchReceipt>? Started;
     static readonly Guid DownloadsId = new("374DE290-123F-4565-9164-39C4925E467B");
 
     [DllImport("shell32.dll", PreserveSig = false)]
@@ -60,7 +62,13 @@ public static class Launcher
         {
             var info = new ProcessStartInfo(file) { UseShellExecute = true, Arguments = args ?? "" };
             if (Path.IsPathRooted(file) && Path.GetDirectoryName(file) is { } dir && Directory.Exists(dir)) info.WorkingDirectory = dir;
-            Process.Start(info)?.Dispose();
+            using var process = Process.Start(info);
+            if (process is not null && Started is not null)
+            {
+                try { Started.Invoke(new LaunchReceipt(process.Id, process.StartTime.ToUniversalTime().Ticks)); }
+                catch (Exception e) when (e is Win32Exception or InvalidOperationException or ArgumentException)
+                { System.Diagnostics.Trace.WriteLine($"Launch identity unavailable: {e.GetType().Name}"); }
+            }
             return true;
         }
         catch (Exception e) when (e is Win32Exception or InvalidOperationException or FileNotFoundException) { return false; }

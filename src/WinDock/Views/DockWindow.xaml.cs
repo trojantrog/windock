@@ -108,7 +108,7 @@ public partial class DockWindow : Window
             Dispatcher.BeginInvoke(Resize, DispatcherPriority.Loaded);
         };
         ApplyAccent(false);
-        WindowTransitions.Shared.Prepare(vm.Options.WindowMotion);
+        WindowTransitions.Shared.Prepare(vm.Options.WindowMotion || vm.Options.WindowOpenAnimation);
         poll.Start();
     }
 
@@ -229,9 +229,11 @@ public partial class DockWindow : Window
     void OnOption(string name)
     {
         if (name == nameof(DockOptions.ShowAppNames) && !vm.Options.ShowAppNames) NameTag.Visibility = Visibility.Collapsed;
-        if (name is nameof(DockOptions.WindowMotion) or nameof(DockOptions.WindowMotionDuration))
+        if (name is nameof(DockOptions.WindowMotion) or nameof(DockOptions.WindowMotionDuration)
+            or nameof(DockOptions.WindowOpenAnimation) or nameof(DockOptions.WindowOpenDuration))
         {
-            WindowTransitions.Shared.Prepare(vm.Options.WindowMotion);
+            WindowTransitions.Shared.Cancel(this, clearCache: !vm.Options.WindowMotion);
+            WindowTransitions.Shared.Prepare(vm.Options.WindowMotion || vm.Options.WindowOpenAnimation);
             return;
         }
         if (name == nameof(DockOptions.CompactWidgets))
@@ -691,7 +693,12 @@ public partial class DockWindow : Window
 
     void Launch(AppTile app, FrameworkElement element)
     {
-        if (!app.Launch())
+        var opening = WindowLaunchObserver.Shared.Begin(app, IconAnchor(element), vm.Options.WindowOpenAnimation,
+            vm.Options.WindowOpenDuration, this);
+        var launched = false;
+        try { launched = app.Launch(); }
+        finally { opening?.Launched(launched); }
+        if (!launched)
         {
             vm.Main.Notify(Loc.F("launchFailed", app.Name));
             return;

@@ -1,143 +1,259 @@
-Window animation implementation notes — 2026-10-28
+Window motion: implementation and source references
+2026-10-28
+
+Scope and implementation
+
+Dock minimization and restoration use a deformable, full-resolution window
+surface. A first launch can use a short expansion at its final window position.
+These are separate from the icon animation. Both durations support 120-600 ms;
+the defaults are 320 ms for minimize/restore and 240 ms for opening.
+
+Capture and geometry
+
+WindowSnapshot now uses Windows Graphics Capture (WGC), rather than PrintWindow.
+PrintWindow can report successful message handling without a usable GPU client
+surface. The previous implementation then forced every pixel's alpha to 255,
+making incomplete client frames into opaque white/black rectangles. It also
+temporarily changed WS_EX_LAYERED and requested RDW_ERASE during restoration.
+Those capture, alpha/style mutation and erase paths have been removed.
+
+The new capture uses an HWND capture item, a free-threaded frame pool, a BGRA D3D11
+device and SoftwareBitmap with premultiplied alpha. Pixels retain that alpha in
+the WPF Pbgra32 texture. Capture never falls back to a desktop screenshot.
+
+ContentSize must match either the physical DWM extended frame or GetWindowRect.
+The latter is cropped to the exact DWM frame. Unknown dimensions, resize races,
+oversized buffers and empty/near-uniform frames are rejected. The readiness
+filter supplements real compositor capture; it is not a replacement capture
+method. A genuinely blank document can consequently receive native behavior.
+
+Capture is limited to one background worker, 12 million pixels per frame, and a
+300 ms cancellation budget (140 ms for opening). The dispatcher stops waiting
+after 350/160 ms. No source window is modified while waiting for a frame. A
+stalled driver can occupy that one worker until it returns; additional work is
+not accumulated. Frame, session, pool and device are explicitly disposed on that
+worker. No image files are written.
+
+Coordinates remain physical from DWM frame through PointToScreen icon anchor and
+mesh camera. Only the WPF host dimensions are converted to its current DPI.
+Restore bounds must equal the captured bounds exactly. Display/DPI changes
+cancel the surface. Native WINDOWPLACEMENT retains maximized restore behavior.
+
+Handoff and recovery
+
+The animation host renders while clipped by an empty window region. Its pixels
+are not displayed over the real window during preparation. Preparation waits for
+ContentRendered, two distinct RenderingTime values, the dispatcher render queue
+to drain and a bounded DwmFlush in the Dock process. Rendering alone is a
+pre-render event, not a presentation acknowledgment. A late/failed flush keeps
+the source visible and skips custom motion. One outstanding flush is permitted
+so a stalled display driver cannot accumulate workers. A separate process,
+running the same WinDock executable in guard mode, then does both handoff steps:
+it clips the source to an empty region and reveals the prepared host.
+
+The source's original style, layered alpha and color-key state are never changed.
+Windows with an existing explicit region are excluded. Successful SetWindowRgn
+calls transfer HRGN ownership to Windows; failed calls dispose the local HRGN.
+
+On completion or cancellation, the guard first removes its source clip, then
+clips the host, and only then acknowledges release. The Dock closes the host
+after that reply. There is no extra two-frame hold of a duplicate translucent
+surface. Both region changes execute consecutively in the guard, without an IPC
+round trip between them. Win32 does not provide an atomic cross-process DWM
+transaction for these calls; absolute frame-perfect switching is not claimed.
+
+The named pipe is current-user-only and verifies both process IDs. A guard
+handshake must finish before clipping. Source identity uses PID, process start
+time, a held process handle and per-HWND operation/lease properties. The host
+also has a per-HWND lease property and must belong to the parent process.
+Recycled HWNDs or PIDs cannot inherit the old lease. Cleanup preserves a newer
+nonempty region installed by the application.
+
+Pipe loss, parent exit and a fixed 1400 ms lease initiate recovery. The guard
+also clips the overlay if the parent UI has stalled. Recovery does not replay
+an old minimize/restore command after a user changes the window's state. The
+Dock's release runs in finally; a failed release closes the pipe to request
+independent recovery. Capture, IPC and render waiting are cancellable/bounded.
+
+SetWindowRgn itself is synchronous and sends WM_WINDOWPOSCHANGING/CHANGED.
+Foreign-window region changes and redraw requests run in the guard process,
+not on the Dock UI thread. The guard retains ownership and retries failed
+restoration, but a target thread that stops processing Win32 calls can delay
+restoration beyond the nominal lease. Killing both Dock and its guard while a
+lease is active removes that recovery protection. Normal application exit and
+updates must let the guard finish. No process injection or undocumented cloak
+interface is used.
+
+Dock minimize/restore
+
+- The active single-window Dock item folds into its actual icon bounds.
+- Restore unfolds the recent frame from the preceding Dock minimize. The cache
+  is restricted to four windows, 96 MiB and three minutes, with a per-HWND token.
+  A minimize performed elsewhere has no such frame and restores natively.
+- Repeated Dock clicks retarget the same surface at its current position and
+  velocity. Bounds changes, external hide/state changes, changed capture
+  protection, focus changes, cancellation or disabled Windows motion end it.
+- A 64-row, 4-column WPF3D mesh narrows each row toward the icon before transporting
+  it. Filtering uses the full captured pixels. The mesh formula and timeline
+  implementation were written independently.
+
+First launch
+
+WindowLaunchObserver registers out-of-context CREATE/SHOW notifications before
+the Dock launch. Launcher supplies a receipt from that exact Process.Start call.
+A candidate must have the receipt's PID and creation time, the exact requested
+EXE path, a held live process handle, CREATE and first SHOW events after the
+request, and an HWND absent from the pre-launch window list.
+
+Only a new, foreground, ordinary top-level main window is eligible. Existing
+running/background applications, owned dialogs, tool/splash-style windows,
+known game classes/paths, URI/AppID launches and unverified launcher-child
+processes are not intercepted. No title or install-folder heuristic identifies
+a launch. Hooks expire after ten seconds and are removed when no request remains.
+
+The valid frame and prepared surface must be handed off within 180 ms of the
+original first SHOW timestamp. The guard checks the same cutoff. A late event,
+slow/blank capture, delayed guard, changed geometry or another foreground window
+skips animation entirely. No retry later rewinds a fully shown window. The
+opening effect expands from 96% at the final location with a small directional
+offset; it does not contract a visible window back into the Dock icon. It does
+not change the application's activation or placement.
+
+Out-of-context events happen after Windows shows a window. This implementation
+cannot promise control of every cold-start application's first visible frame:
+one or more native frames may already be visible within the early budget.
+Slow first frames and brokered/UWP/single-instance startup paths remain native.
+
+Capture indicator and remaining limits
+
+WGC keeps the normal system capture indicator, which can briefly appear around
+the target. WinDock does not suppress it, request borderless access, or bypass
+its consent/capability requirements. If capture is denied or unavailable, the
+source is left visible and native behavior is used.
+
+Protected, fullscreen, hung, denied/elevated, topmost, custom-region and UWP
+frame-host windows are excluded. The implementation does not intercept title-bar
+minimize, Win+D, Win+M or Alt+Tab. Ordinary existing layered windows are eligible
+only if they satisfy the same capture and region checks; their alpha is not
+rewritten. Video and translucent backdrops are frozen during the short motion.
+The BGRA8 path does not implement HDR tone mapping; HDR fidelity is unverified.
+Native compositor effects are not globally disabled and can still depend on the
+application/driver. Large or unstable geometry falls back to native behavior.
+
+The source compiles in Release for net10.0-windows10.0.19041.0. Desktop behavior,
+visual quality and compatibility have not been runtime-verified in this change.
+
+Controls and rollback
+
+dock.windowMotion controls Dock minimize/restore; dock.windowMotionDuration sets
+its duration. dock.windowOpenAnimation controls opening independently, with
+dock.windowOpenDuration for timing. Turning a switch off cancels the active
+surface for that Dock; disabling both releases the guard and cached frames.
+Set both switches false to retain native window behavior. No source placement,
+Windows animation preference or capture permission is persisted by this feature.
 
 Source comparison
 
 1. robmikh/Win32CaptureSample — MIT, Copyright 2019 Robert Mikhayelyan
-   Source: https://github.com/robmikh/Win32CaptureSample/blob/main/Win32CaptureSample/CaptureSnapshot.cpp
-   License: https://github.com/robmikh/Win32CaptureSample/blob/main/LICENSE
-   Read the free-threaded frame pool, first-frame signal, surface copy and explicit
-   capture/session disposal. This is a suitable GPU capture architecture, but WGC
-   capture borders need a separate, consent-based decision. This version does not
-   request borderless capture or start a continuous capture session.
+   Reviewed commit: 49fefe79fd9b11025f0b5eb91783a98888516070
+   https://github.com/robmikh/Win32CaptureSample/blob/49fefe79fd9b11025f0b5eb91783a98888516070/Win32CaptureSample/CaptureSnapshot.cpp
+   https://github.com/robmikh/Win32CaptureSample/blob/49fefe79fd9b11025f0b5eb91783a98888516070/Win32CaptureSample/SimpleCapture.cpp
+   https://github.com/robmikh/Win32CaptureSample/blob/49fefe79fd9b11025f0b5eb91783a98888516070/LICENSE
+   CaptureSnapshot's free-threaded pool and explicit surface/session lifetime
+   support a background capture design. SimpleCapture checks ContentSize and
+   rebuilds resources after resize, and distinguishes BGRA8 from HDR float16.
+   WinDock rejects a resizing frame rather than stretching its old buffer.
+   Snapshot source blob: 989598e61b9997e1ae581f78a5660bdc88c5ac2f.
+   SimpleCapture source blob: 78a28491deed998af92b220b3d7f7d91c1da7e1c.
 
-2. Microsoft Windows.UI.Composition-Win32-Samples — MIT
-   Source: https://github.com/microsoft/Windows.UI.Composition-Win32-Samples/blob/master/dotnet/WPF/ScreenCapture/Composition.WindowsRuntimeHelpers/CaptureHelper.cs
-   Source: https://github.com/microsoft/Windows.UI.Composition-Win32-Samples/blob/master/dotnet/WPF/ScreenCapture/Composition.WindowsRuntimeHelpers/Direct3D11Helper.cs
-   Read the HWND capture-item activation and DXGI-to-WinRT device bridge. The
-   individual helpers carry Microsoft's MIT notice; the ScreenCapture directory
-   also contains Robert Mikhayelyan's MIT license. No helper code or SharpDX
-   dependency was imported. A DirectComposition visual is not by itself a way
-   to deform a foreign application's window.
+2. Giltanas/WgcSharp — MIT, Copyright 2026 Giltanas
+   Reviewed commit: 16450f1fade51ed13bcfaa2555bcb4ddd4019dd3
+   https://github.com/Giltanas/WgcSharp/blob/16450f1fade51ed13bcfaa2555bcb4ddd4019dd3/src/WgcSharp/WgcBackend.cs
+   https://github.com/Giltanas/WgcSharp/blob/16450f1fade51ed13bcfaa2555bcb4ddd4019dd3/src/WgcSharp/WindowCapture.cs
+   https://github.com/Giltanas/WgcSharp/blob/16450f1fade51ed13bcfaa2555bcb4ddd4019dd3/LICENSE
+   Read the polling frame acquisition, first-frame handling, texture readback and
+   IClosable cleanup. Merely releasing a COM reference can leave the WGC capture
+   pipeline running. WinDock uses projected IDisposable/Close lifetimes, without
+   its Vortice dependency, desktop-duplication fallback or border suppression.
+   Backend source blob: 2e4ed7138f933b1ac305a0a42c9814ea82677d48.
+   WindowCapture source blob: abf3d97d74d5450c673a506d90b382604014ce9d.
 
-3. KDE KWin magiclamp — GPL-2.0-or-later (source SPDX)
-   Source: https://github.com/KDE/kwin/blob/master/src/plugins/magiclamp/magiclamp.cpp
-   Source: https://github.com/KDE/kwin/blob/master/src/plugins/magiclamp/magiclamp.h
-   Read the subdivided window quads, source/icon geometry, visibility reference,
-   timeline reversal, window-deletion cleanup and fullscreen-effect exclusion.
-   KWin owns the compositor texture and visibility lifetime. A regular Windows
-   application does not have those privileges. This comparison informed the
-   requirements for a deformable surface and reversible state transitions;
-   none of the GPL implementation, formulas or source text was copied.
+3. Microsoft Windows.UI.Composition-Win32-Samples — MIT
+   https://github.com/microsoft/Windows.UI.Composition-Win32-Samples/blob/master/dotnet/WPF/ScreenCapture/Composition.WindowsRuntimeHelpers/CaptureHelper.cs
+   https://github.com/microsoft/Windows.UI.Composition-Win32-Samples/blob/master/dotnet/WPF/ScreenCapture/Composition.WindowsRuntimeHelpers/Direct3D11Helper.cs
+   Read the HWND activation factory and DXGI-to-WinRT bridge. The helper files
+   carry Microsoft's MIT notice; the ScreenCapture directory also includes the
+   sample author's MIT license. SharpDX and complete helper implementations were
+   not imported. DirectComposition alone cannot deform a foreign HWND.
 
-4. zzag/kwin-effects-yet-another-magic-lamp — GPL-2.0-or-later
-   Source: https://github.com/zzag/kwin-effects-yet-another-magic-lamp/blob/master/src/Model.cc
-   License: https://github.com/zzag/kwin-effects-yet-another-magic-lamp/blob/master/LICENSE
-   Read the multi-stage model, direction selection across screens and reversal
-   of an in-flight timeline. Its bump/stretch/squash stages are not implemented
-   here. WinDock's row-weighted pinch/transport mapping and Hermite retargeting
-   were written independently. No source or formula was copied.
+4. reflectronic, Graphics capture interop with C#/WinRT
+   https://gist.github.com/reflectronic/eea128143309c7c5c250128ee09ff4e0
+   CaptureHelper.cs and Direct3D11Helper.cs carry an MIT Microsoft header.
+   Read the modern FromAbi/MarshalInterface ownership rules and compared them
+   with the older Marshal.GetObjectForIUnknown bridge. WinDock's declarations
+   follow the documented ABI and release temporary pointers after projection.
 
-5. kua8/Nectar — GPL-3.0
-   Source: https://github.com/kua8/Nectar/blob/main/src/Dock.tsx
-   Source: https://github.com/kua8/Nectar/blob/main/src-tauri/src/commands.rs
-   License: https://github.com/kua8/Nectar/blob/main/LICENSE
-   Read the dock's Motion-based UI and focus_window command. The command still
-   delegates minimization/restoration to ShowWindow; it does not supply an
-   external-window mesh transition. No code or assets were imported.
+5. KDE KWin magiclamp — GPL-2.0-or-later (source SPDX)
+   https://github.com/KDE/kwin/blob/master/src/plugins/magiclamp/magiclamp.cpp
+   https://github.com/KDE/kwin/blob/master/src/plugins/magiclamp/magiclamp.h
+   Compared subdivided window quads, source/icon geometry, visibility references,
+   reversal and fullscreen/deletion cleanup. KWin owns compositor textures and
+   window visibility; a normal Windows process does not. No GPL code, formula
+   or source text was copied.
 
-6. izantech/winspaces — GPL-3.0
-   Source: https://github.com/izantech/winspaces/blob/49636d72a1c97307c6b85a60b0b2b12de8b88987/crates/winspaces-core/src/spaces/visibility.rs
-   Source: https://github.com/izantech/winspaces/blob/49636d72a1c97307c6b85a60b0b2b12de8b88987/crates/winspaces-core/src/spaces/state.rs
-   License: https://github.com/izantech/winspaces/blob/main/LICENSE
-   Read visibility recovery and the process-external window-property identity.
-   Cloaking can outlive its owner, and clearing ownership before visibility is
-   restored strands windows. This version uses neither its implementation nor
-   its private shell-cloak interfaces. The independently implemented helper
-   owns a short alpha lease and keeps its recovery marker until restoration.
+6. zzag/kwin-effects-yet-another-magic-lamp — GPL-2.0-or-later
+   https://github.com/zzag/kwin-effects-yet-another-magic-lamp/blob/master/src/Model.cc
+   https://github.com/zzag/kwin-effects-yet-another-magic-lamp/blob/master/LICENSE
+   Compared stages, direction selection and interrupted timelines. Its
+   bump/stretch/squash implementation was not adopted. WinDock's row weights
+   and Hermite retargeting were derived independently.
 
-7. ibelick/motion-primitives — MIT
-   Source: https://github.com/ibelick/motion-primitives/blob/main/components/core/dock.tsx
-   License: https://github.com/ibelick/motion-primitives/blob/main/LICENCE.md
-   The dock's pointer-distance transforms and springs concern icon interaction.
-   They do not implement application-window opening or minimization. Existing
-   WinDock icon motion remains a separate setting and implementation.
+7. kua8/Nectar — GPL-3.0
+   https://github.com/kua8/Nectar/blob/main/src/Dock.tsx
+   https://github.com/kua8/Nectar/blob/main/src-tauri/src/commands.rs
+   https://github.com/kua8/Nectar/blob/main/LICENSE
+   Compared Motion UI and focus_window. Its ShowWindow-based native operation
+   does not provide a deformable external-window surface. No code was imported.
 
-8. Xiayang-Peter/Dockable-ARM
-   Repository: https://github.com/Xiayang-Peter/Dockable-ARM
-   A WPF3D Genie implementation was identified, but the repository did not expose
-   a clear reuse license at review time. No source, geometry formula or asset
-   was imported. Repository visibility alone was not treated as permission.
+8. izantech/winspaces — GPL-3.0
+   https://github.com/izantech/winspaces/blob/49636d72a1c97307c6b85a60b0b2b12de8b88987/crates/winspaces-core/src/spaces/visibility.rs
+   https://github.com/izantech/winspaces/blob/49636d72a1c97307c6b85a60b0b2b12de8b88987/crates/winspaces-core/src/spaces/state.rs
+   https://github.com/izantech/winspaces/blob/main/LICENSE
+   Compared visibility recovery and process-external identity properties.
+   Ownership must remain until restoration finishes. Its implementation and
+   private shell-cloak interfaces were not used.
 
-Windows API constraints checked against the vendor documentation
+9. ibelick/motion-primitives — MIT
+   https://github.com/ibelick/motion-primitives/blob/main/components/core/dock.tsx
+   https://github.com/ibelick/motion-primitives/blob/main/LICENCE.md
+   Pointer-distance transforms and springs concern icons, not application
+   window opening/minimization. WinDock retains separate icon and window paths.
 
-PrintWindow is synchronous and may wait on the target application's paint
-handler. It runs only on one bounded background capture slot here; UI waiting
-ends after 180 ms. A late capture is discarded, and another worker is not queued
-behind a stuck one. Unsupported uniform/black captures fall back to the native
-operation. This can also exclude valid windows with a completely plain center.
-https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-printwindow
+10. Xiayang-Peter/Dockable-ARM
+    https://github.com/Xiayang-Peter/Dockable-ARM
+    A WPF3D Genie implementation exists, but no clear reuse license was found.
+    No source, geometry formula or asset was imported.
 
-DWMWA_TRANSITIONS_FORCEDISABLED is documented as set-only. Its prior value cannot
-be reliably read and restored, so this implementation never writes it. It also
-never changes the global SPI_SETANIMATION setting and never uses DWM cloaking.
-https://learn.microsoft.com/en-us/windows/win32/api/dwmapi/ne-dwmapi-dwmwindowattribute
+Vendor API references
 
-Borderless WGC capture requires consent and the relevant capability. The capture
-indicator is not suppressed by silently requesting or bypassing that permission.
-https://learn.microsoft.com/en-us/uwp/api/windows.graphics.capture.graphicscapturesession.isborderrequired
-
-Only originally non-layered windows are eligible. A separate WinDock helper
-temporarily adds WS_EX_LAYERED and alpha zero, then removes its added style bit
-and requests repaint. Existing layered/per-pixel alpha and color-key windows are
-excluded, so their original alpha semantics are not overwritten.
-https://learn.microsoft.com/en-us/windows/win32/winmsg/using-windows#using-layered-windows
-
-Implemented paths and handoff
-
-- Clicking the active single-window Dock item minimizes through the mesh.
-- Clicking that item again, or picking it in the Dock preview, unfolds a recent
-  snapshot made by the preceding Dock minimize. Snapshot ownership is verified
-  with an HWND property, so a reused handle does not receive another window's
-  image. No desktop-wide screenshots or persisted image files are used.
-- The memory cache is limited to four windows, 96 MiB and three minutes. Restores
-  without a valid snapshot use the native operation.
-- Repeated clicks retarget the current surface from its present position and
-  velocity. Exceptions, cancellation, display/DPI changes, leaving the relevant
-  Dock, Windows reduced-motion settings and application exit release ownership.
-- The helper is the same executable in a dedicated mode. A current-user-only
-  named pipe verifies both process IDs before accepting a request. Each window
-  is checked by PID, process start time and operation/lease properties. No
-  transparency mutation happens before that handshake. Pipe loss, parent exit
-  and the fixed 1400 ms lease trigger restoration. Cleanup never reapplies an
-  old minimize/restore command over a later user action.
-- Source frame and icon coordinates use physical pixels. Program startup opts
-  into PerMonitorV2 before creating windows. Only the overlay host size is
-  converted to WPF units. Changed restore bounds fall back to native behavior;
-  source placement and maximized restore state are not rewritten.
-- Rendering uses a 64-row, 4-column textured WPF3D mesh, full-resolution source
-  pixels, high-quality filtering and non-activating click-through overlays.
-  The independently derived mapping narrows rows toward the icon before moving
-  the sheet into it. Default duration is 320 ms; the setting spans 240–440 ms.
-
-Limits
-
-This does not intercept a new process's first visible frame, title-bar minimize,
-Win+D, Win+M or Alt+Tab. First launches retain native opening behavior; optional
-icon lift is not described as a whole-window launch animation. Protected,
-fullscreen, elevated/denied, hung, topmost, existing layered, UWP frame-host and
-unsupported capture windows use native behavior. Very large capture/overlay
-areas are excluded. Live video is a frozen frame during the short transition.
-
-The helper cannot override a target application's refusal to process a native
-style change; it retains recovery ownership and retries rather than abandoning
-an invisible window. Compatibility with GPU applications, HDR, compositor timing
-and individual display arrangements still requires actual use. The code has
-been compiled, not run against desktop windows during this development pass.
-
-Control and rollback
-
-Settings > Animation > Fold windows into the dock toggles the feature. Turning
-it off cancels the current operation, releases the helper and drops snapshots.
-The JSON fields are dock.windowMotion and dock.windowMotionDuration. Setting
-windowMotion to false retains native window behavior. No Windows animation
-preference, taskbar preference or source application's placement is persisted.
+- WGC frame content, resize and HDR handling:
+  https://learn.microsoft.com/en-us/windows/uwp/audio-video-camera/screen-capture
+- HWND capture activation:
+  https://learn.microsoft.com/en-us/windows/win32/api/windows.graphics.capture.interop/nf-windows-graphics-capture-interop-igraphicscaptureiteminterop-createforwindow
+- Borderless capture requires the documented consent/capability flow:
+  https://learn.microsoft.com/en-us/uwp/api/windows.graphics.capture.graphicscapturesession.isborderrequired
+- Region ownership, coordinate basis and synchronous window-position messages:
+  https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowrgn
+  https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getwindowrgn
+- Out-of-context WinEvents are queued and require a message loop:
+  https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwineventhook
+- PrintWindow is message-driven and synchronous; removed from this path:
+  https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-printwindow
+- WPF content/render scheduling and the process-local presentation fence:
+  https://github.com/dotnet/wpf/blob/main/src/Microsoft.DotNet.Wpf/src/PresentationFramework/System/Windows/Window.cs
+  https://github.com/dotnet/wpf/blob/main/src/Microsoft.DotNet.Wpf/src/PresentationCore/System/Windows/Media/MediaContext.cs
+  https://learn.microsoft.com/en-us/dotnet/api/system.windows.window.contentrendered
+  https://learn.microsoft.com/en-us/windows/win32/api/dwmapi/nf-dwmapi-dwmflush
+- DWMWA_TRANSITIONS_FORCEDISABLED is set-only; WinDock never writes it or changes
+  the global SPI_SETANIMATION setting:
+  https://learn.microsoft.com/en-us/windows/win32/api/dwmapi/ne-dwmapi-dwmwindowattribute

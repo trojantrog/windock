@@ -20,6 +20,7 @@ sealed class WindowMotionSurface : Window
     readonly Rect source, target, desktop;
     nint handle;
     bool closed;
+    public nint Handle => handle;
 
     public WindowMotionSurface(WindowSnapshot snapshot, Rect anchor)
     {
@@ -87,6 +88,7 @@ sealed class WindowMotionSurface : Window
             (nint)(style | Native.WS_EX_TRANSPARENT | Native.WS_EX_NOACTIVATE | Native.WS_EX_TOOLWINDOW));
         HwndSource.FromHwnd(handle)?.AddHook(Hook);
         Place();
+        if (!WindowMotionNative.Mask(handle)) throw new InvalidOperationException("Cannot prepare animation surface.");
     }
 
     nint Hook(nint hwnd, int message, nint wParam, nint lParam, ref bool handled)
@@ -107,35 +109,83 @@ sealed class WindowMotionSurface : Window
             (int)Math.Ceiling(desktop.Width), (int)Math.Ceiling(desktop.Height), Native.SWP_NOACTIVATE);
     }
 
-    public async Task ShowFrame(bool minimized, CancellationToken cancellation)
+    public async Task PrepareFrame(bool minimized, bool opening, CancellationToken cancellation)
     {
-        Draw(minimized ? 1 : 0);
-        Show();
-        await Dispatcher.InvokeAsync(Place, DispatcherPriority.Loaded, cancellation);
-        Opacity = 1;
-        // Yield through a render turn before handing the real window off.
-        await NextFrame(cancellation);
-        await NextFrame(cancellation);
+        if (opening) DrawAppearance(0);
+        else Draw(minimized ? 1 : 0);
+        var content = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        EventHandler rendered = (_, _) => content.TrySetResult();
+        ContentRendered += rendered;
+        try
+        {
+            Show();
+            await Dispatcher.InvokeAsync(Place, DispatcherPriority.Loaded, cancellation);
+            if (!WindowMotionNative.Mask(handle)) throw new InvalidOperationException("Cannot prepare animation surface.");
+            Opacity = 1;
+            // Rendering fires before WPF submits a frame. Never treat that
+            // callback by itself as permission to clip the source window.
+            await content.Task.WaitAsync(TimeSpan.FromMilliseconds(120), cancellation);
+            var first = await NextFrame(cancellation);
+            await NextFrame(cancellation, first);
+            await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ContextIdle, cancellation);
+            // Drain this process's pending presentation off the UI thread.
+            // Failure/timeout leaves the original visible and uses native motion.
+            if (!await WindowMotionNative.FlushPresentation(cancellation))
+                throw new InvalidOperationException("Animation frame was not presented in time.");
+        }
+        finally { ContentRendered -= rendered; }
     }
 
-    async Task NextFrame(CancellationToken cancellation)
+    async Task<TimeSpan> NextFrame(CancellationToken cancellation, TimeSpan? after = null)
     {
-        var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var ready = new TaskCompletionSource<TimeSpan>(TaskCreationOptions.RunContinuationsAsynchronously);
         EventHandler? handler = null;
-        handler = (_, _) => ready.TrySetResult();
+        handler = (_, args) =>
+        {
+            if (args is RenderingEventArgs frame && (!after.HasValue || frame.RenderingTime > after.Value))
+                ready.TrySetResult(frame.RenderingTime);
+        };
         CompositionTarget.Rendering += handler;
-        try { await ready.Task.WaitAsync(TimeSpan.FromMilliseconds(120), cancellation); }
+        try { return await ready.Task.WaitAsync(TimeSpan.FromMilliseconds(120), cancellation); }
         finally { CompositionTarget.Rendering -= handler; }
     }
 
-    public async Task HoldForHandoff()
+    public async Task AnimateAppearance(Func<bool> valid, int milliseconds, CancellationToken cancellation)
     {
-        try
+        var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var clock = Stopwatch.StartNew();
+        EventHandler handler = (_, _) =>
         {
-            await NextFrame(CancellationToken.None);
-            await NextFrame(CancellationToken.None);
-        }
-        catch (TimeoutException) { }
+            try
+            {
+                if (closed || cancellation.IsCancellationRequested || !valid() || !SystemParameters.ClientAreaAnimation)
+                { done.TrySetCanceled(); return; }
+                var t = Math.Clamp(clock.Elapsed.TotalMilliseconds / milliseconds, 0, 1);
+                DrawAppearance(1 - Math.Pow(1 - t, 3));
+                if (t >= 1) done.TrySetResult();
+            }
+            catch (Exception e) { done.TrySetException(e); }
+        };
+        CompositionTarget.Rendering += handler;
+        try { await done.Task.WaitAsync(TimeSpan.FromMilliseconds(milliseconds + 160), cancellation); }
+        finally { CompositionTarget.Rendering -= handler; }
+    }
+
+    void DrawAppearance(double progress)
+    {
+        // A new window gently expands at its final position. It is never sent
+        // back to the icon after its first frame has already reached the screen.
+        var scale = 0.96 + 0.04 * progress;
+        var centerX = source.Left + source.Width / 2;
+        var centerY = source.Top + source.Height / 2;
+        var toward = Math.Clamp(target.Top + target.Height / 2 - centerY, -12, 12) * (1 - progress);
+        var positions = new Point3DCollection((Rows + 1) * (Columns + 1));
+        for (var row = 0; row <= Rows; row++)
+        for (var column = 0; column <= Columns; column++)
+            positions.Add(new Point3D(centerX + source.Width * ((double)column / Columns - 0.5) * scale - desktop.Left,
+                -(centerY + source.Height * ((double)row / Rows - 0.5) * scale + toward - desktop.Top), 0));
+        mesh.Positions = positions;
+        viewport.Opacity = 1;
     }
 
     public async Task Animate(bool initiallyMinimized, Func<bool> minimized, Func<bool> valid,

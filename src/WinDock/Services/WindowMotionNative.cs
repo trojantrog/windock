@@ -7,8 +7,8 @@ namespace WinDock.Services;
 // change SPI_SETANIMATION or the write-only DWM transition policy of another app.
 static class WindowMotionNative
 {
-    internal const long Layered = 0x80000;
     internal const string LeaseProperty = "WinDock.WindowMotion.Lease.v1";
+    internal const string SurfaceProperty = "WinDock.WindowMotion.Surface.v1";
     internal const string SnapshotProperty = "WinDock.WindowMotion.Snapshot.v1";
     internal const string OperationProperty = "WinDock.WindowMotion.Operation.v1";
 
@@ -24,17 +24,19 @@ static class WindowMotionNative
     static extern bool GetWindowPlacement(nint window, ref Placement placement);
 
     [DllImport("user32.dll", SetLastError = true)]
-    internal static extern bool PrintWindow(nint window, nint dc, uint flags);
-    [DllImport("user32.dll", SetLastError = true)]
     internal static extern bool GetWindowDisplayAffinity(nint window, out uint affinity);
     [DllImport("user32.dll")]
     internal static extern bool IsHungAppWindow(nint window);
     [DllImport("user32.dll")]
     internal static extern bool IsZoomed(nint window);
-    [DllImport("user32.dll", SetLastError = true)]
-    internal static extern bool SetLayeredWindowAttributes(nint window, uint color, byte alpha, uint flags);
+    [DllImport("gdi32.dll")]
+    static extern nint CreateRectRgn(int left, int top, int right, int bottom);
+    [DllImport("gdi32.dll")]
+    static extern bool DeleteObject(nint value);
     [DllImport("user32.dll")]
-    internal static extern bool GetLayeredWindowAttributes(nint window, out uint color, out byte alpha, out uint flags);
+    static extern int GetWindowRgn(nint window, nint region);
+    [DllImport("user32.dll")]
+    internal static extern int SetWindowRgn(nint window, nint region, bool redraw);
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     internal static extern bool SetProp(nint window, string name, nint value);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
@@ -45,6 +47,8 @@ static class WindowMotionNative
     internal static extern bool RedrawWindow(nint window, nint rect, nint region, uint flags);
     [DllImport("dwmapi.dll", EntryPoint = "DwmGetWindowAttribute")]
     static extern int GetFrameBounds(nint window, int attribute, out Native.Rect rect, int size);
+    [DllImport("dwmapi.dll")]
+    static extern int DwmFlush();
     [DllImport("kernel32.dll", SetLastError = true)]
     internal static extern bool GetNamedPipeClientProcessId(nint pipe, out uint pid);
     [DllImport("kernel32.dll", SetLastError = true)]
@@ -59,6 +63,23 @@ static class WindowMotionNative
     internal static bool SameWindow(nint window, int pid) =>
         Native.IsWindow(window) && Native.GetWindowThreadProcessId(window, out var current) != 0 && current == pid;
 
+    static readonly object presentationLock = new();
+    static Task<bool>? presentation;
+
+    internal static async Task<bool> FlushPresentation(CancellationToken cancellation)
+    {
+        Task<bool> pending;
+        lock (presentationLock)
+        {
+            // Do not queue more workers if the display driver has stopped
+            // presenting. Callers retain their original window in that case.
+            if (presentation is { IsCompleted: false }) return false;
+            pending = presentation = Task.Run(() => DwmFlush() == 0);
+        }
+        try { return await pending.WaitAsync(TimeSpan.FromMilliseconds(100), cancellation); }
+        catch (TimeoutException) { return false; }
+    }
+
     internal static bool CanAnimate(nint window, bool allowMinimized, out int pid)
     {
         pid = 0;
@@ -68,14 +89,36 @@ static class WindowMotionNative
         Native.GetWindowThreadProcessId(window, out pid);
         if (pid == 0 || pid == Environment.ProcessId) return false;
         var style = (long)Native.GetWindowLongPtr(window, Native.GWL_EXSTYLE);
-        // Existing layered/per-pixel windows own their alpha and redirection state.
-        if ((style & (Layered | Native.WS_EX_TOOLWINDOW | Native.WS_EX_TOPMOST
+        // Do not commandeer tool/popup or always-on-top surfaces. Existing
+        // layered alpha is left untouched; WGC carries the composed alpha.
+        if ((style & (Native.WS_EX_TOOLWINDOW | Native.WS_EX_TOPMOST
             | Native.WS_EX_NOACTIVATE | Native.WS_EX_TRANSPARENT)) != 0) return false;
         if (GetWindowDisplayAffinity(window, out var affinity) && affinity != 0) return false;
         if (Native.DwmGetWindowAttribute(window, 14, out var cloak, sizeof(int)) != 0 || cloak != 0) return false;
         if (Native.ClassOf(window) is "Progman" or "WorkerW" or "Shell_TrayWnd" or "Shell_SecondaryTrayWnd"
             or "Windows.UI.Core.CoreWindow" or "ApplicationFrameWindow") return false;
-        return Native.IsIconic(window) || !IsFullscreen(window);
+        return RegionKind(window) == 0 && (Native.IsIconic(window) || !IsFullscreen(window));
+    }
+
+    // ERROR (0) means no explicit region; existing custom regions are excluded.
+    // The caller must also validate the HWND and permission/identity properties.
+    internal static int RegionKind(nint window)
+    {
+        var region = CreateRectRgn(0, 0, 0, 0);
+        if (region == 0) return -1;
+        try { return GetWindowRgn(window, region); }
+        finally { DeleteObject(region); }
+    }
+
+    internal static bool Mask(nint window)
+    {
+        var region = CreateRectRgn(0, 0, 0, 0);
+        if (region == 0) return false;
+        if (SetWindowRgn(window, region, false) != 0) return true;
+        // A successful SetWindowRgn transfers ownership to Windows. Only the
+        // failed call leaves the HRGN owned by this process.
+        DeleteObject(region);
+        return false;
     }
 
     internal static bool IsFullscreen(nint window)

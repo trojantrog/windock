@@ -8,6 +8,7 @@ sealed class WindowTransitions : IDisposable
 {
     public static WindowTransitions Shared { get; } = new();
     internal static bool WindowsAnimations => SystemParameters.ClientAreaAnimation && SystemParameters.MinimizeAnimation;
+    internal const int OpeningHandoffBudget = 180;
     const long CacheBudget = 96L * 1024 * 1024;
     readonly Dictionary<nint, Cached> cache = [];
     readonly DispatcherTimer cleanup = new() { Interval = TimeSpan.FromSeconds(20) };
@@ -25,7 +26,7 @@ sealed class WindowTransitions : IDisposable
     public void Prepare(bool enabled)
     {
         if (guard.Failed && !disposed) guard = new WindowMotionGuard();
-        if (enabled && WindowsAnimations && !disposed) _ = guard.Prepare();
+        if (enabled && SystemParameters.ClientAreaAnimation && !disposed) _ = guard.Prepare();
         if (!enabled)
         {
             Cancel(clearCache: true);
@@ -33,11 +34,24 @@ sealed class WindowTransitions : IDisposable
         }
     }
 
-    public bool IsAnimating(nint window) => current is { } session && session.Window == window;
+    public bool IsAnimating(nint window) => current is { Opening: false } session && session.Window == window;
+    internal bool ReadyForOpening => !disposed && guard.Ready && SystemParameters.ClientAreaAnimation;
+
+    internal Task Appear(nint window, Rect anchor, int milliseconds, object owner, long appearedAt, Func<bool> identity)
+    {
+        // An out-of-context event cannot own a foreign app's first Present.
+        // Never replay a settled window or interrupt another Dock operation.
+        if (current is not null || !ReadyForOpening || !ValidAnchor(anchor)
+            || Environment.TickCount64 - appearedAt >= OpeningHandoffBudget || !identity()) return Task.CompletedTask;
+        var session = new Session(window, anchor, false, Math.Clamp(milliseconds, 120, 600), owner)
+        { Opening = true, AppearedAt = appearedAt, OpeningIdentity = identity };
+        current = session;
+        return previous = RunAfter(previous, session);
+    }
 
     public void Reverse(nint window)
     {
-        if (current is not { } session || session.Window != window) return;
+        if (current is not { Opening: false } session || session.Window != window) return;
         session.Minimized = !session.Minimized;
         if (session.Held?.IsHeld == true)
         {
@@ -49,7 +63,7 @@ sealed class WindowTransitions : IDisposable
 
     public void Request(nint window, Rect anchor, bool minimized, bool enabled, int milliseconds, object owner)
     {
-        if (current is { } active && active.Window == window)
+        if (current is { Opening: false } active && active.Window == window)
         {
             if (active.Minimized != minimized) Reverse(window);
             return;
@@ -60,7 +74,8 @@ sealed class WindowTransitions : IDisposable
             NativeAction(window, minimized);
             return;
         }
-        var session = new Session(window, anchor, minimized, Math.Clamp(milliseconds, 240, 440), owner);
+        var session = new Session(window, anchor, minimized, Math.Clamp(milliseconds, 120, 600), owner);
+        Prepare(true);
         current = session;
         previous = RunAfter(previous, session);
     }
@@ -76,7 +91,7 @@ sealed class WindowTransitions : IDisposable
         }
         var window = session.Window;
         WindowSnapshot? snapshot = null;
-        var fallback = true;
+        var fallback = !session.Opening;
         var issued = false;
         var completed = false;
         try
@@ -89,7 +104,7 @@ sealed class WindowTransitions : IDisposable
             if (!WindowMotionNative.SetProp(window, WindowMotionNative.OperationProperty, session.Identity)) return;
             session.Marked = true;
             var wasMinimized = Native.IsIconic(window);
-            if (wasMinimized == session.Minimized) return;
+            if (session.Opening ? wasMinimized || !OpeningStillEarly(session) : wasMinimized == session.Minimized) return;
             if (wasMinimized)
             {
                 // Restoring arbitrary minimized windows would require showing
@@ -100,27 +115,40 @@ sealed class WindowTransitions : IDisposable
             else
             {
                 RemoveCached(window);
-                snapshot = await WindowSnapshots.Capture(window, pid, cancellation);
+                snapshot = await WindowSnapshots.Capture(window, pid, cancellation, session.Opening);
             }
             cancellation.ThrowIfCancellationRequested();
             if (snapshot is null || !WindowMotionNative.SameWindow(window, pid)
                 || WindowMotionNative.GetProp(window, WindowMotionNative.OperationProperty) != session.Identity
-                || Native.IsIconic(window) != wasMinimized || wasMinimized == session.Minimized) return;
+                || Native.IsIconic(window) != wasMinimized
+                || (!session.Opening && wasMinimized == session.Minimized)) return;
             if (!wasMinimized && Native.GetAncestor(Native.GetForegroundWindow(), Native.GA_ROOTOWNER) != window) return;
-            if (!await guard.Prepare().WaitAsync(cancellation)) return;
+            if (session.Opening && Native.GetForegroundWindow() != window) return;
+            if (session.Opening && !OpeningStillEarly(session)) return;
+            if (!await guard.Prepare().WaitAsync(TimeSpan.FromMilliseconds(300), cancellation)) return;
 
             session.Bounds = snapshot.Bounds;
             session.Surface = new WindowMotionSurface(snapshot, session.Anchor);
-            await session.Surface.ShowFrame(wasMinimized, cancellation);
-            session.Held = await guard.Hide(window, pid, session.Identity, cancellation);
+            await session.Surface.PrepareFrame(wasMinimized, session.Opening, cancellation);
+            if (session.Opening && !OpeningStillEarly(session)) return;
+            if (!wasMinimized && WindowMotionNative.Frame(window) != snapshot.Bounds) return;
+            if (!wasMinimized && Native.GetForegroundWindow() != window) return;
+            session.Foreground = Native.GetForegroundWindow();
+            session.Held = await guard.Hide(window, pid, session.Identity, session.Surface.Handle, cancellation,
+                session.Opening ? session.AppearedAt + OpeningHandoffBudget : long.MaxValue);
             if (session.Held is null) return;
-            if (wasMinimized == session.Minimized) return;
-            // Let the compositor consume alpha zero before requesting the native
-            // state change; its own transition stays underneath the mesh.
-            await Task.Delay(18, cancellation);
+            if (!session.Opening && wasMinimized == session.Minimized) return;
             if (!session.Held.IsHeld) return;
-            WindowMotionNative.SetState(window, session.Minimized);
             session.StateChangedAt = Environment.TickCount64;
+            if (session.Opening)
+            {
+                // The application owns its placement, activation and show state.
+                // Only this early, valid composed frame gets a short expansion.
+                await session.Surface.AnimateAppearance(() => StillOwned(session), session.Milliseconds, cancellation);
+                completed = StillOwned(session);
+                return;
+            }
+            WindowMotionNative.SetState(window, session.Minimized);
             session.Foreground = Native.GetForegroundWindow();
             issued = true;
             if (!await WaitForState(session, cancellation)) return;
@@ -143,12 +171,20 @@ sealed class WindowTransitions : IDisposable
         catch (Exception e) { System.Diagnostics.Trace.WriteLine($"Window animation fallback: {e}"); }
         finally
         {
-            // Release the real window before removing its last rendered frame.
-            // The helper also releases on pipe loss and on a fixed 1400 ms lease.
-            if (session.Held is not null) await session.Held.DisposeAsync();
-            if (completed && !session.Minimized && session.Surface is not null)
-                await session.Surface.HoldForHandoff();
-            session.Surface?.Close();
+            // The helper unclamps the source then clamps the overlay in one
+            // command. Do not hold two translucent copies during the handoff.
+            try
+            {
+                if (session.Held is not null) await session.Held.DisposeAsync();
+            }
+            catch (Exception e)
+            {
+                // Pipe loss is an independent recovery trigger for the helper.
+                guard.Dispose();
+                System.Diagnostics.Trace.WriteLine($"Window handoff release: {e.GetType().Name}");
+            }
+            try { session.Surface?.Close(); }
+            catch (InvalidOperationException) { /* WPF shutdown may have closed it already. */ }
             if (current == session)
             {
                 current = null;
@@ -156,7 +192,7 @@ sealed class WindowTransitions : IDisposable
                     && (!session.Marked || WindowMotionNative.GetProp(window, WindowMotionNative.OperationProperty) == session.Identity))
                 {
                     if (fallback && !issued) NativeAction(window, session.Minimized);
-                    else if (completed && !session.Minimized && !Native.IsIconic(window)) WindowTracker.Activate(window);
+                    else if (completed && !session.Opening && !session.Minimized && !Native.IsIconic(window)) WindowTracker.Activate(window);
                 }
             }
             session.Cancellation.Dispose();
@@ -167,7 +203,11 @@ sealed class WindowTransitions : IDisposable
 
     static bool StillOwned(Session session)
     {
-        if (!WindowMotionNative.SameWindow(session.Window, session.Pid) || session.Held?.IsHeld != true) return false;
+        if (!WindowMotionNative.SameWindow(session.Window, session.Pid) || session.Held?.IsHeld != true
+            || !Native.IsWindowVisible(session.Window)
+            || (WindowMotionNative.GetWindowDisplayAffinity(session.Window, out var affinity) && affinity != 0)) return false;
+        if (session.Opening && (session.OpeningIdentity?.Invoke() != true || Native.IsIconic(session.Window)
+            || !SameBounds(WindowMotionNative.Frame(session.Window), session.Bounds))) return false;
         var foreground = Native.GetForegroundWindow();
         if (!session.Minimized && foreground != 0 && foreground != session.Window && foreground != session.Foreground) return false;
         if (!session.Minimized && Environment.TickCount64 - session.StateChangedAt >= 160 && !Native.IsIconic(session.Window)
@@ -177,6 +217,9 @@ sealed class WindowTransitions : IDisposable
         return Environment.TickCount64 - session.StateChangedAt < 160
             || Native.IsIconic(session.Window) == session.Minimized;
     }
+
+    static bool OpeningStillEarly(Session session) =>
+        Environment.TickCount64 - session.AppearedAt < OpeningHandoffBudget && session.OpeningIdentity?.Invoke() == true;
 
     static async Task<bool> WaitForState(Session session, CancellationToken cancellation)
     {
@@ -199,8 +242,7 @@ sealed class WindowTransitions : IDisposable
     static bool ValidAnchor(Rect anchor) => !anchor.IsEmpty && double.IsFinite(anchor.X) && double.IsFinite(anchor.Y)
         && double.IsFinite(anchor.Width) && double.IsFinite(anchor.Height) && anchor.Width >= 8 && anchor.Height >= 8;
 
-    static bool SameBounds(Rect left, Rect right) => Math.Abs(left.Left - right.Left) <= 2 && Math.Abs(left.Top - right.Top) <= 2
-        && Math.Abs(left.Width - right.Width) <= 2 && Math.Abs(left.Height - right.Height) <= 2;
+    static bool SameBounds(Rect left, Rect right) => left == right;
 
     void Remember(nint window, WindowSnapshot snapshot)
     {
@@ -243,6 +285,7 @@ sealed class WindowTransitions : IDisposable
 
     public void Cancel(object? owner = null, bool clearCache = false)
     {
+        WindowLaunchObserver.Shared.Cancel(owner);
         if (current is { } session && (owner is null || ReferenceEquals(owner, session.Owner)))
         {
             current = null;
@@ -267,6 +310,9 @@ sealed class WindowTransitions : IDisposable
         public bool Minimized { get; set; } = minimized;
         public int Milliseconds { get; } = milliseconds;
         public object Owner { get; } = owner;
+        public bool Opening { get; init; }
+        public long AppearedAt { get; init; }
+        public Func<bool>? OpeningIdentity { get; init; }
         public CancellationTokenSource Cancellation { get; } = new();
         public nint Identity { get; } = System.Security.Cryptography.RandomNumberGenerator.GetInt32(1, int.MaxValue);
         public bool Marked { get; set; }
