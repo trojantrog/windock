@@ -1,5 +1,15 @@
 param([Parameter(Mandatory=$true)][string]$Zig)
 $ErrorActionPreference = 'Stop'
+function Assert-NativeImage([string]$Path, [bool]$Dll) {
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    if ($bytes.Length -lt 64 -or $bytes[0] -ne 0x4d -or $bytes[1] -ne 0x5a) { throw ('Not a Windows PE image: ' + $Path) }
+    $offset = [BitConverter]::ToInt32($bytes, 0x3c)
+    if ($offset -lt 64 -or $offset -gt $bytes.Length - 26 -or [BitConverter]::ToUInt32($bytes, $offset) -ne 0x4550) { throw ('Invalid PE header: ' + $Path) }
+    $machine = [BitConverter]::ToUInt16($bytes, $offset + 4)
+    $characteristics = [BitConverter]::ToUInt16($bytes, $offset + 22)
+    $isDll = ($characteristics -band 0x2000) -ne 0
+    if ($machine -ne 0x8664 -or [BitConverter]::ToUInt16($bytes, $offset + 24) -ne 0x20b -or $isDll -ne $Dll) { throw ('Unexpected native image type: ' + $Path) }
+}
 $motionRoot = Split-Path -Parent $PSCommandPath
 $repoRoot = Split-Path -Parent (Split-Path -Parent $motionRoot)
 $motionOutput = Join-Path $motionRoot 'bin\win-x64'
@@ -18,13 +28,15 @@ try {
         $objects += $object
     }
     $nativeDll = Join-Path $motionOutput 'WinDock.Motion.x64.dll'
-    & $Zig c++ -target x86_64-windows-gnu -std=c++17 -O2 -Wall -Wextra -Werror -Wno-missing-field-initializers -DUNICODE -D_UNICODE -shared -static -I (Join-Path $hookRoot 'include') (Join-Path $motionRoot 'motion.cpp') @objects -o $nativeDll -luser32 -lkernel32 -lbcrypt
+    & $Zig c++ -target x86_64-windows-gnu -std=c++17 -O2 -Wall -Wextra -Werror -Wno-missing-field-initializers -DUNICODE -D_UNICODE -shared -I (Join-Path $hookRoot 'include') (Join-Path $motionRoot 'motion.cpp') @objects -o $nativeDll -luser32 -lkernel32 -lbcrypt
     if ($LASTEXITCODE -ne 0) { throw 'Native motion component compilation failed.' }
+    Assert-NativeImage $nativeDll $true
     $payloadHash = (Get-FileHash -LiteralPath $nativeDll -Algorithm SHA256).Hash.ToLowerInvariant()
     [IO.File]::WriteAllText((Join-Path $motionOutput 'payload_hash.h'), ('#define WIN_DOCK_MOTION_PAYLOAD_SHA256 "' + $payloadHash + '"' + [Environment]::NewLine), [Text.UTF8Encoding]::new($false))
     $hostExe = Join-Path $motionOutput 'WinDock.MotionHost.exe'
     & $Zig c++ -target x86_64-windows-gnu -std=c++17 -O2 -Wall -Wextra -Werror -Wno-missing-field-initializers -DUNICODE -D_UNICODE -static -municode '-Wl,--subsystem,windows' -I $motionOutput (Join-Path $motionRoot 'host.cpp') -o $hostExe -luser32 -lkernel32 -ladvapi32 -lbcrypt
     if ($LASTEXITCODE -ne 0) { throw 'Motion activation helper compilation failed.' }
+    Assert-NativeImage $hostExe $false
     $manifest = [ordered]@{
         protocol = 1
         build = 7
