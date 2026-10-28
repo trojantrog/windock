@@ -13,7 +13,7 @@ namespace WinDock.Services;
 
 sealed class NativeWindowMotion : IDisposable
 {
-    const int ConfigBytes = 12384, StatusBytes = 96, ActivationBytes = 64, Capacity = 256, Build = 10;
+    const int ConfigBytes = 12384, StatusBytes = 96, ActivationBytes = 64, Capacity = 256, Build = 11;
     const uint Magic = 0x4d444e57;
     const string SystemHash = "de3a7bacdcbb49a98bfff41010e772d18a329b77d9bc6b2416e1bc9f5b415863";
     public static NativeWindowMotion Shared { get; } = new();
@@ -33,6 +33,7 @@ sealed class NativeWindowMotion : IDisposable
     SharedMap? config;
     SharedMap? status;
     bool activating, disposed, suspended;
+    bool configuringLogin, refreshingLogin;
     int sequence;
     string? errorKey;
     string? failureCode;
@@ -63,6 +64,7 @@ sealed class NativeWindowMotion : IDisposable
         timer.Tick += Tick;
         timer.Start();
         Publish();
+        _ = RefreshLoginAsync(true);
     }
 
     void LanguageChanged(object? sender, PropertyChangedEventArgs e) => UpdateStatus();
@@ -76,6 +78,8 @@ sealed class NativeWindowMotion : IDisposable
             failureCode = null;
         }
         Publish();
+        if (!configuringLogin && (name is nameof(DockOptions.NativeWindowAnimations) or nameof(DockOptions.Enabled)))
+            _ = RefreshLoginAsync(true);
     }
 
     public void Register(object owner, Func<IEnumerable<Anchor>> source) { providers[owner] = source; Publish(); }
@@ -235,7 +239,8 @@ sealed class NativeWindowMotion : IDisposable
         if (snapshot == lastDiagnostic) return;
         lastDiagnostic = snapshot;
         diagnosticWrittenAt = now;
-        var entry = new { at = DateTimeOffset.Now, clientBuild = Build, status = snapshot };
+        var entry = new { at = DateTimeOffset.Now, clientBuild = Build, status = snapshot,
+            reason = TransitionReason(snapshot.ComponentError) };
         diagnosticWrite = Task.Run(() =>
         {
             try
@@ -247,6 +252,133 @@ sealed class NativeWindowMotion : IDisposable
             }
             catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
         });
+    }
+
+    static string TransitionReason(int code) => code switch
+    {
+        0 => "none",
+        8 => "window-state-lock-not-owned",
+        9 => "timeline-traversal-in-progress",
+        11 => "native-timeline-unavailable",
+        12 => "window-excluded",
+        13 => "window-surface-unavailable",
+        14 => "window-geometry-excluded",
+        15 => "invalid-animation-pose",
+        16 => "tracking-capacity-exhausted",
+        17 => "native-allocation-failed",
+        18 => "native-action-mismatch",
+        19 => "window-data-unavailable",
+        20 => "special-clip-excluded",
+        21 => "native-visibility-excluded",
+        22 => "window-style-excluded",
+        23 => "dock-or-system-window-excluded",
+        24 => "owned-window-excluded",
+        25 => "shell-window-excluded",
+        26 => "window-identity-unavailable",
+        _ => "component-initialization-error"
+    };
+
+    async Task RefreshLoginAsync(bool startIfReady)
+    {
+        if (refreshingLogin || disposed || options is null) return;
+        refreshingLogin = true;
+        try
+        {
+            var run = startIfReady && Flags != 0 && !Connected;
+            var enabled = await Task.Run(() => InspectLoginTask(run));
+            if (!disposed && options is not null) options.WindowAnimationLoginEnabled = enabled;
+        }
+        finally { refreshingLogin = false; }
+    }
+
+    static bool InspectLoginTask(bool run)
+    {
+        var objects = new List<object>();
+        dynamic Keep(object value) { objects.Add(value); return value; }
+        try
+        {
+            using var identity = WindowsIdentity.GetCurrent();
+            var sid = identity.User?.Value;
+            if (sid is null) return false;
+            using var manifest = JsonDocument.Parse(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "WinDock.Motion.manifest.json")));
+            var root = manifest.RootElement;
+            var payload = root.GetProperty("payload").GetProperty("sha256").GetString();
+            var host = root.GetProperty("loginHost").GetProperty("sha256").GetString();
+            static bool Digest(string? value) => value is { Length: 64 } && value.All(Uri.IsHexDigit);
+            if (!Digest(payload) || !Digest(host)) return false;
+            var directory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "WinDock.NativeMotion", payload!);
+            var expected = Path.Combine(directory, $"WinDock.MotionLogin.{host}.exe");
+            var type = Type.GetTypeFromProgID("Schedule.Service");
+            if (type is null) return false;
+            dynamic service = Keep(Activator.CreateInstance(type)!);
+            service.Connect();
+            dynamic folder = Keep((object)service.GetFolder("\\"));
+            dynamic task = Keep((object)folder.GetTask("WinDock.NativeMotion." + sid));
+            dynamic definition = Keep((object)task.Definition);
+            dynamic principal = Keep((object)definition.Principal);
+            dynamic actions = Keep((object)definition.Actions);
+            dynamic triggers = Keep((object)definition.Triggers);
+            if (!(bool)task.Enabled || (string)principal.UserId != sid || (int)principal.LogonType != 3
+                || (int)principal.RunLevel != 1 || (int)actions.Count != 1 || (int)triggers.Count != 1) return false;
+            dynamic action = Keep((object)actions[1]);
+            dynamic trigger = Keep((object)triggers[1]);
+            if ((int)action.Type != 0 || (int)trigger.Type != 9 || (string)trigger.UserId != sid || !(bool)trigger.Enabled
+                || !expected.Equals((string)action.Path, StringComparison.OrdinalIgnoreCase)
+                || !directory.Equals((string)action.WorkingDirectory, StringComparison.OrdinalIgnoreCase)
+                || (string)action.Arguments != "--login " + sid) return false;
+            if (run) Keep((object)task.Run(null));
+            return true;
+        }
+        catch (Exception e) when (e is COMException or InvalidOperationException or IOException or UnauthorizedAccessException
+            or JsonException or KeyNotFoundException or Microsoft.CSharp.RuntimeBinder.RuntimeBinderException) { return false; }
+        finally
+        {
+            for (var i = objects.Count - 1; i >= 0; --i)
+                if (Marshal.IsComObject(objects[i])) Marshal.FinalReleaseComObject(objects[i]);
+        }
+    }
+
+    public async Task SetLoginEnabledAsync(bool enabled)
+    {
+        if (configuringLogin || activating || disposed || options is null) return;
+        configuringLogin = true;
+        try
+        {
+            var validation = await Task.Run(() => ValidatePackage(enabled));
+            if (validation is not null) { errorKey = validation; return; }
+            using var identity = WindowsIdentity.GetCurrent();
+            var sid = identity.User?.Value;
+            if (sid is null) { errorKey = "nativeMotionAccessDenied"; return; }
+            using var process = await Task.Run(() => Process.Start(new ProcessStartInfo
+            {
+                FileName = Path.Combine(AppContext.BaseDirectory, "WinDock.MotionHost.exe"),
+                WorkingDirectory = AppContext.BaseDirectory,
+                UseShellExecute = true, Verb = "runas", WindowStyle = ProcessWindowStyle.Hidden,
+                ArgumentList = { enabled ? "--register-login" : "--remove-login", sid }
+            }));
+            if (process is null) { errorKey = "nativeMotionLoginFailed"; return; }
+            await process.WaitForExitAsync();
+            if (process.ExitCode != 0)
+            {
+                errorKey = "nativeMotionLoginFailed";
+                failureCode = process.ExitCode.ToString();
+                return;
+            }
+            errorKey = null; failureCode = null;
+            if (enabled) { options.NativeWindowAnimations = true; options.Flush(); }
+        }
+        catch (Win32Exception e)
+        {
+            errorKey = e.NativeErrorCode == 1223 ? "nativeMotionCanceled" : "nativeMotionAccessDenied";
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or InvalidOperationException or JsonException
+            or CryptographicException or KeyNotFoundException or FormatException) { errorKey = "nativeMotionFilesChanged"; }
+        finally
+        {
+            configuringLogin = false;
+            await RefreshLoginAsync(false);
+            UpdateStatus();
+        }
     }
 
     public async Task ActivateAsync()
@@ -267,7 +399,7 @@ sealed class NativeWindowMotion : IDisposable
         int? exitCode = null, helperPid = null, windowsError = null;
         try
         {
-            var validation = await Task.Run(ValidatePackage);
+            var validation = await Task.Run(() => ValidatePackage());
             if (validation is not null) { errorKey = validation; return; }
             if (!options.NativeWindowAnimations || disposed) { errorKey = "nativeMotionCanceled"; return; }
             Publish();
@@ -298,6 +430,8 @@ sealed class NativeWindowMotion : IDisposable
                 23 => "nativeMotionActivationTimeout",
                 25 => "nativeMotionSignOut",
                 26 => "nativeMotionCacheFailed",
+                40 => "nativeMotionAccessDenied",
+                41 => "nativeMotionUnsupported",
                 _ => "nativeMotionFailed"
             };
             if (errorKey is null)
@@ -377,7 +511,7 @@ sealed class NativeWindowMotion : IDisposable
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
     }
 
-    static string? ValidatePackage()
+    static string? ValidatePackage(bool requireSupportedSystem = true)
     {
         if (!Environment.Is64BitProcess || RuntimeInformation.ProcessArchitecture != Architecture.X64) return "nativeMotionUnsupported";
         var manifestPath = Path.Combine(AppContext.BaseDirectory, "WinDock.Motion.manifest.json");
@@ -396,6 +530,7 @@ sealed class NativeWindowMotion : IDisposable
             if (!Convert.ToHexString(SHA256.HashData(stream)).Equals(item.GetProperty("sha256").GetString(), StringComparison.OrdinalIgnoreCase))
                 return "nativeMotionFilesChanged";
         }
+        if (!requireSupportedSystem) return null;
         using var system = File.OpenRead(Path.Combine(Environment.SystemDirectory, "udwm.dll"));
         return Convert.ToHexString(SHA256.HashData(system)).Equals(SystemHash, StringComparison.OrdinalIgnoreCase) ? null : "nativeMotionUnsupported";
     }

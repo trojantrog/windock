@@ -72,6 +72,8 @@ public sealed class DockOptions : ObservableObject
     public string WindowMotionCurve { get => D.WindowMotionCurve; set => Set(() => D.WindowMotionCurve = value); }
     string windowAnimationStatus = "";
     public string WindowAnimationStatus { get => windowAnimationStatus; set => SetProperty(ref windowAnimationStatus, value); }
+    bool windowAnimationLoginEnabled;
+    public bool WindowAnimationLoginEnabled { get => windowAnimationLoginEnabled; set => SetProperty(ref windowAnimationLoginEnabled, value); }
     public bool SearchEnabled { get => D.SearchEnabled; set => Set(() => D.SearchEnabled = value); }
     public bool OrganizerEnabled { get => D.OrganizerEnabled; set => Set(() => D.OrganizerEnabled = value); }
     public bool SystemTrayEnabled { get => D.SystemTrayEnabled; set => Set(() => D.SystemTrayEnabled = value); }

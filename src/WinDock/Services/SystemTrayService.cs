@@ -47,6 +47,8 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
     readonly Dispatcher dispatcher = Application.Current.Dispatcher;
     readonly DispatcherTimer prune = new() { Interval = TimeSpan.FromSeconds(10) };
     readonly DispatcherTimer recovery = new() { Interval = TimeSpan.FromSeconds(1) };
+    readonly DispatcherTimer diagnosticTimer = new() { Interval = TimeSpan.FromSeconds(5) };
+    readonly TrayDiagnostics diagnostics = new();
     readonly Dictionary<string, SystemTrayItem> known = [];
     readonly HashSet<SystemTrayItem> retainedHints = [];
     readonly TrayIdentity identities = new();
@@ -59,6 +61,9 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
     Task? runner;
     bool scheduled, ready;
     int pendingBytes;
+    int sessionNumber;
+    long receivedPackets, nativeLossReports, interfaceLossReports, rejectedOwners;
+    string? connectionError;
     string status = Loc.T("systemTrayOff");
     DateTime refreshAt, recoveryAt;
     public ObservableCollection<SystemTrayItem> Icons { get; } = [];
@@ -72,6 +77,7 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
 
     public SystemTrayService()
     {
+        diagnosticTimer.Tick += (_, _) => RecordStatus();
         Loc.Instance.PropertyChanged += LanguageChanged;
         recovery.Tick += (_, _) =>
         {
@@ -109,6 +115,7 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
         if (lifetime is not null) return;
         lifetime = new CancellationTokenSource(); var run = lifetime;
         Status = Loc.T("systemTrayConnecting"); prune.Start();
+        diagnosticTimer.Start(); RecordStatus();
         runner = Task.Run(() => Run(run));
     }
 
@@ -139,6 +146,7 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
                 {
                     if (!IsCurrent(run, session)) return;
                     Ready = false; recovery.Stop(); ClearIcons();
+                    connectionError = error.GetType().Name;
                     Status = error switch
                     {
                         EndOfStreamException or TimeoutException => Loc.T("systemTrayReconnecting"),
@@ -168,6 +176,11 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
             pending.Clear(); pendingBytes = 0; scheduled = false;
         }
         Ready = false; recovery.Stop(); ClearIcons();
+        ++sessionNumber; connectionError = null;
+        Interlocked.Exchange(ref receivedPackets, 0);
+        Interlocked.Exchange(ref nativeLossReports, 0);
+        Interlocked.Exchange(ref interfaceLossReports, 0);
+        rejectedOwners = 0;
         return true;
     }
 
@@ -181,8 +194,10 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
         lock (pendingLock)
         {
             if (lifetime != run || !ReferenceEquals(activeSession, session)) return;
+            if (kind == 1) Interlocked.Increment(ref receivedPackets);
+            else if (kind == 3) Interlocked.Increment(ref nativeLossReports);
             if (pending.Count >= 256 || pendingBytes + data.Length > 8 * 1024 * 1024)
-            { pending.Clear(); pendingBytes = 0; pending.Enqueue((3, [])); }
+            { Interlocked.Increment(ref interfaceLossReports); pending.Clear(); pendingBytes = 0; pending.Enqueue((3, [])); }
             pending.Enqueue((kind, data));
             pendingBytes += data.Length;
             if (scheduled) return;
@@ -233,7 +248,7 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
         if (window == 0 && item is not null && useGuid)
         { window = item.Window; pid = item.ProcessId; id = item.Id; }
         Native.GetWindowThreadProcessId(window, out var actualPid);
-        if (pid == 0 || pid != actualPid || !Native.IsWindow(window)) return;
+        if (pid == 0 || pid != actualPid || !Native.IsWindow(window)) { ++rejectedOwners; return; }
         if (item is not null && item.ProcessId != pid)
         {
             if (operation is 3 or 4) return;
@@ -379,9 +394,38 @@ public sealed class SystemTrayService : INotifyPropertyChanged, IDisposable
             _ = completing.ContinueWith(_ => run.Dispose(), TaskScheduler.Default);
         runner = null;
         // The runner owns cancellation registrations until it completes.
-        prune.Stop(); recovery.Stop(); Ready = false; ClearIcons(); Hints.Clear(); retainedHints.Clear(); Status = Loc.T("systemTrayOff");
+        prune.Stop(); recovery.Stop(); diagnosticTimer.Stop(); Ready = false; ClearIcons(); Hints.Clear(); retainedHints.Clear(); Status = Loc.T("systemTrayOff");
         lock (pendingLock) { activeSession = null; pending.Clear(); pendingBytes = 0; scheduled = false; }
+        RecordStatus();
     }
+
+    void RecordStatus() => diagnostics.Publish(new
+    {
+        enabled = lifetime is not null,
+        ready = Ready,
+        session = sessionNumber,
+        connectionError,
+        receivedPackets = Interlocked.Read(ref receivedPackets),
+        nativeLossReports = Interlocked.Read(ref nativeLossReports),
+        interfaceLossReports = Interlocked.Read(ref interfaceLossReports),
+        rejectedOwners,
+        icons = Icons.Select(item => new
+        {
+            window = item.Window.ToInt64(),
+            processId = item.ProcessId,
+            executable = Path.GetFileName(item.ProcessPath),
+            applicationName = item.ApplicationName,
+            ownerClass = item.OwnerClass,
+            id = item.Id,
+            guid = item.Guid,
+            callback = item.Callback,
+            version = item.Version,
+            registrationObserved = item.RegistrationObserved,
+            hidden = item.Hidden,
+            hasIcon = item.Icon is not null,
+            canInvoke = item.CanInvoke
+        }).ToArray()
+    });
     public void Dispose() { Loc.Instance.PropertyChanged -= LanguageChanged; Stop(); }
     void Notify([CallerMemberName] string? name = null) => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
 }

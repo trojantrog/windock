@@ -21,6 +21,7 @@ public sealed class SearchWindow : DesktopToolWindow
     string scopeName = Loc.T("searchScopeAll");
     CancellationTokenSource? pending;
     int version;
+    bool opening;
 
     public SearchWindow(Settings settings, DesktopSearch search) : base(settings, Loc.T("searchTitle"), 820, 600)
     {
@@ -71,8 +72,11 @@ public sealed class SearchWindow : DesktopToolWindow
         results.MouseDoubleClick += (_, _) => OpenSelection();
         results.SelectionChanged += (_, _) =>
         {
-            var app = Selected?.Application;
-            reveal.IsEnabled = Selected is not null && (app is null || !app.IsRaw && !app.IsLauncher && app.ResolvedTarget is not null);
+            var selected = Selected;
+            var app = selected?.Application;
+            reveal.IsEnabled = selected is not null && (selected.Window != 0
+                ? !string.IsNullOrWhiteSpace(selected.Path) && File.Exists(selected.Path)
+                : app is null || !app.IsRaw && !app.IsLauncher && app.ResolvedTarget is not null);
         };
         results.KeyDown += (_, e) => { if (e.Key == Key.Enter) { e.Handled = true; OpenSelection(); } };
         Loaded += async (_, _) =>
@@ -223,11 +227,21 @@ public sealed class SearchWindow : DesktopToolWindow
     }
 
     SearchHit? Selected => (results.SelectedItem as ListBoxItem)?.Tag as SearchHit;
-    void OpenSelection()
+    async void OpenSelection()
     {
-        if (Selected is not { } hit) return;
-        if (hit.Open()) Close();
-        else Status.Text = Loc.F("launchFailed", hit.Name);
+        if (opening || Selected is not { } hit) return;
+        opening = true;
+        try
+        {
+            if (await hit.OpenAsync(LifetimeToken)) Close();
+            else Status.Text = Loc.F("launchFailed", hit.Name);
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception)
+        {
+            if (!LifetimeToken.IsCancellationRequested) Status.Text = Loc.F("launchFailed", hit.Name);
+        }
+        finally { opening = false; }
     }
     void Reveal()
     {

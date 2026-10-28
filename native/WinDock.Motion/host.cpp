@@ -1,16 +1,20 @@
 #include "protocol.h"
-#include "payload_cache.h"
+#include "login_task.h"
 #include <tlhelp32.h>
 #include <cwchar>
+#ifndef WIN_DOCK_STARTUP_ONLY
+#include "login_host_payload.h"
+#endif
 
 namespace {
 using motion::Handle;
 
 class Activation {
     Handle mapping;
-    motion::ActivationReport* report = nullptr;
+    motion::ActivationReport local{};
+    motion::ActivationReport* report = &local;
 public:
-    ~Activation() { if (report) UnmapViewOfFile(report); }
+    ~Activation() { if (report != &local) UnmapViewOfFile(report); }
     bool Open(DWORD session, const wchar_t* nonce) {
         if (wcslen(nonce) != 32) return false;
         for (const wchar_t* p = nonce; *p; ++p)
@@ -19,9 +23,10 @@ public:
         swprintf_s(name, L"%ls%lu.%ls", motion::ActivationPrefix, session, nonce);
         mapping.Reset(OpenFileMappingW(FILE_MAP_READ | FILE_MAP_WRITE, FALSE, name));
         if (!mapping.value) return false;
-        report = static_cast<motion::ActivationReport*>(MapViewOfFile(mapping.value, FILE_MAP_READ | FILE_MAP_WRITE,
+        auto* view = static_cast<motion::ActivationReport*>(MapViewOfFile(mapping.value, FILE_MAP_READ | FILE_MAP_WRITE,
             0, 0, sizeof(motion::ActivationReport)));
-        if (!report) return false;
+        if (!view) return false;
+        report = view;
         ZeroMemory(report, sizeof(*report));
         report->magic = motion::Magic; report->version = motion::Protocol; report->bytes = sizeof(*report);
         report->helper = GetCurrentProcessId(); report->build = motion::Build; report->session = session;
@@ -92,40 +97,95 @@ bool ExistingReady(DWORD session, DWORD pid) {
     return ready;
 }
 
-int Run(const wchar_t* nonce) {
-    DWORD session = 0;
-    if (!ProcessIdToSessionId(GetCurrentProcessId(), &session) || session == 0) return 10;
-    Activation activation;
-    if (!activation.Open(session, nonce)) return 10;
-    activation.Stage(11);
+bool RequestReady(DWORD session, const std::wstring& user) {
     wchar_t mappingName[128];
     swprintf_s(mappingName, L"%ls%lu", motion::ConfigPrefix, session);
     Handle mapping(OpenFileMappingW(FILE_MAP_READ, FALSE, mappingName));
-    if (!mapping.value) return activation.Failed(11);
+    if (!mapping.value) return false;
     auto config = static_cast<const motion::Config*>(MapViewOfFile(mapping.value, FILE_MAP_READ, 0, 0, sizeof(motion::Config)));
-    if (!config) return activation.Failed(11);
-    activation.Stage(12);
-    const auto now = GetTickCount64();
-    const bool requested = config->magic == motion::Magic && config->version == motion::Protocol
-        && config->bytes == sizeof(motion::Config) && (config->flags & motion::Enabled)
-        && now >= config->heartbeat && now - config->heartbeat < 2000;
+    if (!config) return false;
+    motion::Config snapshot{};
+    const LONG before = config->sequence;
+    MemoryBarrier();
+    memcpy(&snapshot, config, sizeof(snapshot));
+    MemoryBarrier();
+    const LONG after = config->sequence;
     UnmapViewOfFile(config);
-    if (!requested) return activation.Finish(12);
-    activation.Stage(13);
+    const auto now = GetTickCount64();
+    if ((before & 1) || before != after || snapshot.magic != motion::Magic || snapshot.version != motion::Protocol
+        || snapshot.bytes != sizeof(snapshot) || !(snapshot.flags & motion::Enabled) || snapshot.publisher <= 4
+        || snapshot.count > motion::Capacity || now < snapshot.heartbeat || now - snapshot.heartbeat >= 2000) return false;
+    DWORD publisherSession = 0;
+    if (!ProcessIdToSessionId(snapshot.publisher, &publisherSession) || publisherSession != session) return false;
+    Handle publisher(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, snapshot.publisher));
+    if (!publisher.value) return false;
+    FILETIME creation{}, exit{}, kernel{}, cpu{};
+    if (!GetProcessTimes(publisher.value, &creation, &exit, &kernel, &cpu)) return false;
+    const uint64_t started = (static_cast<uint64_t>(creation.dwHighDateTime) << 32) | creation.dwLowDateTime;
+    std::wstring publisherUser;
+    return started == snapshot.publisherStarted && motion::UserSid(publisher.value, publisherUser) && publisherUser == user;
+}
+
+bool PackageSource(Handle& payload, std::wstring& own) {
     wchar_t ownPath[32768];
     const auto ownLength = GetModuleFileNameW(nullptr, ownPath, 32768);
-    if (!ownLength || ownLength >= 32768) return activation.Failed(13);
+    if (!ownLength || ownLength >= 32768) return false;
+    own = ownPath;
     std::wstring directory(ownPath);
     const auto slash = directory.find_last_of(L"\\/");
-    if (slash == std::wstring::npos) return activation.Finish(13, ERROR_BAD_PATHNAME);
+    if (slash == std::wstring::npos) { SetLastError(ERROR_BAD_PATHNAME); return false; }
     directory.resize(slash + 1);
     const auto source = directory + L"WinDock.Motion.x64.dll";
-    activation.Stage(14);
-    Handle file(CreateFileW(source.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
-    if (file.value == INVALID_HANDLE_VALUE) return activation.Failed(14);
+    payload.Reset(CreateFileW(source.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+    if (payload.value == INVALID_HANDLE_VALUE) return false;
     char digest[65];
-    if (!motion::HashFile(file.value, digest) || strcmp(digest, WIN_DOCK_MOTION_PAYLOAD_SHA256) != 0)
-        return activation.Finish(14, ERROR_INVALID_DATA);
+    if (!motion::HashFile(payload.value, digest) || strcmp(digest, WIN_DOCK_MOTION_PAYLOAD_SHA256) != 0) {
+        SetLastError(ERROR_INVALID_DATA); return false;
+    }
+    return true;
+}
+
+bool SupportedSystem() {
+    wchar_t system[32768];
+    if (!GetSystemDirectoryW(system, 32768)) return false;
+    const auto path = std::wstring(system) + L"\\udwm.dll";
+    Handle file(CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL, nullptr));
+    if (file.value == INVALID_HANDLE_VALUE) return false;
+    char digest[65];
+    if (!motion::HashFile(file.value, digest) || strcmp(digest, motion::SupportedImageHash) != 0) {
+        SetLastError(ERROR_NOT_SUPPORTED); return false;
+    }
+    return true;
+}
+
+#ifndef WIN_DOCK_STARTUP_ONLY
+int RegisterLogin(const wchar_t* sid, bool remove) {
+    if (!motion::ElevatedFor(sid)) return 40;
+    if (remove) return motion::LoginTask(sid, nullptr) == S_OK ? 0 : 44;
+    if (!SupportedSystem()) return 41;
+    Handle payload;
+    std::wstring own;
+    if (!PackageSource(payload, own)) return 14;
+    motion::PayloadCache cache;
+    if (!cache.Prepare(payload.value) || !cache.PrepareHost(motion::LoginHostBytes,
+        sizeof(motion::LoginHostBytes), motion::LoginHostSha256)) return 42;
+    return motion::LoginTask(sid, &cache.hostPath) == S_OK ? 0 : 43;
+}
+#endif
+
+int Run(const wchar_t* nonce, const std::wstring& user) {
+    DWORD session = 0;
+    if (!ProcessIdToSessionId(GetCurrentProcessId(), &session) || session == 0) return 10;
+    Activation activation;
+    if (nonce && !activation.Open(session, nonce)) return 10;
+    activation.Stage(12);
+    if (!RequestReady(session, user)) return activation.Finish(12);
+    activation.Stage(14);
+    Handle file;
+    std::wstring ownPath;
+    if (!PackageSource(file, ownPath)) return activation.Failed(14);
+    if (!SupportedSystem()) return activation.Finish(41, GetLastError());
     activation.Stage(15);
     if (!EnableDebugPrivilege()) return activation.Failed(15);
     activation.Stage(16);
@@ -192,6 +252,46 @@ int Run(const wchar_t* nonce) {
     }
     return activation.Finish(0);
 }
+
+#ifdef WIN_DOCK_STARTUP_ONLY
+int Login(const wchar_t* sid) {
+    if (!motion::ElevatedFor(sid)) return 40;
+    if (!SupportedSystem()) return 41;
+    Handle payload;
+    std::wstring own;
+    if (!PackageSource(payload, own)) return 14;
+    motion::PayloadCache cache;
+    if (!cache.Prepare(payload.value) || !cache.VerifyHost(own)) return 42;
+    DWORD session = 0;
+    if (!ProcessIdToSessionId(GetCurrentProcessId(), &session) || !session) return 10;
+    // Login tasks can run before Windows processes the user's ordinary Run entry.
+    // A bounded wait never starts Dock or executes a path supplied by its settings.
+    const auto until = GetTickCount64() + 180000;
+    while (GetTickCount64() < until) {
+        if (RequestReady(session, sid)) return Run(nullptr, sid);
+        Sleep(500);
+    }
+    return 12;
+}
+#endif
 }
 
-int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR command, int) { return Run(command); }
+int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
+    int count = 0;
+    auto args = CommandLineToArgvW(GetCommandLineW(), &count);
+    if (!args) return 10;
+    int result = 10;
+#ifdef WIN_DOCK_STARTUP_ONLY
+    if (count == 3 && !wcscmp(args[1], L"--login")) result = Login(args[2]);
+#else
+    if (count == 3 && !wcscmp(args[1], L"--register-login")) result = RegisterLogin(args[2], false);
+    else if (count == 3 && !wcscmp(args[1], L"--remove-login")) result = RegisterLogin(args[2], true);
+    else if (count == 2) {
+        std::wstring user;
+        if (motion::UserSid(GetCurrentProcess(), user) && motion::ElevatedFor(user.c_str())) result = Run(args[1], user);
+        else result = 40;
+    }
+#endif
+    LocalFree(args);
+    return result;
+}

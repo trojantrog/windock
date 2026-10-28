@@ -20,6 +20,9 @@ constexpr size_t AllocationSize = 0x78;
 constexpr size_t Master = 0x140, AnimationKind = 0x150, Tracks = 0x158, WindowData = 0x120;
 constexpr size_t Secondary = 0x128, CachedRect = 0x110, Origin = 0x1dc, SpecialClip = 0x238;
 constexpr size_t Current = 0x30, Finished = 0x48;
+// CWindowData::GetNonClientAreaMargins (0x2d6dc) selects SM_CYCAPTION /
+// SM_CYSMCAPTION from WS_EX_TOOLWINDOW at +0x78. +0x7c is a different field.
+constexpr size_t DataHandle = 0x28, DataStyle = 0x74, DataExtendedStyle = 0x78;
 
 struct Interpolation { uint32_t mode, padding; double x1, y1, x2, y2; };
 static_assert(sizeof(Interpolation) == 40);

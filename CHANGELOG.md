@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- Keep icon layout stable while the magnifier animates and reduce repeated hover transitions at its edges.
+- Show the selected option's name in settings dropdowns.
+- Find running and tray-hidden applications by window title and localized product names, and keep search open when activation fails.
+- Use verified product metadata for tray application names and record capture status without notification content.
+- Read the correct native extended window style before selecting windows for animation.
+- Install verified release files and update the login entry together, with a backup and the native taskbar retained.
+
+### Added
+- Enable window animations at login through a protected helper, with a setting to remove the login task.
+
 ## [0.5.0] - 2026-10-14
 
 ### Changed

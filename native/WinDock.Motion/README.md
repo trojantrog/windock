@@ -1,6 +1,6 @@
 # Native whole-window transitions
 
-This preview adapts one exact x64 uDWM image. Build 8 was observed connected with zero replaced transitions, 23 skipped transitions and error 7. That error combined thread identity and reentrancy, so the observation does not distinguish those branches. Build 9 corrects the overly restrictive thread check and separates the diagnostics. Build 10 corrects the opacity fallback and bounds stale transition tracking; its runtime and visual behavior have not been verified. User-facing operation and rollback are described in [the animation guide](../../docs/native-window-animation.md).
+This preview adapts one exact x64 uDWM image. Build 11 corrects the extended-window-style field used to filter transition candidates, accepts owned main windows explicitly marked `WS_EX_APPWINDOW`, and separates candidate exclusions in the diagnostics. It retains the build 9 window-state-lock check and build 10 opacity fallback and stale-record expiry. Its runtime and visual behavior have not been verified. User-facing operation and rollback are described in [the animation guide](../../docs/native-window-animation.md).
 
 ## Source and build
 
@@ -34,8 +34,13 @@ Matching PDB: GUID `28cf5a3b-d2bc-549f-2f4e-4efcb7fbf89c`, image age 1, DBI age 
 | Master / fifteen timeline slots | window `+0x140` / `+0x158` |
 | Timeline allocation / current / finished | `0x78` bytes / `+0x30` / `+0x48` |
 | CDesktopManager::s_csDwmInstance | `0x12bd10`, x64 CRITICAL_SECTION |
+| CWindowData HWND / style / extended style | `+0x28` / `+0x74` / `+0x78` |
 
 `native_26100_9949.h` is deliberately version-specific. Installation verifies the file hash, loaded PE metadata and entry bytes. Unknown images and conflicting entry patches are rejected. The DLL also verifies that its host executable is the system `dwm.exe`.
+
+Build 10 incorrectly read extended styles from `CWindowData +0x7c`. On this pinned image, `GetNonClientAreaMargins` at RVA `0x2d6dc` reads `+0x78`, tests `0x80`, and selects metric 4 or 51: [SM_CYCAPTION / SM_CYSMCAPTION](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getsystemmetrics). `ShouldShowTransition` at `0x13156` and `ShouldBeIncludedInOwnerSWR` at `0x2d939` test the same byte. These consumers independently establish [WS_EX_TOOLWINDOW](https://learn.microsoft.com/en-us/windows/win32/winmsg/extended-window-styles) at `+0x78`; `HasNonTrivialRepresentation` at `0x41173` also tests `WS_EX_NOREDIRECTIONBITMAP` there. Build 11 uses that field and validates the first consumer's instruction bytes during installation. Offline evidence is recorded in `work/native-motion-symbols/udwm-window-style-disassembly.txt` beside the original research workspace. No Windows bytes or symbols are redistributed.
+
+Read-only status snapshots from build 10 on 2026-10-29 showed zero replacements / three exclusions at 01:59:54, then one opening, one closing, one hiding and seven exclusions at 02:02:17. This establishes that the old component handled some actions; it does not identify which exclusion branch caused each miss or prove a correct displayed frame. Build 11 keeps the exclusions for tool, no-activate, topmost, transparent, shell and special-clip windows. An owned window is accepted only when it explicitly has `WS_EX_APPWINDOW`; this does not broadly enable owned popups.
 
 ## Lifecycle and ownership
 
@@ -81,9 +86,17 @@ Build 9 records these transition reasons:
 | 13 / 15 | No secondary window representation / invalid pose |
 | 16 / 17 | Tracking slots exhausted / allocation failed |
 
+Build 11 further splits the former generic window-excluded reason:
+
+| Value | Reason |
+| --- | --- |
+| 19 / 20 / 21 | No window data / native special clipping / native visibility exclusion |
+| 22 / 23 | Excluded style / Dock or system-owned window |
+| 24 / 25 / 26 | Owned popup / shell window / no current or recently published identity |
+
 Normal window and geometry exclusions do not erase a blocking reason; a successful replacement clears it. A tracking slot is recorded only after all allocations and replacement succeed. The action check uses window `+0x150`, written by StartAnimation at RVA `0xc7d0`. The master finished byte is checked before replacement, but is not a presentation acknowledgment.
 
-`%APPDATA%\WinDock\motion-status.json` contains one latest status/counter snapshot, written in the background only on change and at most once per two seconds. It contains no window titles or contents. When an incompatible resident component responds, the UI publishes disabled flags and requests sign-out; it does not attempt a live unload.
+`%APPDATA%\WinDock\motion-status.json` contains one latest status/counter snapshot and a readable reason, written in the background only on change and at most once per two seconds. It contains no window titles or contents. When an incompatible resident component responds, the UI publishes disabled flags and requests sign-out; it does not attempt a live unload.
 
 ## Activation and failure behavior
 
@@ -99,4 +112,16 @@ Dock restoration calls `WindowMotionNative.SetState` once, then uses focus-only 
 
 The remote load wait is bounded. On a timeout the remote path allocation is retained because the loader thread may still reference it; it is reclaimed with that DWM process. No forced thread termination is used. The Dock waits for the module status before reporting a connection.
 
-Disabling or exiting stops future replacements. Existing native timelines retain their original cleanup route. No live DLL unload is attempted: the component remains dormant until sign-out. No system file, service or elevated startup task is installed. Replacing a loaded component requires signing out.
+Disabling or exiting stops future replacements. Existing native timelines retain their original cleanup route. No live DLL unload is attempted: the component remains dormant until sign-out. No system file or service is installed. Replacing a loaded component requires signing out.
+
+## Optional sign-in activation
+
+`WinDock.MotionHost.exe --register-login <current-user-SID>` requires normal Windows elevation, stages the fixed component and registers only `WinDock.NativeMotion.<SID>`. This command does not load DWM or start the registered task. `--remove-login <SID>` deletes only that task, leaving the currently loaded component and cache alone. The SID must equal the elevated process's TokenUser; a different-account credential elevation is rejected. Registration returns 0 only for Task Scheduler's `S_OK`; partial trigger-registration successes are failures.
+
+The task uses [TASK_LOGON_INTERACTIVE_TOKEN and highest available privileges](https://learn.microsoft.com/en-us/windows/win32/taskschd/security-contexts-for-running-tasks) for that same SID. It stores no password and never runs the user-writable Dock, a script, or a path supplied through settings. The task's protected ACL gives SYSTEM and Administrators full access, and the current SID only read/execute access; `TASK_DONT_ADD_PRINCIPAL_ACE` prevents a broader principal ACE from being added. Both the principal and logon trigger use the SID. The task action is a fixed hash-named executable under the existing administrator-owned cache.
+
+The build first compiles a login-only helper, embeds its bytes and hash into the main helper, then compiles the main helper. Installation writes the embedded bytes from the already loaded image; it does not reopen and trust an executable in the writable source directory. `manifest.loginHost.sha256` identifies that embedded helper. The cache rejects reparse points, extra hard links, untrusted owners and unexpected ACLs; held directory/file handles deny deletion while staging and registering. The login-only helper accepts only `--login <SID>`, verifies its protected location and file hash, and retains the payload and Windows image checks.
+
+After logon the helper waits up to three minutes for a current request. The publisher must be in the same session, have the same user SID, and match the published process creation time and fresh heartbeat. The helper does not launch Dock. A later Dock launch may read and run the exact registered task without another UAC prompt; the action is checked against the local manifest, principal, trigger and arguments before use. This check does not require a standard-user read of the protected cache. A mismatched resident component is left inactive until the next sign-in. Disabling automatic activation removes the task; disabling animation or exiting Dock keeps the existing heartbeat/flags stop behavior.
+
+Registration/removal exit codes: 40 identity or elevation, 41 unsupported Windows image, 42 protected-cache preparation, 43 task registration, 44 task removal. Login execution also uses the existing activation exit codes. Task Scheduler retains the last result. Sign-in behavior has not been exercised in this revision.

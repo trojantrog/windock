@@ -29,6 +29,7 @@ public partial class DockWindow : Window
     readonly DispatcherTimer poll = new() { Interval = TimeSpan.FromMilliseconds(100) };
     readonly DispatcherTimer hover = new() { Interval = TimeSpan.FromMilliseconds(450) };
     readonly DispatcherTimer closePreview = new() { Interval = TimeSpan.FromMilliseconds(350) };
+    readonly DispatcherTimer lensLeave = new() { Interval = TimeSpan.FromMilliseconds(100) };
     readonly SolidColorBrush accent = new(Amber);
     readonly GradientStop glowStop = new(Color.FromArgb(0x40, 0xFF, 0xB5, 0x47), 0);
     readonly RadialGradientBrush glow;
@@ -53,7 +54,7 @@ public partial class DockWindow : Window
     MouseButton? pressedButton;
     AppTile? pressed;
     Point pressAt;
-    bool dragging, dragOut;
+    bool dragging, dragOut, lensActive;
     Action? undo;
     readonly DispatcherTimer toastTimer = new() { Interval = TimeSpan.FromSeconds(6) };
 
@@ -99,6 +100,7 @@ public partial class DockWindow : Window
             closePreview.Stop();
             preview?.Hide();
         };
+        lensLeave.Tick += (_, _) => FinishPanelLeave();
         DragOver += OnDragOver;
         DragLeave += (_, _) => HideName();
         Drop += OnDrop;
@@ -142,6 +144,8 @@ public partial class DockWindow : Window
 
     void OnPanelLoaded(object sender, RoutedEventArgs e)
     {
+        lensLeave.Stop();
+        lensActive = false;
         panel = (LensPanel)sender;
         panel.Arranged += (_, _) => PlaceName();
         ApplyOptions();
@@ -377,6 +381,8 @@ public partial class DockWindow : Window
     {
         dragging = true;
         dragOut = false;
+        lensLeave.Stop();
+        lensActive = false;
         hover.Stop();
         preview?.Hide();
         HideName();
@@ -404,7 +410,9 @@ public partial class DockWindow : Window
         element.Opacity = 1;
         Panel.SetZIndex(Container(element), 0);
         HideName();
-        if (panel is { IsMouseOver: true }) panel.BeginAnimation(LensPanel.AmplitudeProperty, new DoubleAnimation(1, TimeSpan.FromMilliseconds(140)));
+        lensLeave.Stop();
+        lensActive = panel is { IsMouseOver: true };
+        if (lensActive) panel!.BeginAnimation(LensPanel.AmplitudeProperty, new DoubleAnimation(1, TimeSpan.FromMilliseconds(140)));
         if (at is not { } point) return;
         if (dragOut)
         {
@@ -460,7 +468,11 @@ public partial class DockWindow : Window
     void OnPanelEnter(object sender, MouseEventArgs e)
     {
         if (panel is null) return;
+        lensLeave.Stop();
+        if (dragging) return;
         panel.Pointer = e.GetPosition(panel).X;
+        if (lensActive) return;
+        lensActive = true;
         if (!SystemParameters.ClientAreaAnimation) { panel.BeginAnimation(LensPanel.AmplitudeProperty, null); panel.Amplitude = 1; return; }
         panel.BeginAnimation(LensPanel.AmplitudeProperty,
             new DoubleAnimation(1, TimeSpan.FromMilliseconds(140)) { EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseOut } });
@@ -468,14 +480,26 @@ public partial class DockWindow : Window
 
     void OnPanelLeave(object sender, MouseEventArgs e)
     {
+        HideName();
+        if (dragging) return;
         if (!SystemParameters.ClientAreaAnimation)
         {
+            lensLeave.Stop();
+            lensActive = false;
             if (panel is not null) { panel.BeginAnimation(LensPanel.AmplitudeProperty, null); panel.Amplitude = 0; }
-            HideName(); return;
+            return;
         }
+        lensLeave.Stop();
+        lensLeave.Start();
+    }
+
+    void FinishPanelLeave()
+    {
+        lensLeave.Stop();
+        if (panel is null || panel.IsMouseOver || dragging) return;
+        lensActive = false;
         panel?.BeginAnimation(LensPanel.AmplitudeProperty,
             new DoubleAnimation(0, TimeSpan.FromMilliseconds(220)) { EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseInOut } });
-        HideName();
     }
 
     void OnPanelWheel(object sender, MouseWheelEventArgs e)
@@ -1232,6 +1256,7 @@ public partial class DockWindow : Window
         poll.Stop();
         hover.Stop();
         closePreview.Stop();
+        lensLeave.Stop();
         toastTimer.Stop();
         preview?.Close();
         flyout?.Close();

@@ -33,17 +33,38 @@ internal sealed class TrayIdentity
     static TrayProcessIdentity ReadProcess(uint pid)
     {
         var handle = Native.OpenProcess(0x1000, false, (int)pid);
-        if (handle == 0) return TrayProcessIdentity.Unknown;
+        if (handle == 0) return ReadRestrictedProcess(pid);
         string path; long started;
         try
         {
             var buffer = new StringBuilder(32768); var length = buffer.Capacity;
-            if (!Native.QueryFullProcessImageName(handle, 0, buffer, ref length)) return TrayProcessIdentity.Unknown;
+            if (!Native.QueryFullProcessImageName(handle, 0, buffer, ref length)) return ReadRestrictedProcess(pid);
             path = buffer.ToString();
             if (!GetProcessTimes(handle, out started, out _, out _, out _)) started = 0;
         }
         finally { Native.CloseHandle(handle); }
-        var name = System.IO.Path.GetFileNameWithoutExtension(path);
+        return new(path, DisplayName(path), started);
+    }
+
+    static TrayProcessIdentity ReadRestrictedProcess(uint pid)
+    {
+        // A restricted process can still own a live, observed tray window.
+        // Do not infer an executable path from historical tray registrations.
+        try
+        {
+            using var process = Process.GetProcessById((int)pid);
+            var basename = process.ProcessName;
+            if (string.IsNullOrWhiteSpace(basename)) return TrayProcessIdentity.Unknown;
+            return new("", basename, 0);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException
+            or InvalidOperationException or System.ComponentModel.Win32Exception or System.Security.SecurityException)
+        { return TrayProcessIdentity.Unknown; }
+    }
+
+    static string DisplayName(string path)
+    {
+        var name = Path.GetFileNameWithoutExtension(path);
         try
         {
             // Do not turn a tray refresh into a synchronous network metadata read.
@@ -52,12 +73,19 @@ internal sealed class TrayIdentity
                 var version = FileVersionInfo.GetVersionInfo(path);
                 var description = version.FileDescription?.Trim();
                 var product = version.ProductName?.Trim();
-                if (!string.IsNullOrWhiteSpace(description) && !Generic(description)) name = description;
+                // When both names identify the executable, prefer its shorter
+                // product label over a longer functional description.
+                if (!string.IsNullOrWhiteSpace(product) && !Generic(product)
+                    && !string.IsNullOrWhiteSpace(description) && !Generic(description)
+                    && product.Length < description.Length
+                    && product.Contains(name, StringComparison.OrdinalIgnoreCase)
+                    && description.Contains(name, StringComparison.OrdinalIgnoreCase)) name = product;
+                else if (!string.IsNullOrWhiteSpace(description) && !Generic(description)) name = description;
                 else if (!string.IsNullOrWhiteSpace(product) && !Generic(product)) name = product;
             }
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or System.ComponentModel.Win32Exception) { }
-        return new(path, name, started);
+        return name;
     }
 
     static bool Generic(string value) => value.Equals("Electron", StringComparison.OrdinalIgnoreCase)

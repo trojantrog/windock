@@ -123,22 +123,32 @@ void Remember(void* window) {
     item->master = nullptr;
 }
 
-bool Candidate(void* window, const Config& config, HWND& handle, DWORD& pid) {
+bool Candidate(void* window, const Config& config, HWND& handle, DWORD& pid, TransitionReason& reason) {
+    reason = TransitionReason::WindowDataUnavailable;
     void* data = Field<void*>(window, abi::WindowData);
-    if (!data || Field<BYTE>(window, abi::SpecialClip) || (Field<BYTE>(data, 0x2e4) & 1)) return false;
-    handle = Field<HWND>(data, 0x28);
-    const auto style = Field<DWORD>(data, 0x74), ex = Field<DWORD>(data, 0x7c);
+    if (!data) return false;
+    reason = TransitionReason::SpecialClipExcluded;
+    if (Field<BYTE>(window, abi::SpecialClip)) return false;
+    reason = TransitionReason::NativeVisibilityExcluded;
+    if (Field<BYTE>(data, 0x2e4) & 1) return false;
+    handle = Field<HWND>(data, abi::DataHandle);
+    const auto style = Field<DWORD>(data, abi::DataStyle), ex = Field<DWORD>(data, abi::DataExtendedStyle);
+    reason = TransitionReason::WindowStyleExcluded;
     if ((style & WS_CHILD) || (ex & (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST | WS_EX_TRANSPARENT))) return false;
     pid = 0;
     GetWindowThreadProcessId(handle, &pid);
+    reason = TransitionReason::HostWindowExcluded;
     if (pid == config.publisher || pid == GetCurrentProcessId() || pid == 4) return false;
     if (pid) {
-        if (GetWindow(handle, GW_OWNER)) return false;
+        reason = TransitionReason::OwnedWindowExcluded;
+        if (GetWindow(handle, GW_OWNER) && !(ex & WS_EX_APPWINDOW)) return false;
         wchar_t name[128]{};
         GetClassNameW(handle, name, 128);
+        reason = TransitionReason::ShellWindowExcluded;
         if (!wcscmp(name, L"Progman") || !wcscmp(name, L"WorkerW") || !wcscmp(name, L"Shell_TrayWnd")
             || !wcscmp(name, L"Shell_SecondaryTrayWnd") || !wcscmp(name, L"#32768")) return false;
     } else {
+        reason = TransitionReason::WindowIdentityUnavailable;
         bool known = false;
         for (uint32_t i = 0; i < config.count; ++i) if (config.anchors[i].window == reinterpret_cast<uint64_t>(handle)) { known = true; break; }
         if (!known) return false;
@@ -147,12 +157,11 @@ bool Candidate(void* window, const Config& config, HWND& handle, DWORD& pid) {
 }
 
 bool Eligible(void* window, const Config& config, HWND& handle, DWORD& pid, Rect& base, TransitionReason& reason) {
-    reason = TransitionReason::WindowExcluded;
-    if (!Candidate(window, config, handle, pid)) return false;
+    if (!Candidate(window, config, handle, pid, reason)) return false;
     reason = TransitionReason::SurfaceUnavailable;
     void* secondary = Field<void*>(window, abi::Secondary);
     if (!secondary) return false;
-    const auto style = Field<DWORD>(Field<void*>(window, abi::WindowData), 0x74);
+    const auto style = Field<DWORD>(Field<void*>(window, abi::WindowData), abi::DataStyle);
     RECT relative{};
     relativeRect(secondary, &relative);
     const auto original = Field<RECT>(window, abi::CachedRect);
@@ -326,8 +335,8 @@ HRESULT ShowHook(void* window, bool visible, bool initial) {
         Config config;
         void* data = Field<void*>(window, abi::WindowData);
         if (data && ReadConfig(config) && (config.flags & Hiding)
-            && !(Field<DWORD>(data, 0x74) & WS_MINIMIZE) && !(Field<BYTE>(data, 0x2e0) & 4)) {
-            const HWND handle = Field<HWND>(data, 0x28);
+            && !(Field<DWORD>(data, abi::DataStyle) & WS_MINIMIZE) && !(Field<BYTE>(data, 0x2e0) & 4)) {
+            const HWND handle = Field<HWND>(data, abi::DataHandle);
             DWORD pid = 0;
             GetWindowThreadProcessId(handle, &pid);
             bool known = false;
@@ -335,7 +344,8 @@ HRESULT ShowHook(void* window, bool visible, bool initial) {
                 if (config.anchors[i].window == reinterpret_cast<uint64_t>(handle) && config.anchors[i].pid == pid) { known = true; break; }
             HWND eligibleHandle;
             DWORD eligiblePid;
-            if (known && pid && pid != config.publisher && Candidate(window, config, eligibleHandle, eligiblePid)) {
+            TransitionReason excluded;
+            if (known && pid && pid != config.publisher && Candidate(window, config, eligibleHandle, eligiblePid, excluded)) {
                 const auto hr = delayHide(window);
                 if (SUCCEEDED(hr)) return hr;
             }
@@ -369,9 +379,11 @@ bool Install() {
     const BYTE advanceBytes[]{0x48,0x83,0xec,0x68,0x48,0x8b,0x05};
     const BYTE delayBytes[]{0x48,0x89,0x5c,0x24,0x08,0x57};
     const BYTE lockReference[]{0x4c,0x8d,0x3d,0x10,0xb4,0x0a,0x00};
+    const BYTE extendedStyleReference[]{0x8b,0x41,0x78,0x24,0x80};
     if (!Prolog(abi::StartAnimation,startBytes,sizeof(startBytes)) || !Prolog(abi::StopAnimation,stopBytes,sizeof(stopBytes))
         || !Prolog(abi::ShowWindow,showBytes,sizeof(showBytes)) || !Prolog(abi::AdvanceTimelines,advanceBytes,sizeof(advanceBytes))
-        || !Prolog(abi::StartDelayHide,delayBytes,sizeof(delayBytes)) || !Prolog(0x808f9,lockReference,sizeof(lockReference))) {
+        || !Prolog(abi::StartDelayHide,delayBytes,sizeof(delayBytes)) || !Prolog(0x808f9,lockReference,sizeof(lockReference))
+        || !Prolog(0x2d6dc,extendedStyleReference,sizeof(extendedStyleReference))) {
         status->state = 2; status->error = 3; return false;
     }
     allocate = abi::Function<abi::Alloc>(image, abi::Allocate);

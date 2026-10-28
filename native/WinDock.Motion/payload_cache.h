@@ -24,7 +24,7 @@ struct Handle {
 class PayloadCache {
     PSECURITY_DESCRIPTOR descriptor = nullptr;
     PSID compositor = nullptr;
-    Handle root, version, file;
+    Handle root, version, file, host;
     SECURITY_ATTRIBUTES security{sizeof(SECURITY_ATTRIBUTES), nullptr, FALSE};
 
     bool Trusted(HANDLE handle, bool directory) {
@@ -83,6 +83,7 @@ class PayloadCache {
 
 public:
     std::wstring path;
+    std::wstring hostPath;
     ~PayloadCache() { if (descriptor) LocalFree(descriptor); if (compositor) LocalFree(compositor); }
 
     bool Prepare(HANDLE source) {
@@ -119,6 +120,56 @@ public:
         if (!HashFile(file.value, digest) || strcmp(digest, WIN_DOCK_MOTION_PAYLOAD_SHA256) != 0) {
             SetLastError(ERROR_INVALID_DATA); return false;
         }
+        return true;
+    }
+
+    bool PrepareHost(const BYTE* bytes, DWORD length, const char* expected) {
+        if (path.empty() || !descriptor) { SetLastError(ERROR_INVALID_STATE); return false; }
+        hostPath = path.substr(0, path.find_last_of(L'\\') + 1) + L"WinDock.MotionLogin.";
+        for (const char* p = expected; *p; ++p) hostPath += static_cast<wchar_t>(*p);
+        hostPath += L".exe";
+        {
+            Handle created(CreateFileW(hostPath.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, &security,
+                CREATE_NEW, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+            if (created.value == INVALID_HANDLE_VALUE) {
+                if (GetLastError() != ERROR_FILE_EXISTS && GetLastError() != ERROR_ALREADY_EXISTS) return false;
+            } else {
+                DWORD written = 0;
+                const bool copied = WriteFile(created.value, bytes, length, &written, nullptr)
+                    && written == length && FlushFileBuffers(created.value);
+                if (!copied) {
+                const auto error = GetLastError();
+                created.Reset(); DeleteFileW(hostPath.c_str());
+                SetLastError(error); return false;
+                }
+            }
+        }
+        host.Reset(CreateFileW(hostPath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+        if (host.value == INVALID_HANDLE_VALUE || !Trusted(host.value, false)) return false;
+        char actual[65];
+        if (!HashFile(host.value, actual) || strcmp(expected, actual) != 0) {
+            SetLastError(ERROR_INVALID_DATA); return false;
+        }
+        return true;
+    }
+
+    bool VerifyHost(const std::wstring& ownPath) {
+        const auto directory = path.substr(0, path.find_last_of(L'\\') + 1);
+        const auto prefix = directory + L"WinDock.MotionLogin.";
+        if (ownPath.size() != prefix.size() + 64 + 4 || _wcsnicmp(ownPath.c_str(), prefix.c_str(), prefix.size()) != 0
+            || _wcsicmp(ownPath.c_str() + ownPath.size() - 4, L".exe") != 0) {
+            SetLastError(ERROR_ACCESS_DENIED); return false;
+        }
+        host.Reset(CreateFileW(ownPath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+        if (host.value == INVALID_HANDLE_VALUE || !Trusted(host.value, false)) return false;
+        char actual[65];
+        if (!HashFile(host.value, actual)) return false;
+        for (unsigned i = 0; i < 64; ++i)
+            if (ownPath[prefix.size() + i] != static_cast<wchar_t>(actual[i])) {
+                SetLastError(ERROR_INVALID_DATA); return false;
+            }
         return true;
     }
 };

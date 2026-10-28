@@ -44,7 +44,7 @@ public sealed class LensPanel : Panel
 
     static readonly Brush Catcher = Frozen(new SolidColorBrush(Color.FromArgb(1, 0, 0, 0)));
 
-    readonly Dictionary<UIElement, ScaleTransform> transforms = [];
+    readonly Dictionary<UIElement, (ScaleTransform Scale, TranslateTransform Offset)> transforms = [];
     readonly List<(Point Center, int Kind)> indicators = [];
     PointerSpring pointerMotion = new(double.NaN);
     TimeSpan? lastFrame;
@@ -102,6 +102,8 @@ public sealed class LensPanel : Panel
 
     public Rect Bar { get; private set; }
     public double BaseWidth { get; private set; }
+    Rect restingBar;
+    double lensHitTop;
 
     public event EventHandler? Arranged;
 
@@ -129,6 +131,7 @@ public sealed class LensPanel : Panel
         if (n == 0)
         {
             Bar = Rect.Empty;
+            restingBar = Rect.Empty;
             InvalidateVisual();
             return final;
         }
@@ -149,6 +152,7 @@ public sealed class LensPanel : Panel
             for (var i = 0; i < n; i++)
                 if (lens[i] && pointer >= layout.Left[i] && pointer < layout.Left[i] + widths[i] + Gap) hovered = i;
 
+        var baseLeft = 0.0;
         for (var i = 0; i < n; i++)
         {
             var child = children[i];
@@ -157,32 +161,40 @@ public sealed class LensPanel : Panel
             var scale = i == hovered ? 1 + Math.Min(Magnification - 1, ScaleCap) * amplitude : layout.Scale[i];
             var slot = Mode == LensMode.Magnify ? w * layout.Scale[i] : w;
             var left = x0 + layout.Left[i];
-            child.Arrange(new Rect(left + (slot - w) / 2, bottom - h, w, h));
-            Transform(child, scale);
+            child.Arrange(new Rect(x0 + baseLeft, bottom - h, w, h));
+            Transform(child, scale, layout.Left[i] - baseLeft + (slot - w) / 2);
 
             var kind = GetIndicator(child);
             if (kind > 0) indicators.Add((new Point(left + slot / 2, final.Height - inset.Bottom / 2), kind));
+            baseLeft += w + Gap;
         }
 
         var last = n - 1;
         var right = x0 + layout.Left[last] + (Mode == LensMode.Magnify ? widths[last] * layout.Scale[last] : widths[last]);
         Bar = new Rect(x0 + layout.Left[0] - inset.Left, bottom - tileHeight - inset.Top,
             right - (x0 + layout.Left[0]) + inset.Left + inset.Right, tileHeight + inset.Top + inset.Bottom);
+        restingBar = new Rect(x0 - inset.Left, Bar.Top, baseTotal + inset.Left + inset.Right, Bar.Height);
+        var maximumScale = Mode == LensMode.Magnify ? Magnification : 1 + Math.Min(Magnification - 1, ScaleCap);
+        lensHitTop = Math.Max(0, bottom - tileHeight * Math.Max(1, maximumScale) - inset.Top);
         InvalidateVisual();
         Arranged?.Invoke(this, EventArgs.Empty);
         return final;
     }
 
-    void Transform(UIElement child, double scale)
+    void Transform(UIElement child, double scale, double offset)
     {
         if (!transforms.TryGetValue(child, out var t))
         {
-            t = new ScaleTransform();
+            t = (new ScaleTransform(), new TranslateTransform());
             transforms[child] = t;
             child.RenderTransformOrigin = new Point(0.5, 1);
-            child.RenderTransform = t;
+            var group = new TransformGroup();
+            group.Children.Add(t.Scale);
+            group.Children.Add(t.Offset);
+            child.RenderTransform = group;
         }
-        if (t.ScaleX != scale) t.ScaleX = t.ScaleY = scale;
+        if (t.Scale.ScaleX != scale) t.Scale.ScaleX = t.Scale.ScaleY = scale;
+        if (t.Offset.X != offset) t.Offset.X = offset;
     }
 
     protected override void OnVisualChildrenChanged(DependencyObject? added, DependencyObject? removed)
@@ -198,7 +210,11 @@ public sealed class LensPanel : Panel
         var corner = Math.Min(Corner, bar.Height / 2);
 
         if (Amplitude > 0.01 && Mode != LensMode.None)
-            dc.DrawRectangle(Catcher, null, new Rect(bar.Left, 0, bar.Width, Math.Max(0, bar.Top)));
+        {
+            var left = Math.Min(bar.Left, restingBar.Left);
+            var right = Math.Max(bar.Right, restingBar.Right);
+            dc.DrawRectangle(Catcher, null, new Rect(left, lensHitTop, right - left, Math.Max(0, bar.Top - lensHitTop)));
+        }
 
         dc.PushOpacity(Math.Clamp(SurfaceOpacity, 0, 1));
         if (ShadowBrush is { } shadow)

@@ -6,14 +6,17 @@
 namespace motion {
 constexpr uint32_t Magic = 0x4d444e57;
 constexpr uint32_t Protocol = 1;
-constexpr uint32_t Build = 10;
+constexpr uint32_t Build = 11;
 constexpr uint32_t Capacity = 256;
 constexpr uint32_t Enabled = 1, Opening = 2, Closing = 4, Minimizing = 8, Restoring = 16, Hiding = 32;
 enum class TransitionReason : LONG {
     None = 0, WindowLockNotOwned = 8, TimelineTraversal = 9,
     TimelineUnavailable = 11, WindowExcluded = 12, SurfaceUnavailable = 13,
     GeometryExcluded = 14, InvalidPose = 15, TrackingCapacity = 16,
-    AllocationFailed = 17, NativeActionMismatch = 18
+    AllocationFailed = 17, NativeActionMismatch = 18,
+    WindowDataUnavailable = 19, SpecialClipExcluded = 20, NativeVisibilityExcluded = 21,
+    WindowStyleExcluded = 22, HostWindowExcluded = 23, OwnedWindowExcluded = 24,
+    ShellWindowExcluded = 25, WindowIdentityUnavailable = 26
 };
 inline bool BlocksTransition(LONG reason) {
     return reason == 8 || reason == 9 || reason == 11 || reason == 13

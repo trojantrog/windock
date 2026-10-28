@@ -46,6 +46,21 @@ public sealed class DockPreferences : StackPanel
 
         var motion = Group("animationTitle");
         Toggle(motion, "nativeWindowAnimations", nameof(DockOptions.NativeWindowAnimations));
+        var login = new ToggleButton { Content = Loc.T("nativeMotionLogin"), Style = StyleOf("SwitchToggle"),
+            Margin = new Thickness(0, 0, 0, 12) };
+        login.SetBinding(ToggleButton.IsCheckedProperty, new Binding(nameof(DockOptions.WindowAnimationLoginEnabled)) { Mode = BindingMode.OneWay });
+        login.Click += async (_, _) =>
+        {
+            var enabled = login.IsChecked == true;
+            login.IsEnabled = false;
+            try { await NativeWindowMotion.Shared.SetLoginEnabledAsync(enabled); }
+            finally
+            {
+                login.GetBindingExpression(ToggleButton.IsCheckedProperty)?.UpdateTarget();
+                login.IsEnabled = true;
+            }
+        };
+        motion.Children.Add(login);
         var activate = new Button { Content = Loc.T("nativeMotionActivate"), Style = StyleOf("ActionButton"), HorizontalAlignment = HorizontalAlignment.Left,
             Padding = new Thickness(12, 6, 12, 6), Margin = new Thickness(0, 0, 0, 8) };
         activate.Click += async (_, _) =>
