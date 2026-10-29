@@ -1,12 +1,12 @@
 # 菜单与浮窗交互
 
-适用于 WinDock 0.6.0-preview.13。本版继续改进托盘图标、菜单和输入法入口；实际桌面交互尚未验证。协议兼容范围见随程序提供的《托盘兼容说明》。
+适用于 WinDock 0.6.0-preview.26。本版修正 WinDock 自身右键菜单打开后立即关闭的焦点处理；实际桌面交互尚未验证。协议兼容范围见随程序提供的《托盘兼容说明》。
 
 | 操作 | 处理方式 |
 | --- | --- |
 | 右键托盘应用 | 保留托盘面板和来源图标，等待应用自己的菜单结束；菜单移交焦点时不直接关闭面板 |
 | 标准菜单出现在原任务栏附近 | 可在设置中启用实验性的菜单定位；符合窗口归属、出现时间和位置条件时，尝试调整到 Dock 图标附近 |
-| 打开 WinDock 自身菜单 | 菜单关联到发起操作的托盘或 Dock；鼠标捕获先释放，再交给菜单 |
+| 打开 WinDock 自身菜单 | 按键释放后打开菜单；设置窗口隐藏时也可从原生托盘打开。重复回调不重建已打开的菜单 |
 | 在更多、整理菜单中操作 | 图标增删、排序和名称更新延后到菜单或拖放结束，保留键盘位置和滚动位置 |
 | 操作菜单及子菜单 | 移入子菜单属于同一次操作；点击外部或切换到其他应用才结束相应浮窗 |
 | 再点来源按钮 | 同一次点击只关闭已打开的浮窗，不立即重开；之后的新点击正常响应 |
@@ -19,11 +19,13 @@
 
 应用的菜单命令仍由应用处理。取消菜单后的焦点处理需要识别原菜单所有者；选择命令打开其他窗口后，不把焦点拉回托盘。
 
+WinDock 自身菜单先处理所属窗口的焦点，再打开菜单。菜单关闭后的清理在命令执行之后进行，避免干扰“打开设置”“全局搜索”等操作。此修订同时用于 Windows 原生托盘与 WinDock 托盘；不需要注销 Windows。
+
 关闭判断综合使用已打开的 WPF 菜单、系统菜单状态、应用浮窗和点击位置。鼠标观察仅在浮窗或菜单活动期间运行，始终传递原始输入，不保存点击或键盘记录。自绘菜单、特殊窗口样式及不同权限级别仍有兼容性差异，不能仅凭编译完成断定所有应用的菜单行为一致。
 
 ## 托盘连接与搜索
 
-托盘连接支持断线重连及重新登记图标。本版组件使用第四版连接协议，并与本次登录内可能仍驻留的旧组件隔离。升级时应退出旧 WinDock，并从完整的新版本目录启动，不能只复制主程序。
+托盘连接支持断线重连及重新登记图标，并与本次登录内可能仍驻留的旧组件隔离。升级时应退出旧 WinDock，并从完整的新版本目录启动，不能只复制主程序。
 
 WinDock 以管理员权限运行时，托盘数据连接也可接受同一登录会话中的普通权限 Explorer。权限兼容仅限这条本机临时连接，仍核对 Explorer 进程身份并拒绝远程连接，不修改系统权限策略。
 
@@ -34,6 +36,8 @@ Everything 搜索修正了 WinDock 以管理员权限运行、Everything 以普�
 ## 参考依据
 
 - [WPF ContextMenu 源码](https://github.com/dotnet/wpf/blob/main/src/Microsoft.DotNet.Wpf/src/PresentationFramework/System/Windows/Controls/ContextMenu.cs)：菜单的捕获、关闭和弹出窗口生命周期。
+- [WPF 键盘焦点处理](https://github.com/dotnet/wpf/blob/c4610da96546c63a541815130b5bd1ade2380bf5/src/Microsoft.DotNet.Wpf/src/PresentationCore/System/Windows/InterOp/HwndKeyboardInputProvider.cs)：原生窗口取得焦点时的 WPF 焦点恢复。
+- [WPF 菜单项命令](https://github.com/dotnet/wpf/blob/c4610da96546c63a541815130b5bd1ade2380bf5/src/Microsoft.DotNet.Wpf/src/PresentationFramework/System/Windows/Controls/MenuItem.cs)：先关闭菜单，再派发菜单项命令的顺序。
 - [Hardcodet WPF NotifyIcon](https://github.com/hardcodet/wpf-notifyicon/blob/master/src/NotifyIconWpf/TaskbarIcon.cs)：通知区域菜单的弹出窗口及前台处理。参考行为，未引入该库或复制其实现。
 - [GetGUIThreadInfo](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getguithreadinfo)：读取菜单所有者和菜单模式，避免只按窗口是否激活来判断菜单结束。
 - [Windows 菜单事件](https://learn.microsoft.com/en-us/windows/win32/winauto/event-constants)与 [TrackPopupMenuEx](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-trackpopupmenuex)：菜单事件、前台窗口与菜单关闭约定。
