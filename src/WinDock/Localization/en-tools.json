@@ -260,5 +260,7 @@
   "tokenSpeedSample": "{0} · completed {1} ({4}s ago)\n{2} output tokens / {3}s",
   "tokenSpeedAverage": "Same model, last 30 min: {0} Token/s · {1} valid outputs (time-weighted)",
   "tokenSpeedLimited": "The read limit was reached; the average uses the records read.",
-  "tokenSpeedMethod": "Output tokens divided by output duration. Reads TokenPulse every 2s; records may arrive late. After 60s without a new valid output, the value clears."
+  "tokenSpeedMethod": "Output tokens divided by output duration. Reads TokenPulse every 2s; records may arrive late. After 60s without a new valid output, the value clears.",
+  "networkDownload": "Download",
+  "networkUpload": "Upload"
 }

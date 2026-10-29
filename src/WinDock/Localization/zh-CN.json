@@ -541,5 +541,7 @@
   "tokenSpeedSample": "{0} · 完成于 {1}（{4} 秒前）\n输出 {2} Token / 用时 {3} 秒",
   "tokenSpeedAverage": "同模型近30分：{0} Token/s · {1} 条有效输出（按耗时加权）",
   "tokenSpeedLimited": "已达到读取上限，均速基于已读取的记录。",
-  "tokenSpeedMethod": "输出 Token 数除以本次输出耗时。每 2 秒读取词脉已有记录，数据可能延迟。60 秒没有新有效输出后清空数值。"
+  "tokenSpeedMethod": "输出 Token 数除以本次输出耗时。每 2 秒读取词脉已有记录，数据可能延迟。60 秒没有新有效输出后清空数值。",
+  "networkDownload": "下载",
+  "networkUpload": "上传"
 }
