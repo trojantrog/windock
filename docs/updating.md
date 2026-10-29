@@ -12,7 +12,7 @@ pwsh -NoProfile -File scripts/Update-InstalledBuild.ps1 -PackagePath '更新包�
 
 更新包应包含 `WinDock.exe`、`build-info.json` 和 `SHA256SUMS.txt`，以及校验清单中的全部文件。脚本先核对文件和版本，再请求 WinDock 正常退出。退出失败时停止更新，不强行结束进程。更新完成后自动启动原安装位置的程序，无需打开更新包中的另一个副本。
 
-安装位置同时存放源码。更新只接受 WinDock 程序及配套清单、说明和许可证文件，禁止命中 `.git`、`src`、`scripts`、`docs`、`tests`、历史 `publish` 等源码或构建目录。发现 Git 仓库时，还会读取已跟踪文件清单，拒绝覆盖其中任何文件。更新包和备份必须位于仓库外，源文件与已有未提交修改均留在原位。
+安装位置同时存放源码。更新只接受 WinDock 程序及配套清单、说明和许可证文件，以及固定名称的 `Install-Update.cmd` 和 `updater` 中的三个更新脚本。禁止命中 `.git`、`src`、`scripts`、`docs`、`tests`、历史 `publish` 等源码或构建目录。发现 Git 仓库时，还会读取已跟踪文件清单，拒绝覆盖其中任何文件。更新包和备份必须位于仓库外，源文件与已有未提交修改均留在原位。
 
 ## 设置和固定应用
 

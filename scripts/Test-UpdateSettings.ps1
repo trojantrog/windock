@@ -255,6 +255,20 @@ $releaseEntries = @($releaseFiles | ForEach-Object {
 Assert-UpdatePackageResourceBoundaries $releaseEntries $oldInstallation
 $results.Add('All 21 installed paths from the preview.27 manifest satisfy the product file boundary')
 
+$updaterNames = @('Install-Update.cmd', 'updater/Install-LocalBuild.ps1', 'updater/Update-InstalledBuild.ps1', 'updater/UpdateSettings.ps1')
+foreach ($relative in $updaterNames) {
+    foreach ($spelling in @($relative, $relative.ToUpperInvariant())) {
+        $entry = [pscustomobject]@{ Relative = $spelling; Target = Join-Path $oldInstallation $spelling }
+        Assert-UpdatePackageResourceBoundaries @($entry) $oldInstallation
+    }
+}
+foreach ($relative in @('updater/evil.ps1', 'updater/Install-LocalBuild.ps1.bak', 'updater/sub/UpdateSettings.ps1',
+    'Install-Update.ps1', 'scripts/UpdateSettings.ps1')) {
+    $entry = [pscustomobject]@{ Relative = $relative; Target = Join-Path $oldInstallation $relative }
+    Assert-Throws { Assert-UpdatePackageResourceBoundaries @($entry) $oldInstallation } ('An unapproved updater entry was accepted: ' + $relative)
+}
+$results.Add('Only the exact command entry and three updater scripts are allowed, regardless of path casing')
+
 $installedExe = 'D:\Projects\windock\WinDock.exe'
 $currentCommand = '"D:\Projects\windock\WinDock.exe" --tray'
 $oldCommand = '"C:\Downloads\WinDock-preview\WinDock.exe" --tray'

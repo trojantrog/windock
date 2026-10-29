@@ -132,7 +132,8 @@ function Assert-UpdatePackageResourceBoundaries($Entries, [string]$Directory) {
     $allowedNames = @('WinDock.Motion.manifest.json', 'WinDock.deps.json', 'WinDock.runtimeconfig.json', 'build-info.json', 'SHA256SUMS.txt',
         '托盘与菜单说明.md', '托盘兼容说明.md', '托盘输入法说明.md', '窗口预览说明.md', '整窗动画说明.md', '系统通知说明.md',
         'native-tray-actions.md', 'native-tray-inventory.md', 'licenses/WinDock-LICENSE.txt', 'licenses/THIRD_PARTY_NOTICES.txt',
-        'licenses/MinHook-LICENSE.txt', 'licenses/YASB-LICENSE.txt')
+        'licenses/MinHook-LICENSE.txt', 'licenses/YASB-LICENSE.txt', 'Install-Update.cmd',
+        'updater/Install-LocalBuild.ps1', 'updater/Update-InstalledBuild.ps1', 'updater/UpdateSettings.ps1')
     foreach ($entry in $Entries) {
         $target = [IO.Path]::GetFullPath($entry.Target)
         if (-not $target.StartsWith($root + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
