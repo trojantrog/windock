@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Runtime.ExceptionServices;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Documents;
 using System.Windows.Markup;
 using System.Windows.Media;
 using System.Xml.Linq;
@@ -35,7 +36,11 @@ public class WidgetPresentationTests
         widget.Up = "12.5 MB/s";
         widget.RefreshFace();
         Assert.Equal(width, widget.Presentation!.MinWidth);
-        Assert.Equal(("1023 GB/s", "12.5 MB/s"), (widget.Presentation.Value, widget.Presentation.SecondValue));
+        Assert.Equal(("1023", "GB/s", "12.5", "MB/s"),
+            (widget.Presentation.Value, widget.Presentation.Unit, widget.Presentation.SecondValue, widget.Presentation.SecondUnit));
+        Assert.Equal("", widget.Presentation.Caption);
+        Assert.Null(widget.Presentation.SecondCaption);
+        Assert.True(widget.Presentation.Stacked);
         var labels = widget.Presentation.Caption + widget.Presentation.SecondCaption + widget.Face!.Caption + widget.Face.Tip;
         Assert.DoesNotContain("↑", labels);
         Assert.DoesNotContain("↓", labels);
@@ -72,7 +77,7 @@ public class WidgetPresentationTests
     public void The_reserved_height_matches_the_selected_widget_shape()
     {
         var token = new SampleWidget(new WidgetSpec { Kind = "token-speed" }, new CompactFace("12.3"));
-        Assert.Equal(42, WidgetPresentation.ContentHeight([token], 30, true));
+        Assert.Equal(64, WidgetPresentation.ContentHeight([token], 30, true));
         token.Spec.Size = WidgetSpec.SquareSize;
         Assert.Equal(30, WidgetPresentation.ContentHeight([token], 30, true));
         Assert.Equal(60, WidgetPresentation.ContentHeight([token], 60, true));
@@ -102,22 +107,28 @@ public class WidgetPresentationTests
         panel.Measure(new Size(1000, 170));
         panel.Arrange(new Rect(0, 0, 1000, 170));
         panel.UpdateLayout();
-        Assert.Equal(42 + 16, panel.Bar.Height);
+        System.Windows.Threading.Dispatcher.CurrentDispatcher.Invoke(() => { }, System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+        panel.Measure(new Size(1000, 170));
+        panel.Arrange(new Rect(0, 0, 1000, 170));
+        panel.UpdateLayout();
+        Assert.Equal(64 + 16, panel.Bar.Height);
         var texts = Descendants(panel).OfType<TextBlock>().Where(t => t.ActualHeight > 0).ToArray();
         foreach (var value in new[] { "100%", "1023 GB/s", "12.5 MB/s", "52.7" })
         {
-            var text = Assert.Single(texts.Where(t => t.Text == value).Take(1));
-            Assert.Equal(14, text.FontSize * text.TransformToAncestor(panel).TransformBounds(new Rect(0, 0, 1, 1)).Height);
-            var natural = new FormattedText(text.Text, CultureInfo.InvariantCulture, FlowDirection.LeftToRight,
+            Assert.True(texts.Any(t => Shown(t) == value), string.Join(" | ", texts.Select(Shown)));
+            var text = texts.First(t => Shown(t) == value);
+            Assert.Equal(22, text.FontSize * text.TransformToAncestor(panel).TransformBounds(new Rect(0, 0, 1, 1)).Height);
+            var natural = new FormattedText(Shown(text), CultureInfo.InvariantCulture, FlowDirection.LeftToRight,
                 new Typeface(text.FontFamily, text.FontStyle, text.FontWeight, text.FontStretch), text.FontSize, text.Foreground, 1);
             Assert.True(natural.WidthIncludingTrailingWhitespace <= text.ActualWidth + .5, value);
         }
         foreach (var text in texts)
         {
             var bounds = text.TransformToAncestor(panel).TransformBounds(new Rect(text.RenderSize));
-            Assert.True(panel.Bar.Contains(bounds), text.Text);
+            Assert.True(panel.Bar.Contains(bounds), Shown(text));
         }
-        Assert.Contains(texts, t => t.Text == "Token/s · 最近" && t.FontSize == 11);
+        Assert.Contains(texts, t => Shown(t) == "Token/s · 最近" && t.FontSize == 13);
+        Assert.DoesNotContain(texts, t => Shown(t).Contains("下载") || Shown(t).Contains("上传") || Shown(t).Contains('↑') || Shown(t).Contains('↓'));
         var originalWidth = panel.BaseWidth;
         network.Down = "0 B/s";
         network.Up = "0 B/s";
@@ -125,6 +136,8 @@ public class WidgetPresentationTests
         panel.Measure(new Size(1000, 170));
         Assert.Equal(originalWidth, panel.BaseWidth);
     });
+
+    static string Shown(TextBlock text) => new TextRange(text.ContentStart, text.ContentEnd).Text;
 
     static ResourceDictionary ReadableResources(double iconSize)
     {
@@ -150,7 +163,7 @@ public class WidgetPresentationTests
         var parser = new ParserContext();
         parser.XmlnsDictionary[""] = p.NamespaceName;
         parser.XmlnsDictionary["x"] = x.NamespaceName;
-        var root = (ResourceDictionary)XamlReader.Parse(xml.ToString(), parser);
+        var root = (ResourceDictionary)XamlReader.Parse(xml.ToString(SaveOptions.DisableFormatting), parser);
         root["IconSize"] = iconSize;
         root["WidgetHeight"] = WidgetPresentation.Height(iconSize);
         root["WideSize"] = iconSize * 2 + 11;

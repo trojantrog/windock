@@ -762,7 +762,7 @@ public sealed partial class MicWidget : WidgetTile
 
 public sealed partial class NetworkWidget(string key, WidgetSpec spec) : WidgetTile(key, spec)
 {
-    protected override CompactFace Compact() => new(Down, $"{WidgetPresentation.NetworkLabel(true)} {Up}",
+    protected override CompactFace Compact() => new(Down, Up,
         Tip: $"{WidgetPresentation.NetworkLabel(false)} {Down} · {WidgetPresentation.NetworkLabel(true)} {Up}");
 
     readonly NetworkMeter meter = new();
