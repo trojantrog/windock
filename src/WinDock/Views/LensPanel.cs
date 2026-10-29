@@ -101,7 +101,6 @@ public sealed class LensPanel : Panel
 
     public Rect Bar { get; private set; }
     public double BaseWidth { get; private set; }
-    Rect restingBar;
     double lensHitTop;
 
     public event EventHandler? Arranged;
@@ -130,7 +129,6 @@ public sealed class LensPanel : Panel
         if (n == 0)
         {
             Bar = Rect.Empty;
-            restingBar = Rect.Empty;
             InvalidateVisual();
             return final;
         }
@@ -145,7 +143,9 @@ public sealed class LensPanel : Panel
         var amplitude = Mode == LensMode.None ? 0 : Amplitude;
         var pointer = pointerMotion.Position - x0;
 
-        var layout = LensMath.Layout(widths, lens, Gap, pointer, Mode == LensMode.Magnify ? amplitude : 0, Magnification, Radius);
+        var layout = Mode == LensMode.Magnify
+            ? LensGeometry.Layout(widths, lens, Gap, pointer, amplitude, Magnification, Radius)
+            : LensMath.Layout(widths, lens, Gap, pointer, 0, Magnification, Radius);
         var hovered = -1;
         if (Mode == LensMode.Scale && amplitude > 0)
             for (var i = 0; i < n; i++)
@@ -168,11 +168,8 @@ public sealed class LensPanel : Panel
             baseLeft += w + Gap;
         }
 
-        var last = n - 1;
-        var right = x0 + layout.Left[last] + (Mode == LensMode.Magnify ? widths[last] * layout.Scale[last] : widths[last]);
-        Bar = new Rect(x0 + layout.Left[0] - inset.Left, bottom - tileHeight - inset.Top,
-            right - (x0 + layout.Left[0]) + inset.Left + inset.Right, tileHeight + inset.Top + inset.Bottom);
-        restingBar = new Rect(x0 - inset.Left, Bar.Top, baseTotal + inset.Left + inset.Right, Bar.Height);
+        Bar = new Rect(x0 - inset.Left, bottom - tileHeight - inset.Top,
+            baseTotal + inset.Left + inset.Right, tileHeight + inset.Top + inset.Bottom);
         var maximumScale = Mode == LensMode.Magnify ? Magnification : 1 + Math.Min(Magnification - 1, ScaleCap);
         lensHitTop = Math.Max(0, bottom - tileHeight * Math.Max(1, maximumScale) - inset.Top);
         InvalidateVisual();
@@ -210,9 +207,7 @@ public sealed class LensPanel : Panel
 
         if (Amplitude > 0.01 && Mode != LensMode.None)
         {
-            var left = Math.Min(bar.Left, restingBar.Left);
-            var right = Math.Max(bar.Right, restingBar.Right);
-            dc.DrawRectangle(Catcher, null, new Rect(left, lensHitTop, right - left, Math.Max(0, bar.Top - lensHitTop)));
+            dc.DrawRectangle(Catcher, null, new Rect(bar.Left, lensHitTop, bar.Width, Math.Max(0, bar.Top - lensHitTop)));
         }
 
         dc.PushOpacity(Math.Clamp(SurfaceOpacity, 0, 1));
