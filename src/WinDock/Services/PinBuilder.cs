@@ -11,22 +11,14 @@ public static class PinBuilder
 
     public static bool TryAdd(HashSet<string> seen, PinItem item)
     {
-        var keys = Keys(item);
-        if (keys.Any(seen.Contains)) return false;
-        foreach (var k in keys) seen.Add(k);
-        return true;
-    }
-
-    static List<string> Keys(PinItem item)
-    {
-        if (item.IsRaw) return [(item.AppId is { Length: > 0 } id ? id : item.Name).ToLowerInvariant()];
-        if (item.IsLauncher) return [item.AppId!.ToLowerInvariant()];
-        if (item.ResolvedTarget is not { } target) return [item.Name.ToLowerInvariant()];
+        if (item.IsRaw || item.IsLauncher || item.ResolvedTarget is not { } target)
+            return PinIdentity.TryAdd(seen, item);
 
         var isLink = target.EndsWith(".lnk", StringComparison.OrdinalIgnoreCase);
         var exe = LinkTarget(target);
         var appId = item.AppId ?? (isLink ? ShellLinks.ReadAppId(target) : null) ?? TaskbarBlob.AppIdForTarget(exe);
-        return [appId.ToLowerInvariant(), exe.ToLowerInvariant()];
+        var args = isLink ? ShellLinks.ReadArguments(target) : item.Args;
+        return PinIdentity.TryAdd(seen, item, exe, args, appId);
     }
 
     public static Snapshot Build(Preset preset, Snapshot current, IEnumerable<PinItem>? always = null)
