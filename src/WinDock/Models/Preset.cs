@@ -31,6 +31,7 @@ public sealed class WidgetSpec
     public const string Battery = "battery";
     public const string Claude = "claude";
     public const string TokenSpeed = "token-speed";
+    public const string GptUsage = "gpt-usage";
     public const string Music = "music";
     public const string Network = "network";
     public const string Note = "note";
@@ -42,7 +43,7 @@ public sealed class WidgetSpec
     public const string FullSize = "full";
     public const string BackdropSize = "backdrop";
 
-    public static readonly string[] Kinds = [Clock, Weather, Music, Claude, TokenSpeed, Pomodoro, Stopwatch, Timer, Countdown, Progress, Activity, Network, Battery, Mic, Note, Todo];
+    public static readonly string[] Kinds = [Clock, Weather, Music, Claude, TokenSpeed, GptUsage, Pomodoro, Stopwatch, Timer, Countdown, Progress, Activity, Network, Battery, Mic, Note, Todo];
 
     public string Kind { get; set; } = Clock;
     public string? Label { get; set; }
