@@ -52,7 +52,7 @@ public sealed class GptUsageWidget : WidgetTile
         if (windows.Length == 0)
         {
             tip.Add(status);
-            return new("—", "GPT · " + Loc.T(ShortStatusKey(snapshot.Status)), Tip: string.Join("\n", tip), Dim: true, MinWidth: 176);
+            return new("—", "GPT · " + Loc.T(ShortStatusKey(snapshot.Status)), Tip: string.Join("\n", tip), Dim: true, MinWidth: 128);
         }
         foreach (var window in windows)
         {
@@ -73,7 +73,7 @@ public sealed class GptUsageWidget : WidgetTile
         return new(Percent(first), caption, SecondValue: second is null ? null : Percent(second),
             SecondCaption: second is null ? null : Loc.F("gptUsedWindow", WindowName(second)),
             Progress: Math.Clamp(first.UsedPercent / 100, 0, 1), SecondProgress: second is null ? -1 : Math.Clamp(second.UsedPercent / 100, 0, 1),
-            Tip: string.Join("\n", tip), Dim: stale, MinWidth: second is null ? 176 : stale ? 320 : 240);
+            Tip: string.Join("\n", tip), Dim: stale, MinWidth: second is null ? 128 : stale ? 240 : 192);
     }
 
     static string Percent(GptQuotaWindow window) => window.UsedPercent.ToString("0.#", CultureInfo.InvariantCulture) + "%";
