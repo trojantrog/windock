@@ -120,7 +120,40 @@ public class PinIdentityTests
 
         Assert.True(PinIdentity.TryAdd(seen, first, ChromeProxy, launchKnown: false));
         Assert.True(PinIdentity.TryAdd(seen, second, ChromeProxy, launchKnown: false));
-        Assert.False(PinIdentity.TryAdd(seen, new PinItem { Target = first.Target.ToUpperInvariant() }, ChromeProxy, launchKnown: false));
+        Assert.False(PinIdentity.TryAdd(seen, new PinItem { Target = first.Target.ToUpperInvariant(), AppId = "CHROME" }, ChromeProxy, launchKnown: false));
+    }
+
+    [Fact]
+    public void Unknown_metadata_keeps_distinct_explicit_app_ids_at_the_same_shortcut_path()
+    {
+        var first = new PinItem { Name = "First", Target = @"C:\Links\Shared.lnk", AppId = "Explicit.First" };
+        var second = new PinItem { Name = "Second", Target = first.Target, AppId = "Explicit.Second" };
+        var duplicate = new PinItem { Name = "Renamed", Target = first.Target.ToUpperInvariant(), AppId = "EXPLICIT.FIRST" };
+        var unknown = new HashSet<string>();
+        var known = new HashSet<string>();
+
+        Assert.True(PinIdentity.TryAdd(unknown, first, ChromeProxy, launchKnown: false));
+        Assert.True(PinIdentity.TryAdd(unknown, second, ChromeProxy, launchKnown: false));
+        Assert.False(PinIdentity.TryAdd(unknown, duplicate, ChromeProxy, launchKnown: false));
+        Assert.True(PinIdentity.TryAdd(known, first, ChromeProxy));
+        Assert.True(PinIdentity.TryAdd(known, second, ChromeProxy));
+    }
+
+    [Theory]
+    [InlineData(0, false)]
+    [InlineData(1, true)]
+    [InlineData(0x000401A0, true)]
+    [InlineData(unchecked((int)0x80004005), true)]
+    [InlineData(unchecked((int)0x80070005), true)]
+    public void Non_S_OK_argument_results_preserve_shortcuts_with_potentially_normalized_values(int result, bool keepSecond)
+    {
+        var seen = new HashSet<string>();
+        var first = new PinItem { Name = "First", Target = @"C:\Links\First.lnk", AppId = "Chrome" };
+        var second = new PinItem { Name = "Second", Target = @"C:\Links\Second.lnk", AppId = "Chrome" };
+        var complete = ShellLinks.IsArgumentReadComplete(result);
+
+        Assert.True(PinIdentity.TryAdd(seen, first, ChromeProxy, "--app=https://example.test/Project", launchKnown: complete));
+        Assert.Equal(keepSecond, PinIdentity.TryAdd(seen, second, ChromeProxy, "--app=https://example.test/Project", launchKnown: complete));
     }
 
     [Theory]

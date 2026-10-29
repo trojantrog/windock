@@ -39,9 +39,23 @@ public static class ShellLinks
         void SetPath([MarshalAs(UnmanagedType.LPWStr)] string path);
     }
 
+    [ComImport, Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IArgumentPropertyStore
+    {
+        [PreserveSig] int GetCount(out uint count);
+        [PreserveSig] int GetAt(uint index, out PropertyKey key);
+        [PreserveSig] int GetValue(ref PropertyKey key, IntPtr value);
+        [PreserveSig] int SetValue(ref PropertyKey key, IntPtr value);
+        [PreserveSig] int Commit();
+    }
+
     [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = false)]
     static extern void SHGetPropertyStoreFromParsingName(string path, IntPtr bindContext, int flags, ref Guid iid,
         [MarshalAs(UnmanagedType.Interface)] out IPropertyStore store);
+
+    [DllImport("shell32.dll", EntryPoint = "SHGetPropertyStoreFromParsingName", CharSet = CharSet.Unicode, ExactSpelling = true, PreserveSig = false)]
+    static extern void SHGetArgumentPropertyStore(string path, IntPtr bindContext, int flags, ref Guid iid,
+        [MarshalAs(UnmanagedType.Interface)] out IArgumentPropertyStore store);
 
     [DllImport("shell32.dll")]
     static extern int SHGetPropertyStoreForWindow(IntPtr hwnd, ref Guid iid, [MarshalAs(UnmanagedType.Interface)] out IPropertyStore store);
@@ -126,14 +140,16 @@ public static class ShellLinks
         try
         {
             var iid = PropertyStores.Iid;
-            SHGetPropertyStoreFromParsingName(lnkPath, IntPtr.Zero, 0, ref iid, out var store);
+            SHGetArgumentPropertyStore(lnkPath, IntPtr.Zero, 0, ref iid, out var store);
             try { return TryReadArguments(store, out arguments); }
             finally { Marshal.FinalReleaseComObject(store); }
         }
         catch (Exception e) when (e is COMException or IOException or UnauthorizedAccessException) { return false; }
     }
 
-    static bool TryReadArguments(IPropertyStore store, out string arguments)
+    public static bool IsArgumentReadComplete(int result) => result == 0;
+
+    static bool TryReadArguments(IArgumentPropertyStore store, out string arguments)
     {
         arguments = "";
         const int variantSize = 24;
@@ -142,7 +158,8 @@ public static class ShellLinks
         try
         {
             var key = new PropertyKey { Format = LinkArgumentsFormat, Id = LinkArgumentsId };
-            store.GetValue(ref key, value);
+            var result = store.GetValue(ref key, value);
+            if (!IsArgumentReadComplete(result)) return false;
             var type = (VarEnum)Marshal.ReadInt16(value);
             if (type == VarEnum.VT_EMPTY) return true;
             if (type != VarEnum.VT_LPWSTR || Marshal.PtrToStringUni(Marshal.ReadIntPtr(value, 8)) is not { } text)

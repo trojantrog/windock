@@ -13,7 +13,11 @@ public static class PinIdentity
     {
         if (item.IsRaw) return Identifier(item.AppId is { Length: > 0 } id ? id : item.Name);
         if (item.IsLauncher) return Identifier(item.AppId!);
-        if (!launchKnown) return "link:" + (item.ResolvedTarget ?? item.Name).ToLowerInvariant();
+        if (!launchKnown)
+        {
+            var source = (item.ResolvedTarget ?? item.Name).ToLowerInvariant();
+            return $"link:{source.Length}:{source}{Identifier(item.AppId ?? appId ?? "")}";
+        }
         if (target is null) return Identifier(item.Name);
 
         var identity = Identifier(item.AppId ?? appId ?? target);
