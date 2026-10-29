@@ -35,6 +35,7 @@ public sealed record WidgetPresentation(string Value, string Caption = "", strin
             ActivityWidget activity => new(activity.CpuText, "CPU", SecondValue: activity.RamText, SecondCaption: "RAM",
                 Progress: activity.Cpu, SecondProgress: activity.Ram, MinWidth: 160),
             NetworkWidget network => Network(network),
+            GptUsageWidget gpt => gpt.Readable,
             ClaudeWidget claude => new(claude.SessionText, "5h", SecondValue: claude.WeekText, SecondCaption: "7d",
                 Progress: claude.Session, SecondProgress: claude.Week, MinWidth: 160),
             WeatherWidget weather => new(weather.Temp, weather.Condition, Symbol: weather.Glyph, MinWidth: 152),

@@ -35,7 +35,7 @@ public abstract partial class WidgetTile(string key, WidgetSpec spec) : DockTile
         Presentation = WidgetPresentation.From(this, Face);
     }
 
-    public bool Square(bool byDefault) => Spec.Size is { } size ? size == WidgetSpec.SquareSize : byDefault && this is not NoteWidget && Kind != "token-speed";
+    public bool Square(bool byDefault) => Spec.Size is { } size ? size == WidgetSpec.SquareSize : byDefault && this is not NoteWidget && Kind is not ("token-speed" or WidgetSpec.GptUsage);
 
     string? applied = spec.Size;
 
@@ -114,6 +114,7 @@ public abstract partial class WidgetTile(string key, WidgetSpec spec) : DockTile
         WidgetSpec.Activity => new ActivityWidget(key, spec),
         WidgetSpec.Battery => new BatteryWidget(key, spec),
         WidgetSpec.Claude => new ClaudeWidget(key, spec),
+        WidgetSpec.GptUsage => new GptUsageWidget(key, spec),
         WidgetSpec.Music => new MusicWidget(key, spec),
         WidgetSpec.Weather => new WeatherWidget(key, spec),
         WidgetSpec.Mic => new MicWidget(key, spec),
