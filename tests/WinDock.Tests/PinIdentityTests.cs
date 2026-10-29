@@ -59,6 +59,84 @@ public class PinIdentityTests
     }
 
     [Theory]
+    [InlineData(1023)]
+    [InlineData(4095)]
+    [InlineData(16383)]
+    public void Long_arguments_with_a_shared_prefix_keep_their_distinct_tails(int sharedLength)
+    {
+        var seen = new HashSet<string>();
+        var item = new PinItem { Name = "Browser", Target = @"C:\Links\Browser.lnk", AppId = "Chrome" };
+        var prefix = "--app=https://example.test/".PadRight(sharedLength, 'x');
+        var first = prefix + "/Project";
+        var second = prefix + "/project";
+
+        Assert.Equal(first[..1023], second[..1023]);
+        Assert.True(PinIdentity.TryAdd(seen, item, ChromeProxy, first));
+        Assert.True(PinIdentity.TryAdd(seen, item, ChromeProxy, second));
+        Assert.False(PinIdentity.TryAdd(seen, item, ChromeProxy, first));
+    }
+
+    [Theory]
+    [InlineData(" ")]
+    [InlineData("\t")]
+    [InlineData(" --app=https://example.test/Project ")]
+    public void Whitespace_arguments_are_preserved_exactly(string arguments)
+    {
+        var seen = new HashSet<string>();
+        var item = new PinItem { Name = "Browser", Target = @"C:\Links\Browser.lnk", AppId = "Chrome" };
+
+        Assert.True(PinIdentity.TryAdd(seen, item, ChromeProxy, ""));
+        Assert.True(PinIdentity.TryAdd(seen, item, ChromeProxy, arguments));
+        Assert.False(PinIdentity.TryAdd(seen, item, ChromeProxy, arguments));
+    }
+
+    [Fact]
+    public void Unconfirmed_launch_metadata_keeps_different_shortcut_paths_despite_shared_app_id_and_target()
+    {
+        var seen = new HashSet<string>();
+        var first = new PinItem { Name = "Browser", Target = @"C:\Links\First.lnk", AppId = "Chrome" };
+        var second = new PinItem { Name = "Browser", Target = @"D:\Links\Second.lnk", AppId = "Chrome" };
+
+        Assert.True(PinIdentity.TryAdd(seen, first, ChromeProxy, launchKnown: false));
+        Assert.True(PinIdentity.TryAdd(seen, second, ChromeProxy, launchKnown: false));
+        Assert.False(PinIdentity.TryAdd(seen, new PinItem { Target = first.Target.ToUpperInvariant() }, ChromeProxy, launchKnown: false));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Unknown_arguments_do_not_alias_confirmed_empty_arguments(bool unknownFirst)
+    {
+        var seen = new HashSet<string>();
+        var unknown = new PinItem { Name = "Browser", Target = @"C:\Links\Unknown.lnk", AppId = "Chrome" };
+        var empty = new PinItem { Name = "Browser", Target = @"C:\Links\Empty.lnk", AppId = "Chrome" };
+
+        if (unknownFirst)
+        {
+            Assert.True(PinIdentity.TryAdd(seen, unknown, ChromeProxy, launchKnown: false));
+            Assert.True(PinIdentity.TryAdd(seen, empty, ChromeProxy, ""));
+        }
+        else
+        {
+            Assert.True(PinIdentity.TryAdd(seen, empty, ChromeProxy, ""));
+            Assert.True(PinIdentity.TryAdd(seen, unknown, ChromeProxy, launchKnown: false));
+        }
+    }
+
+    [Theory]
+    [InlineData("steam://rungameid/1")]
+    [InlineData(@"shell:AppsFolder\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App")]
+    public void Raw_and_launcher_identity_remains_app_id_only_when_metadata_is_unconfirmed(string arguments)
+    {
+        var seen = new HashSet<string>();
+        var raw = new PinItem { Name = "Raw", AppId = "App", Favorites = "", Resolve = "" };
+        var launcher = new PinItem { Name = "Launcher", Target = Explorer, Args = arguments, AppId = "APP" };
+
+        Assert.True(PinIdentity.TryAdd(seen, raw, launchKnown: false));
+        Assert.False(PinIdentity.TryAdd(seen, launcher, launchKnown: false));
+    }
+
+    [Theory]
     [InlineData(null)]
     [InlineData("--profile-directory=Default --app-id=github")]
     public void Renamed_shortcuts_to_the_same_launch_target_are_duplicates(string? arguments)

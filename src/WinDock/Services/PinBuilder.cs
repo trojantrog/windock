@@ -15,9 +15,16 @@ public static class PinBuilder
             return PinIdentity.TryAdd(seen, item);
 
         var isLink = target.EndsWith(".lnk", StringComparison.OrdinalIgnoreCase);
-        var exe = LinkTarget(target);
+        var exe = target;
+        var args = item.Args;
+        if (isLink)
+        {
+            var linked = ShellLinks.ReadTarget(target, out var targetKnown);
+            if (!targetKnown || !ShellLinks.TryReadArguments(target, out args))
+                return PinIdentity.TryAdd(seen, item, target, launchKnown: false);
+            exe = linked!;
+        }
         var appId = item.AppId ?? (isLink ? ShellLinks.ReadAppId(target) : null) ?? TaskbarBlob.AppIdForTarget(exe);
-        var args = isLink ? ShellLinks.ReadArguments(target) : item.Args;
         return PinIdentity.TryAdd(seen, item, exe, args, appId);
     }
 
