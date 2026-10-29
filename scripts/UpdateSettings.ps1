@@ -120,17 +120,84 @@ function Assert-UpdateUserDataPreserved($Snapshot) {
 
 function Assert-UpdatePackageResourceBoundaries($Entries, [string]$Directory) {
     $root = [IO.Path]::GetFullPath($Directory).TrimEnd('\', '/')
+    $tracked = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    if (Test-Path -LiteralPath (Join-Path $root '.git')) {
+        $git = @(Get-Command git -CommandType Application -ErrorAction Stop)[0].Source
+        $trackedOutput = & $git --no-optional-locks -C $root ls-files --cached -z
+        if ($LASTEXITCODE -ne 0) { throw 'The source repository file list could not be read.' }
+        foreach ($name in (($trackedOutput -join "`n") -split "`0")) {
+            if ($name) { [void]$tracked.Add($name.Replace('\', '/')) }
+        }
+    }
+    $allowedNames = @('WinDock.Motion.manifest.json', 'WinDock.deps.json', 'WinDock.runtimeconfig.json', 'build-info.json', 'SHA256SUMS.txt',
+        '托盘与菜单说明.md', '托盘兼容说明.md', '托盘输入法说明.md', '窗口预览说明.md', '整窗动画说明.md', '系统通知说明.md',
+        'native-tray-actions.md', 'native-tray-inventory.md', 'licenses/WinDock-LICENSE.txt', 'licenses/THIRD_PARTY_NOTICES.txt',
+        'licenses/MinHook-LICENSE.txt', 'licenses/YASB-LICENSE.txt')
     foreach ($entry in $Entries) {
         $target = [IO.Path]::GetFullPath($entry.Target)
         if (-not $target.StartsWith($root + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
             throw 'A package file is outside the installation directory.'
         }
-        $relative = [IO.Path]::GetRelativePath($root, $target)
-        $topDirectory = ($relative -split '[\\/]', 2)[0]
+        $relative = [IO.Path]::GetRelativePath($root, $target).Replace('\', '/')
+        if (-not $relative.Equals($entry.Relative.Replace('\', '/'), [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'A package path must use its direct relative location.'
+        }
+        $topDirectory = ($relative -split '/', 2)[0]
         if ($topDirectory -in @('shortcuts', 'icons')) {
             throw ('The package would overwrite an installed user resource: ' + $relative)
         }
+        if ($topDirectory -in @('.git', '.github', 'src', 'scripts', 'docs', 'tests', 'native', 'third_party', 'publish', 'obj', 'bin') -or
+            $tracked.Contains($relative)) {
+            throw ('The package would overwrite a source repository file: ' + $relative)
+        }
+        if ($relative -notin $allowedNames -and $relative -notmatch '^WinDock(?:\.[A-Za-z0-9_-]+)*\.(?:exe|dll|pdb)(?:\.sha256)?$') {
+            throw ('The package contains an unsupported installed file: ' + $relative)
+        }
+        if ((Test-Path -LiteralPath $target) -and -not (Test-Path -LiteralPath $target -PathType Leaf)) {
+            throw ('A package target is an existing directory: ' + $relative)
+        }
     }
+}
+
+function Backup-UpdateInstalledFiles($Entries, [string]$Directory, [string]$BackupDirectory, $Resources) {
+    $root = [IO.Path]::GetFullPath($Directory).TrimEnd('\', '/')
+    $backup = [IO.Path]::GetFullPath($BackupDirectory).TrimEnd('\', '/')
+    if ($root.Equals($backup, [StringComparison]::OrdinalIgnoreCase) -or
+        $backup.StartsWith($root + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) -or
+        $root.StartsWith($backup + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'The installation and its backup must be separate directories.'
+    }
+    Assert-UpdatePackageResourceBoundaries $Entries $root
+    if (Test-Path -LiteralPath $backup) { throw 'The installation backup destination already exists.' }
+    $files = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($entry in $Entries) {
+        if (-not (Test-Path -LiteralPath $entry.Target -PathType Leaf)) { continue }
+        $relative = [IO.Path]::GetRelativePath($root, $entry.Target)
+        $hash = (Get-FileHash -LiteralPath $entry.Target -Algorithm SHA256).Hash
+        if ($hash -eq $entry.Hash) { continue }
+        $files[$relative] = [pscustomobject]@{ Relative = $relative; Hash = $hash }
+    }
+    foreach ($file in $Resources.Files) { $files[$file.Relative] = $file }
+    New-Item -ItemType Directory -Path $backup | Out-Null
+    foreach ($file in $files.Values) {
+        $source = [IO.Path]::GetFullPath((Join-Path $root $file.Relative))
+        $saved = [IO.Path]::GetFullPath((Join-Path $backup $file.Relative))
+        if (-not $source.StartsWith($root + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) -or
+            -not $saved.StartsWith($backup + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'An installation backup file is outside its directory.'
+        }
+        for ($part = $source; $part; $part = Split-Path -Parent $part) {
+            if ((Test-Path -LiteralPath $part) -and ((Get-Item -LiteralPath $part -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+                throw 'An installation backup path contains a linked file or directory.'
+            }
+        }
+        New-Item -ItemType Directory -Path (Split-Path -Parent $saved) -Force | Out-Null
+        Copy-Item -LiteralPath $source -Destination $saved
+        if ((Get-FileHash -LiteralPath $saved -Algorithm SHA256).Hash -cne $file.Hash) {
+            throw ('Installation backup checksum mismatch: ' + $file.Relative)
+        }
+    }
+    return @($files.Values)
 }
 
 function Get-UpdateInstalledResources([string]$Directory) {

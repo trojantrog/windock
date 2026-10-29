@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $true)][string]$PackagePath,
-    [string]$DestinationPath = 'D:\WinDock',
+    [string]$DestinationPath = 'D:\Projects\windock',
     [switch]$EnableAnimationStartup,
     [string]$BackupRoot = (Join-Path $env:LOCALAPPDATA 'WinDock\Backups')
 )
@@ -91,17 +91,6 @@ $startupPlan = $null
 $backup = Join-Path $backupBase ('install-' + (Get-Date -Format 'yyyyMMdd-HHmmss-fff'))
 New-Item -ItemType Directory -Path $backup -Force | Out-Null
 $installedBefore = Join-Path $backup 'installed'
-if (Test-Path -LiteralPath $destination) {
-    foreach ($item in Get-ChildItem -LiteralPath $destination -Recurse -Force) {
-        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'The installation contains a linked file or directory.' }
-    }
-    Copy-Item -LiteralPath $destination -Destination $installedBefore -Recurse
-    foreach ($original in Get-ChildItem -LiteralPath $destination -File -Recurse -Force) {
-        $saved = Join-Path $installedBefore ([IO.Path]::GetRelativePath($destination, $original.FullName))
-        if ((Get-FileHash -LiteralPath $original.FullName -Algorithm SHA256).Hash -ne
-            (Get-FileHash -LiteralPath $saved -Algorithm SHA256).Hash) { throw 'Installation backup checksum mismatch.' }
-    }
-}
 $backupIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
 try {
     $previousTaskName = 'WinDock.NativeMotion.' + $backupIdentity.User.Value
@@ -259,6 +248,8 @@ try {
     $userData.Files | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $backup 'user-data-sha256.json') -Encoding utf8
     $installedResources = Get-UpdateInstalledResources $destination
     $installedResources.Files | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $backup 'installed-user-resources-sha256.json') -Encoding utf8
+    $installedFilesBefore = @(Backup-UpdateInstalledFiles $entries $destination $installedBefore $installedResources)
+    $installedFilesBefore | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $backup 'installed-files-sha256.json') -Encoding utf8
     New-Item -ItemType Directory -Path $destination -Force | Out-Null
     Copy-UpdatePackageFiles $entries $copied
     $startupCommand = $startupPlan.Command
@@ -358,6 +349,7 @@ try {
         startupChoicePreserved = $true; startupAction = $startupPlan.Action; settingsPreserved = $true
         userDataBackup = $userData.BackupDirectory; userDataFilesVerifiedBeforeLaunch = $userData.Files.Count
         installedUserResourcesPreserved = $true; installedUserResourceFilesVerified = $installedResources.Files.Count
+        installedFilesBackedUp = $installedFilesBefore.Count
         ordinaryStartup = $ordinaryStartup; animationLogin = $animationLogin; startupReady = $startupReady
         verifiedFiles = $entries.Count; pinsPreserved = $pinsPreserved; replaceTaskbar = $settingsAfter.dock.replaceTaskbar
         nativeTaskbarWindowVisible = $nativeTaskbarVisible

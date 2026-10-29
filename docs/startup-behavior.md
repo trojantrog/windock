@@ -2,7 +2,7 @@
 
 WinDock 的普通登录启动和整窗动画使用两个独立入口。普通程序通过当前用户的 `Run\WinDock` 启动；整窗动画由同一用户的 `WinDock.NativeMotion.<SID>` 计划任务启动。普通入口匹配当前安装且读取到允许启动的状态，当前动画设置所需的登录任务也就绪时，安装报告才将 `startupReady` 标记为 `true`。这一标记表示配置核对结果，不代替真实登录验证。
 
-覆盖更新保留已有登录启动选择。普通启动项缺失时不创建；已登记的标准 WinDock 命令只迁移到原安装目录，保留注册值类型及 Windows 批准记录。Windows 禁用、策略禁用和未知状态均不会被自动开启。更新前后的登记、批准原始记录和策略状态会再次核对；读取失败或更新期间发生变化时停止继续写入。完整操作见 [覆盖更新](updating.md)。
+覆盖更新保留已有登录启动选择。普通启动项缺失时不创建；已登记的标准 WinDock 命令只迁移到当前固定安装位置 `D:\Projects\windock\WinDock.exe`，保留注册值类型及 Windows 批准记录。Windows 禁用、策略禁用和未知状态均不会被自动开启。更新前后的登记、批准原始记录和策略状态会再次核对；读取失败或更新期间发生变化时停止继续写入。完整操作见 [覆盖更新](updating.md)。
 
 ## 普通启动入口
 
@@ -48,6 +48,7 @@ WinDock 不写入或删除任何 `StartupApproved` 值，也不修改启动策�
 | `userDataBackup` | 更新前完整用户目录的备份位置 |
 | `installedUserResourcesPreserved` | 安装目录中已有 shortcuts 和 icons 文件保持原字节 |
 | `installedUserResourceFilesVerified` | 核对的安装目录用户资源文件数 |
+| `installedFilesBackedUp` | 本次将被替换的原文件与已有 shortcuts/icons 备份数量，不含源码仓库和历史发布目录 |
 | `startupReady` | 普通启动和当前动画设置所需的登录任务均已核对就绪 |
 | `loginCycleTested` | 是否实际完成登录验证；本次保持 false |
 
@@ -61,4 +62,4 @@ Dock 已从安装目录正常启动，18 个固定应用保持不变，原生任
 
 正常启动产生的 `motion-status.json` 从 07:48:23 继续更新至 07:49:53；期间连接状态保持未连接、登录入口保持启用、动作计数均为零。这确认本次运行中未变化状态的记录仍持续更新，不表示整窗动画已生效。
 
-安装前的程序、设置和动画任务备份位于 `publish/backups/install-20261029-074814-707`。需要回退程序时，可运行 `scripts/Update-InstalledBuild.ps1 -PackagePath publish/WinDock-0.6.0-preview.24`；当前更新脚本保留已有设置，包括替换任务栏的选择，不替换本次会话已驻留的动画组件。
+安装前的程序、设置和动画任务备份位于 `publish/backups/install-20261029-074814-707`。当前固定安装位置已改为 `D:\Projects\windock`。需要回退程序时，把完整旧版本包放到仓库外，再运行 `scripts/Update-InstalledBuild.ps1 -PackagePath '仓库外的旧版本完整包目录'`；当前更新脚本保留已有设置，包括替换任务栏的选择，不替换本次会话已驻留的动画组件。

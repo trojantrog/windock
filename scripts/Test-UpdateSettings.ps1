@@ -194,8 +194,69 @@ Assert-UpdateInstalledResourcesPreserved $missingSnapshot
 Assert-True (Test-Path -LiteralPath (Join-Path $missingInstallation 'WinDock.exe')) 'A missing fixed installation directory could not be recreated.'
 $results.Add('Recovered shortcuts survive reinstallation and a missing fixed directory is recreated')
 
-$installedExe = 'D:\WinDock\WinDock.exe'
-$currentCommand = '"D:\WinDock\WinDock.exe" --tray'
+$repositoryInstallation = Join-Path $fixtureRootFull 'repository-installation'
+$repositoryBackup = Join-Path $fixtureRootFull 'repository-backup'
+New-Item -ItemType Directory -Path $repositoryInstallation | Out-Null
+$git = @(Get-Command git -CommandType Application -ErrorAction Stop)[0].Source
+& $git --no-optional-locks -C $repositoryInstallation init --quiet
+Assert-True ($LASTEXITCODE -eq 0) 'The isolated Git fixture could not be initialized.'
+foreach ($relative in @('README.md', 'src/source.cs', 'scripts/maintenance.ps1', 'docs/source.md', 'tests/source.cs',
+    'publish/previous/WinDock.exe', 'obj/build-cache.bin', 'user-note.txt', 'build-info.json')) {
+    $path = Join-Path $repositoryInstallation $relative
+    New-Item -ItemType Directory -Path (Split-Path -Parent $path) -Force | Out-Null
+    [IO.File]::WriteAllText($path, ('preserve repository data: ' + $relative))
+}
+& $git --no-optional-locks -C $repositoryInstallation add -- README.md src/source.cs scripts/maintenance.ps1 docs/source.md tests/source.cs build-info.json
+Assert-True ($LASTEXITCODE -eq 0) 'The isolated source fixture could not be tracked.'
+$untouched = @(foreach ($relative in @('README.md', 'src/source.cs', 'scripts/maintenance.ps1', 'docs/source.md', 'tests/source.cs',
+    'publish/previous/WinDock.exe', 'obj/build-cache.bin', 'user-note.txt', 'build-info.json', '.git/HEAD', '.git/config', '.git/index')) {
+    [pscustomobject]@{ Relative = $relative; Hash = (Get-FileHash -LiteralPath (Join-Path $repositoryInstallation $relative) -Algorithm SHA256).Hash }
+})
+New-Item -ItemType Directory -Path (Join-Path $repositoryInstallation 'shortcuts'), (Join-Path $repositoryInstallation 'icons') -Force | Out-Null
+[IO.File]::WriteAllBytes((Join-Path $repositoryInstallation 'shortcuts/editor.lnk'), $shortcutBytes)
+[IO.File]::WriteAllBytes((Join-Path $repositoryInstallation 'icons/editor.png'), $iconBytes)
+$repositoryEntries = @($packageEntries | ForEach-Object {
+    [IO.File]::WriteAllText((Join-Path $repositoryInstallation $_.Relative), ('old repository product: ' + $_.Relative))
+    [pscustomobject]@{ Relative = $_.Relative; Source = $_.Source; Target = Join-Path $repositoryInstallation $_.Relative; Hash = $_.Hash }
+})
+$repositoryResources = Get-UpdateInstalledResources $repositoryInstallation
+Assert-UpdatePackageResourceBoundaries $repositoryEntries $repositoryInstallation
+$backedUp = @(Backup-UpdateInstalledFiles $repositoryEntries $repositoryInstallation $repositoryBackup $repositoryResources)
+Assert-True ($backedUp.Count -eq 4) 'The bounded installation backup did not contain exactly the two product files and two user resources.'
+$backupFiles = @(Get-ChildItem -LiteralPath $repositoryBackup -Recurse -File -Force)
+Assert-True ($backupFiles.Count -eq 4) 'Source, Git, publish or other nonproduct files were backed up.'
+foreach ($file in $backedUp) {
+    Assert-True ($file.Relative -in @('WinDock.exe', 'WinDock.component.dll', 'shortcuts\editor.lnk', 'icons\editor.png')) 'An unrelated repository file was included in the installation backup.'
+    Assert-True ((Get-FileHash -LiteralPath (Join-Path $repositoryBackup $file.Relative) -Algorithm SHA256).Hash -ceq $file.Hash) 'A bounded backup checksum changed.'
+}
+Copy-UpdatePackageFiles $repositoryEntries ([Collections.Generic.List[object]]::new())
+Assert-UpdateInstalledResourcesPreserved $repositoryResources
+$unchangedBackup = @(Backup-UpdateInstalledFiles $repositoryEntries $repositoryInstallation (Join-Path $fixtureRootFull 'unchanged-product-backup') $repositoryResources)
+Assert-True ($unchangedBackup.Count -eq 2) 'An unchanged product file was unnecessarily included in the update backup.'
+foreach ($file in $untouched) {
+    Assert-True ((Get-FileHash -LiteralPath (Join-Path $repositoryInstallation $file.Relative) -Algorithm SHA256).Hash -ceq $file.Hash) ('A source repository or nonproduct file changed: ' + $file.Relative)
+}
+foreach ($relative in @('.git/config', 'src/source.cs', 'scripts/maintenance.ps1', 'docs/source.md', 'tests/source.cs',
+    'publish/previous/WinDock.exe', 'README.md', 'build-info.json', 'user-note.txt', 'unrecognized.json')) {
+    $entry = [pscustomobject]@{ Relative = $relative; Target = Join-Path $repositoryInstallation $relative }
+    Assert-Throws { Assert-UpdatePackageResourceBoundaries @($entry) $repositoryInstallation } ('A package could overwrite repository or nonproduct data: ' + $relative)
+}
+Assert-Throws { Backup-UpdateInstalledFiles $repositoryEntries $repositoryInstallation (Join-Path $repositoryInstallation 'backup') $repositoryResources } 'An installation backup inside the source repository was accepted.'
+$results.Add('Repository-root updates leave tracked source, Git, publish and other nonproduct bytes untouched and out of backup')
+
+$releaseFiles = @('WinDock.exe', 'WinDock.pdb', 'WinDock.TrayHook.v7.x64.dll', 'WinDock.TrayHook.v7.x64.dll.sha256',
+    'WinDock.Motion.x64.dll', 'WinDock.MotionHost.exe', 'WinDock.Motion.manifest.json', 'build-info.json', 'SHA256SUMS.txt',
+    '托盘与菜单说明.md', '托盘兼容说明.md', '托盘输入法说明.md', '窗口预览说明.md', '整窗动画说明.md', '系统通知说明.md',
+    'native-tray-actions.md', 'native-tray-inventory.md', 'licenses/WinDock-LICENSE.txt', 'licenses/THIRD_PARTY_NOTICES.txt',
+    'licenses/MinHook-LICENSE.txt', 'licenses/YASB-LICENSE.txt')
+$releaseEntries = @($releaseFiles | ForEach-Object {
+    [pscustomobject]@{ Relative = $_; Target = Join-Path $oldInstallation $_ }
+})
+Assert-UpdatePackageResourceBoundaries $releaseEntries $oldInstallation
+$results.Add('All 21 installed paths from the preview.27 manifest satisfy the product file boundary')
+
+$installedExe = 'D:\Projects\windock\WinDock.exe'
+$currentCommand = '"D:\Projects\windock\WinDock.exe" --tray'
 $oldCommand = '"C:\Downloads\WinDock-preview\WinDock.exe" --tray'
 foreach ($approval in @('enabled', 'disabled', 'unrecorded', 'unknown')) {
     foreach ($policy in @('unconfigured', 'disabled')) {
@@ -256,13 +317,14 @@ $results.Add('Registry value types remain intact; unreadable and concurrent stat
 
 $installer = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'Install-LocalBuild.ps1'))
 $wrapper = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'Update-InstalledBuild.ps1'))
-Assert-True ($installer.Contains("[string]`$DestinationPath = 'D:\WinDock'")) 'The default installation directory is not fixed.'
-Assert-True ($wrapper.Contains("`$destination = 'D:\WinDock'")) 'The update entry does not target the existing installation.'
+Assert-True ($installer.Contains("[string]`$DestinationPath = 'D:\Projects\windock'")) 'The default installation directory is not fixed.'
+Assert-True ($wrapper.Contains("`$destination = 'D:\Projects\windock'")) 'The update entry does not target the existing installation.'
 Assert-True (-not $wrapper.Contains('Test-Path')) 'The update entry rejects a missing executable before recovery installation can run.'
 Assert-True (-not $installer.Contains('Save-SettingsWithNativeTaskbar') -and -not $installer.Contains('[switch]$EnableAnimationStartup = $true')) 'A forced settings or animation default returned.'
 Assert-True ($installer.IndexOf('Assert-UpdateUserDataUnchanged $userData') -lt $installer.IndexOf('$launched = Start-Process')) 'User data must be checked before the updated executable starts.'
 Assert-True ($installer.Contains('Assert-UpdateUserDataPreserved $userData')) 'The running application settings are not checked.'
 Assert-True ($installer.Contains('$nativeTaskbarVisible -ne $expectedNativeTaskbarVisible')) 'Taskbar visibility is not checked against the saved choice.'
+Assert-True (-not $installer.Contains('Copy-Item -LiteralPath $destination -Destination $installedBefore -Recurse')) 'The installer would recursively copy the source repository.'
 $results.Add('The installer uses the fixed destination and settings checks without forced preferences')
 
 [ordered]@{ passed = $results.Count; checks = $results; fixtureRoot = $fixtureRootFull
