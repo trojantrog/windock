@@ -4,7 +4,7 @@ namespace WinDock.ViewModels;
 
 public sealed record WidgetPresentation(string Value, string Caption = "", string? Glyph = null, string? Symbol = null,
     string? SecondValue = null, string? SecondCaption = null, double Progress = -1, double SecondProgress = -1,
-    string? Paper = null, string? Tip = null, bool Alert = false, bool Dim = false, double MinWidth = 128,
+    string? Paper = null, string? Tip = null, bool Alert = false, bool Dim = false, double MinWidth = 96,
     string Unit = "", string? SecondUnit = null, bool Stacked = false)
 {
     public bool Dual => SecondValue is not null;
@@ -15,7 +15,7 @@ public sealed record WidgetPresentation(string Value, string Caption = "", strin
     public bool HasSecondProgress => SecondProgress >= 0;
     public bool HasPaper => Paper is not null;
 
-    public static double Height(double iconSize) => Math.Max(64, iconSize);
+    public static double Height(double iconSize) => Math.Max(48, iconSize);
 
     public static double ContentHeight(IEnumerable<WidgetTile> widgets, double iconSize, bool compact) =>
         widgets.Any(w => !w.Square(compact)) ? Height(iconSize) : iconSize;
@@ -33,7 +33,7 @@ public sealed record WidgetPresentation(string Value, string Caption = "", strin
             CountdownWidget countdown => new(countdown.Text, countdown.Label, Glyph: "\uE787", MinWidth: 160),
             ProgressWidget progress => new(progress.Text, progress.Label, Progress: progress.Value),
             ActivityWidget activity => new(activity.CpuText, "CPU", SecondValue: activity.RamText, SecondCaption: "RAM",
-                Progress: activity.Cpu, SecondProgress: activity.Ram, MinWidth: 160),
+                Progress: activity.Cpu, SecondProgress: activity.Ram, MinWidth: 112),
             NetworkWidget network => Network(network),
             GptUsageWidget gpt => gpt.Readable,
             ClaudeWidget claude => new(claude.SessionText, "5h", SecondValue: claude.WeekText, SecondCaption: "7d",
@@ -45,7 +45,7 @@ public sealed record WidgetPresentation(string Value, string Caption = "", strin
             NoteWidget note => new("", Paper: note.Text, MinWidth: 152),
             TodoWidget todo => new(todo.Count, todo.Next, Glyph: "\uE73E", Progress: todo.Progress, MinWidth: 176),
             _ => new(face.Value, face.Caption, Glyph: face.Glyph, Symbol: face.Symbol, Progress: face.Bar >= 0 ? face.Bar : face.Ring,
-                Paper: face.Paper, MinWidth: face.HasGlyph || face.HasSymbol ? 160 : 128)
+                Paper: face.Paper, MinWidth: face.HasGlyph || face.HasSymbol ? 160 : 96)
         };
         return presentation with { Tip = face.Tip, Alert = face.Alert, Dim = face.Dim || widget is MicWidget { Present: false } };
     }
@@ -54,7 +54,7 @@ public sealed record WidgetPresentation(string Value, string Caption = "", strin
     {
         var (down, downUnit) = Rate(network.Down);
         var (up, upUnit) = Rate(network.Up);
-        return new(down, SecondValue: up, MinWidth: 144, Unit: downUnit, SecondUnit: upUnit, Stacked: true);
+        return new(down, SecondValue: up, MinWidth: 104, Unit: downUnit, SecondUnit: upUnit, Stacked: true);
     }
 
     static (string Value, string Unit) Rate(string text)

@@ -233,7 +233,7 @@ public class GptUsageTests
         Assert.Contains(WidgetSpec.GptUsage, WidgetSpec.Kinds);
         var widget = Assert.IsType<GptUsageWidget>(WidgetTile.Create("gpt", new WidgetSpec { Kind = WidgetSpec.GptUsage }));
         Assert.False(widget.Square(true));
-        Assert.Equal(64, WidgetPresentation.ContentHeight([widget], 30, true));
+        Assert.Equal(48, WidgetPresentation.ContentHeight([widget], 30, true));
         widget.Spec.Size = WidgetSpec.SquareSize;
         Assert.True(widget.Square(true));
         Assert.Equal(30, WidgetPresentation.ContentHeight([widget], 30, true));

@@ -7,6 +7,7 @@ using System.Windows.Markup;
 using System.Windows.Media;
 using System.Xml.Linq;
 using WinDock.Models;
+using WinDock.Services;
 using WinDock.ViewModels;
 using WinDock.Views;
 
@@ -77,7 +78,7 @@ public class WidgetPresentationTests
     public void The_reserved_height_matches_the_selected_widget_shape()
     {
         var token = new SampleWidget(new WidgetSpec { Kind = "token-speed" }, new CompactFace("12.3"));
-        Assert.Equal(64, WidgetPresentation.ContentHeight([token], 30, true));
+        Assert.Equal(48, WidgetPresentation.ContentHeight([token], 30, true));
         token.Spec.Size = WidgetSpec.SquareSize;
         Assert.Equal(30, WidgetPresentation.ContentHeight([token], 30, true));
         Assert.Equal(60, WidgetPresentation.ContentHeight([token], 60, true));
@@ -95,9 +96,15 @@ public class WidgetPresentationTests
         var network = new NetworkWidget("network", new WidgetSpec { Kind = WidgetSpec.Network, Size = WidgetSpec.WideSize })
             { Down = "1023 GB/s", Up = "12.5 MB/s" };
         var token = new SampleWidget(new WidgetSpec { Kind = "token-speed" }, new CompactFace("52.7", "Token/s · 最近"));
+        var now = new DateTimeOffset(2026, 10, 29, 5, 0, 0, TimeSpan.Zero);
+        var limits = new GptQuotaLimits(new(100, 300, now.AddHours(2)), new(100, 10080, now.AddDays(3)), now.AddMinutes(-6));
+        var usage = new GptQuotaService(_ => Task.FromResult(new GptQuotaResult(GptQuotaStatus.Ready, limits)));
+        usage.RefreshAsync(now).GetAwaiter().GetResult();
+        var gpt = new GptUsageWidget("gpt", new WidgetSpec { Kind = WidgetSpec.GptUsage }, usage);
+        gpt.Tick(now.LocalDateTime);
         var panel = new LensPanel { Resources = resources, Inset = new Thickness(8), Gap = 11, Mode = LensMode.None };
         var selector = new FaceSelector { Compact = new DataTemplate(), Readable = (DataTemplate)resources["ReadableWidget"], On = true };
-        foreach (var tile in new WidgetTile[] { activity, network, token })
+        foreach (var tile in new WidgetTile[] { activity, network, token, gpt })
         {
             tile.RefreshFace();
             var presenter = new ContentPresenter { Content = tile, ContentTemplate = selector.SelectTemplate(tile, panel) };
@@ -111,13 +118,13 @@ public class WidgetPresentationTests
         panel.Measure(new Size(1000, 170));
         panel.Arrange(new Rect(0, 0, 1000, 170));
         panel.UpdateLayout();
-        Assert.Equal(64 + 16, panel.Bar.Height);
+        Assert.Equal(48 + 16, panel.Bar.Height);
         var texts = Descendants(panel).OfType<TextBlock>().Where(t => t.ActualHeight > 0).ToArray();
         foreach (var value in new[] { "100%", "1023 GB/s", "12.5 MB/s", "52.7" })
         {
             Assert.True(texts.Any(t => Shown(t) == value), string.Join(" | ", texts.Select(Shown)));
             var text = texts.First(t => Shown(t) == value);
-            Assert.Equal(22, text.FontSize * text.TransformToAncestor(panel).TransformBounds(new Rect(0, 0, 1, 1)).Height);
+            Assert.Equal(17, text.FontSize * text.TransformToAncestor(panel).TransformBounds(new Rect(0, 0, 1, 1)).Height);
             var natural = new FormattedText(Shown(text), CultureInfo.InvariantCulture, FlowDirection.LeftToRight,
                 new Typeface(text.FontFamily, text.FontStyle, text.FontWeight, text.FontStretch), text.FontSize, text.Foreground, 1);
             Assert.True(natural.WidthIncludingTrailingWhitespace <= text.ActualWidth + .5, value);
@@ -126,8 +133,11 @@ public class WidgetPresentationTests
         {
             var bounds = text.TransformToAncestor(panel).TransformBounds(new Rect(text.RenderSize));
             Assert.True(panel.Bar.Contains(bounds), Shown(text));
+            var natural = new FormattedText(Shown(text), CultureInfo.InvariantCulture, FlowDirection.LeftToRight,
+                new Typeface(text.FontFamily, text.FontStyle, text.FontWeight, text.FontStretch), text.FontSize, text.Foreground, 1);
+            Assert.True(natural.WidthIncludingTrailingWhitespace <= text.ActualWidth + .5, Shown(text));
         }
-        Assert.Contains(texts, t => Shown(t) == "Token/s · 最近" && t.FontSize == 13);
+        Assert.Contains(texts, t => Shown(t) == "Token/s · 最近" && t.FontSize == 11);
         Assert.DoesNotContain(texts, t => Shown(t).Contains("下载") || Shown(t).Contains("上传") || Shown(t).Contains('↑') || Shown(t).Contains('↓'));
         var originalWidth = panel.BaseWidth;
         network.Down = "0 B/s";

@@ -22,7 +22,7 @@
         <SolidColorBrush x:Key="DockMuted" Color="#B3F4EFE7"/>
         <FontFamily x:Key="Glyphs">Segoe Fluent Icons, Segoe MDL2 Assets</FontFamily>
 
-        <sys:Double x:Key="WidgetHeight">64</sys:Double>
+        <sys:Double x:Key="WidgetHeight">48</sys:Double>
         <SolidColorBrush x:Key="WidgetSurface" Color="#EB252934"/>
         <SolidColorBrush x:Key="WidgetBorder" Color="#40FFFFFF"/>
 
@@ -127,7 +127,7 @@
 
         <Style x:Key="WidgetValue" TargetType="TextBlock">
             <Setter Property="FontFamily" Value="{StaticResource DockFont}"/>
-            <Setter Property="FontSize" Value="22"/>
+            <Setter Property="FontSize" Value="17"/>
             <Setter Property="FontWeight" Value="SemiBold"/>
             <Setter Property="Foreground" Value="{DynamicResource DockInk}"/>
             <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
@@ -136,7 +136,7 @@
 
         <Style x:Key="WidgetCaption" TargetType="TextBlock">
             <Setter Property="FontFamily" Value="{StaticResource DockFont}"/>
-            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="FontSize" Value="11"/>
             <Setter Property="Foreground" Value="{DynamicResource DockMuted}"/>
             <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
         </Style>
@@ -240,12 +240,12 @@
                   ToolTip="{Binding Presentation.Tip}" AutomationProperties.Name="{Binding Presentation.Tip}">
                 <Border x:Name="Face" Style="{StaticResource WidgetFace}"/>
                 <Grid x:Name="Content">
-                    <Grid x:Name="Single" Margin="9,3">
+                    <Grid x:Name="Single" Margin="6,3">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="Auto"/>
                             <ColumnDefinition Width="*"/>
                         </Grid.ColumnDefinitions>
-                        <StackPanel VerticalAlignment="Center" Margin="0,0,8,0" Visibility="{Binding Presentation.HasMarker, Converter={StaticResource Show}}">
+                        <StackPanel VerticalAlignment="Center" Margin="0,0,5,0" Visibility="{Binding Presentation.HasMarker, Converter={StaticResource Show}}">
                             <TextBlock Text="{Binding Presentation.Glyph}" FontFamily="{StaticResource Glyphs}" FontSize="18"
                                        Foreground="{DynamicResource DockInk}" Visibility="{Binding Presentation.HasGlyph, Converter={StaticResource Show}}"/>
                             <TextBlock Text="{Binding Presentation.Symbol}" FontFamily="Segoe UI Symbol" FontSize="21"
@@ -256,10 +256,10 @@
                             <TextBlock Text="{Binding Presentation.Caption}" Style="{StaticResource WidgetCaption}"/>
                         </StackPanel>
                     </Grid>
-                    <Grid x:Name="Dual" Margin="9,3" Visibility="Collapsed">
+                    <Grid x:Name="Dual" Margin="6,3" Visibility="Collapsed">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*"/>
-                            <ColumnDefinition Width="13"/>
+                            <ColumnDefinition Width="9"/>
                             <ColumnDefinition Width="*"/>
                         </Grid.ColumnDefinitions>
                         <StackPanel VerticalAlignment="Center">
@@ -272,15 +272,15 @@
                             <TextBlock Text="{Binding Presentation.SecondCaption}" Style="{StaticResource WidgetCaption}"/>
                         </StackPanel>
                     </Grid>
-                    <Grid x:Name="Rates" Margin="9,2" Visibility="Collapsed">
+                    <Grid x:Name="Rates" Margin="6,2" Visibility="Collapsed">
                         <Grid.RowDefinitions>
                             <RowDefinition/>
                             <RowDefinition/>
                         </Grid.RowDefinitions>
-                        <TextBlock Style="{StaticResource WidgetValue}" VerticalAlignment="Center"><Run Text="{Binding Presentation.Value}"/><Run Text=" "/><Run Text="{Binding Presentation.Unit}" FontSize="13" FontWeight="Normal"/></TextBlock>
-                        <TextBlock Grid.Row="1" Style="{StaticResource WidgetValue}" VerticalAlignment="Center"><Run Text="{Binding Presentation.SecondValue}"/><Run Text=" "/><Run Text="{Binding Presentation.SecondUnit}" FontSize="13" FontWeight="Normal"/></TextBlock>
+                        <TextBlock Style="{StaticResource WidgetValue}" VerticalAlignment="Center"><Run Text="{Binding Presentation.Value}"/><Run Text=" "/><Run Text="{Binding Presentation.Unit}" FontSize="11" FontWeight="Normal"/></TextBlock>
+                        <TextBlock Grid.Row="1" Style="{StaticResource WidgetValue}" VerticalAlignment="Center"><Run Text="{Binding Presentation.SecondValue}"/><Run Text=" "/><Run Text="{Binding Presentation.SecondUnit}" FontSize="11" FontWeight="Normal"/></TextBlock>
                     </Grid>
-                    <Grid x:Name="Tracks" Margin="9,0,9,3" Height="2" VerticalAlignment="Bottom">
+                    <Grid x:Name="Tracks" Margin="6,0,6,2" Height="2" VerticalAlignment="Bottom">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*"/>
                             <ColumnDefinition x:Name="TrackGap" Width="0"/>
@@ -300,15 +300,15 @@
                         </Grid>
                     </Grid>
                     <TextBlock x:Name="Paper" Text="{Binding Presentation.Paper}" Style="{StaticResource WidgetCaption}"
-                               Foreground="{DynamicResource DockInk}" TextWrapping="Wrap" MaxHeight="52" LineHeight="17"
-                               LineStackingStrategy="BlockLineHeight" Margin="9,5" VerticalAlignment="Center" Visibility="Collapsed"/>
+                               Foreground="{DynamicResource DockInk}" TextWrapping="Wrap" MaxHeight="36" LineHeight="14"
+                               LineStackingStrategy="BlockLineHeight" Margin="6,4" VerticalAlignment="Center" Visibility="Collapsed"/>
                 </Grid>
             </Grid>
             <DataTemplate.Triggers>
                 <DataTrigger Binding="{Binding Presentation.Dual}" Value="True">
                     <Setter TargetName="Single" Property="Visibility" Value="Collapsed"/>
                     <Setter TargetName="Dual" Property="Visibility" Value="Visible"/>
-                    <Setter TargetName="TrackGap" Property="Width" Value="13"/>
+                    <Setter TargetName="TrackGap" Property="Width" Value="9"/>
                     <Setter TargetName="SecondTrack" Property="Width" Value="*"/>
                 </DataTrigger>
                 <DataTrigger Binding="{Binding Presentation.Stacked}" Value="True">
@@ -333,13 +333,13 @@
             <Grid Style="{StaticResource WidgetRoot}" Width="{DynamicResource WideSize}" MinWidth="224"
                   ToolTip="{Binding Tip}" AutomationProperties.Name="{Binding Tip}">
                 <Border Style="{StaticResource WidgetFace}"/>
-                <Grid Margin="9,7">
+                <Grid Margin="6,4">
                     <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="44"/>
+                        <ColumnDefinition Width="34"/>
                         <ColumnDefinition Width="*"/>
                         <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
-                    <Border Width="44" Height="44" CornerRadius="6" Background="{DynamicResource TileFace}" VerticalAlignment="Center">
+                    <Border Width="34" Height="34" CornerRadius="6" Background="{DynamicResource TileFace}" VerticalAlignment="Center">
                         <Grid>
                             <TextBlock Text="&#xE8D6;" FontFamily="{StaticResource Glyphs}" FontSize="16" Foreground="{DynamicResource DockInk}"
                                        HorizontalAlignment="Center" VerticalAlignment="Center"/>
@@ -379,13 +379,13 @@
             <Grid Style="{StaticResource WidgetRoot}" Width="{DynamicResource WiderSize}" MinWidth="296"
                   ToolTip="{Binding Tip}" AutomationProperties.Name="{Binding Tip}">
                 <Border Style="{StaticResource WidgetFace}"/>
-                <Grid Margin="9,7">
+                <Grid Margin="6,4">
                     <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="44"/>
+                        <ColumnDefinition Width="34"/>
                         <ColumnDefinition Width="*"/>
                         <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
-                    <Border Width="44" Height="44" CornerRadius="6" Background="{DynamicResource TileFace}" VerticalAlignment="Center">
+                    <Border Width="34" Height="34" CornerRadius="6" Background="{DynamicResource TileFace}" VerticalAlignment="Center">
                         <Grid>
                             <TextBlock Text="&#xE8D6;" FontFamily="{StaticResource Glyphs}" FontSize="16" Foreground="{DynamicResource DockInk}"
                                        HorizontalAlignment="Center" VerticalAlignment="Center"/>
@@ -437,13 +437,13 @@
                     <Border.Background><ImageBrush ImageSource="{Binding Backdrop}" Stretch="Fill"/></Border.Background>
                 </Border>
                 <Border CornerRadius="10" Background="#D9252934"/>
-                <Grid Margin="9,7">
+                <Grid Margin="6,4">
                     <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="44"/>
+                        <ColumnDefinition Width="34"/>
                         <ColumnDefinition Width="*"/>
                         <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
-                    <Border Width="44" Height="44" CornerRadius="6" Background="{DynamicResource TileFace}" VerticalAlignment="Center">
+                    <Border Width="34" Height="34" CornerRadius="6" Background="{DynamicResource TileFace}" VerticalAlignment="Center">
                         <Grid>
                             <TextBlock Text="&#xE8D6;" FontFamily="{StaticResource Glyphs}" FontSize="16" Foreground="White"
                                        HorizontalAlignment="Center" VerticalAlignment="Center"/>
