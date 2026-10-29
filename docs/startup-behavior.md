@@ -46,6 +46,8 @@ WinDock 不写入或删除任何 `StartupApproved` 值，也不修改启动策�
 | `startupAction` | 保留现状、保持未登记，或迁移原有命令路径 |
 | `settingsPreserved` | 启动后核对所有已有设置值和环境文件未丢失或重置 |
 | `userDataBackup` | 更新前完整用户目录的备份位置 |
+| `installedUserResourcesPreserved` | 安装目录中已有 shortcuts 和 icons 文件保持原字节 |
+| `installedUserResourceFilesVerified` | 核对的安装目录用户资源文件数 |
 | `startupReady` | 普通启动和当前动画设置所需的登录任务均已核对就绪 |
 | `loginCycleTested` | 是否实际完成登录验证；本次保持 false |
 

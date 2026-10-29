@@ -118,6 +118,58 @@ function Assert-UpdateUserDataPreserved($Snapshot) {
     }
 }
 
+function Assert-UpdatePackageResourceBoundaries($Entries, [string]$Directory) {
+    $root = [IO.Path]::GetFullPath($Directory).TrimEnd('\', '/')
+    foreach ($entry in $Entries) {
+        $target = [IO.Path]::GetFullPath($entry.Target)
+        if (-not $target.StartsWith($root + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'A package file is outside the installation directory.'
+        }
+        $relative = [IO.Path]::GetRelativePath($root, $target)
+        $topDirectory = ($relative -split '[\\/]', 2)[0]
+        if ($topDirectory -in @('shortcuts', 'icons')) {
+            throw ('The package would overwrite an installed user resource: ' + $relative)
+        }
+    }
+}
+
+function Get-UpdateInstalledResources([string]$Directory) {
+    $root = [IO.Path]::GetFullPath($Directory).TrimEnd('\', '/')
+    $files = @(foreach ($name in @('shortcuts', 'icons')) {
+        $folder = Join-Path $root $name
+        if (-not (Test-Path -LiteralPath $folder)) { continue }
+        if (-not (Test-Path -LiteralPath $folder -PathType Container)) { throw ('An installed resource directory is a file: ' + $name) }
+        foreach ($file in Get-UpdateUserDataFiles $folder) {
+            [pscustomobject]@{ Relative = Join-Path $name $file.Relative; Hash = $file.Hash }
+        }
+    })
+    return [pscustomobject]@{ Directory = $root; Files = $files }
+}
+
+function Assert-UpdateInstalledResourcesPreserved($Snapshot) {
+    $current = Get-UpdateInstalledResources $Snapshot.Directory
+    $hashes = @{}
+    foreach ($file in $current.Files) { $hashes[$file.Relative] = $file.Hash }
+    foreach ($file in $Snapshot.Files) {
+        if ($hashes[$file.Relative] -cne $file.Hash) {
+            throw ('An installed user resource changed: ' + $file.Relative)
+        }
+    }
+}
+
+function Copy-UpdatePackageFiles($Entries, [Collections.Generic.List[object]]$Copied) {
+    foreach ($entry in $Entries) {
+        New-Item -ItemType Directory -Path (Split-Path -Parent $entry.Target) -Force | Out-Null
+        if ((Test-Path -LiteralPath $entry.Target) -and
+            (Get-FileHash -LiteralPath $entry.Target -Algorithm SHA256).Hash -eq $entry.Hash) { continue }
+        $Copied.Add($entry)
+        Copy-Item -LiteralPath $entry.Source -Destination $entry.Target -Force
+        if ((Get-FileHash -LiteralPath $entry.Target -Algorithm SHA256).Hash -ne $entry.Hash) {
+            throw ('Installed file checksum mismatch: ' + $entry.Relative)
+        }
+    }
+}
+
 function Get-UpdateStartupPlan($Before, [string]$Executable) {
     $command = '"' + [IO.Path]::GetFullPath($Executable) + '" --tray'
     $recognized = $Before.registered -eq $true -and $Before.runValue -is [string] -and

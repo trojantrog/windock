@@ -54,6 +54,7 @@ if (@($entries | Select-Object -ExpandProperty Relative -Unique).Count -ne $entr
 if ($entries.Relative -contains 'SHA256SUMS.txt') { throw 'The checksum manifest cannot include itself.' }
 $entries += [pscustomobject]@{ Relative = 'SHA256SUMS.txt'; Source = $manifest
     Target = (Join-Path $destination 'SHA256SUMS.txt'); Hash = (Get-FileHash -LiteralPath $manifest -Algorithm SHA256).Hash }
+Assert-UpdatePackageResourceBoundaries $entries $destination
 $version = (Get-Item -LiteralPath (Join-Path $package 'WinDock.exe')).VersionInfo.ProductVersion
 $buildInfo = Get-Content -LiteralPath (Join-Path $package 'build-info.json') -Raw | ConvertFrom-Json
 if ($version -ne $buildInfo.productVersion) { throw 'Package version does not match its build record.' }
@@ -91,6 +92,9 @@ $backup = Join-Path $backupBase ('install-' + (Get-Date -Format 'yyyyMMdd-HHmmss
 New-Item -ItemType Directory -Path $backup -Force | Out-Null
 $installedBefore = Join-Path $backup 'installed'
 if (Test-Path -LiteralPath $destination) {
+    foreach ($item in Get-ChildItem -LiteralPath $destination -Recurse -Force) {
+        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'The installation contains a linked file or directory.' }
+    }
     Copy-Item -LiteralPath $destination -Destination $installedBefore -Recurse
     foreach ($original in Get-ChildItem -LiteralPath $destination -File -Recurse -Force) {
         $saved = Join-Path $installedBefore ([IO.Path]::GetRelativePath($destination, $original.FullName))
@@ -253,18 +257,10 @@ try {
     $stopped = $true
     $userData = Backup-UpdateUserData $userDirectory (Join-Path $backup 'user-data')
     $userData.Files | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $backup 'user-data-sha256.json') -Encoding utf8
+    $installedResources = Get-UpdateInstalledResources $destination
+    $installedResources.Files | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $backup 'installed-user-resources-sha256.json') -Encoding utf8
     New-Item -ItemType Directory -Path $destination -Force | Out-Null
-    foreach ($entry in $entries) {
-        $parent = Split-Path -Parent $entry.Target
-        New-Item -ItemType Directory -Path $parent -Force | Out-Null
-        if ((Test-Path -LiteralPath $entry.Target) -and
-            (Get-FileHash -LiteralPath $entry.Target -Algorithm SHA256).Hash -eq $entry.Hash) { continue }
-        $copied.Add($entry)
-        Copy-Item -LiteralPath $entry.Source -Destination $entry.Target -Force
-        if ((Get-FileHash -LiteralPath $entry.Target -Algorithm SHA256).Hash -ne $entry.Hash) {
-            throw ('Installed file checksum mismatch: ' + $entry.Relative)
-        }
-    }
+    Copy-UpdatePackageFiles $entries $copied
     $startupCommand = $startupPlan.Command
     Assert-UpdateStartupUnchanged $ordinaryStartupBefore (Get-OrdinaryStartupState $installedExe)
     if ($startupPlan.Write) { $startupChanged = $true }
@@ -274,12 +270,14 @@ try {
     }
     Assert-UpdateStartupPreserved $startupPlan (Get-OrdinaryStartupState $installedExe)
     Assert-UpdateUserDataUnchanged $userData
+    Assert-UpdateInstalledResourcesPreserved $installedResources
     $launched = Start-Process -FilePath $installedExe -ArgumentList '--tray' -WorkingDirectory $destination -WindowStyle Hidden -PassThru
     Start-Sleep -Seconds 2
     if ($launched.HasExited -or [WinDockDeploymentProbe]::PathFor($launched.Id) -ine $installedExe) {
         throw 'Updated WinDock did not remain running from the installation directory.'
     }
     Assert-UpdateUserDataPreserved $userData
+    Assert-UpdateInstalledResourcesPreserved $installedResources
     try { $settingsAfter = Get-Content -LiteralPath $settingsFile -Raw | ConvertFrom-Json }
     catch { $settingsAfter = Get-Content -LiteralPath ($settingsFile + '.bak') -Raw | ConvertFrom-Json }
     $pinsPreserved = $true
@@ -359,6 +357,7 @@ try {
         processId = $launched.Id; startupCommand = $startupCommand; backup = $backup
         startupChoicePreserved = $true; startupAction = $startupPlan.Action; settingsPreserved = $true
         userDataBackup = $userData.BackupDirectory; userDataFilesVerifiedBeforeLaunch = $userData.Files.Count
+        installedUserResourcesPreserved = $true; installedUserResourceFilesVerified = $installedResources.Files.Count
         ordinaryStartup = $ordinaryStartup; animationLogin = $animationLogin; startupReady = $startupReady
         verifiedFiles = $entries.Count; pinsPreserved = $pinsPreserved; replaceTaskbar = $settingsAfter.dock.replaceTaskbar
         nativeTaskbarWindowVisible = $nativeTaskbarVisible

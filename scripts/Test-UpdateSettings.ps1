@@ -133,6 +133,67 @@ Assert-True ([IO.File]::ReadAllText((Join-Path $fallbackDirectory 'settings.json
 Assert-Throws { Backup-UpdateUserData $userDirectory (Join-Path $userDirectory 'nested-backup') } 'A user data backup inside the original was accepted.'
 $results.Add('Recoverable settings originals stay intact and overlapping backups are rejected')
 
+$oldInstallation = Join-Path $fixtureRootFull 'installed'
+$newPackage = Join-Path $fixtureRootFull 'package'
+New-Item -ItemType Directory -Path (Join-Path $oldInstallation 'shortcuts'), (Join-Path $oldInstallation 'icons'), $newPackage -Force | Out-Null
+$shortcutPath = Join-Path $oldInstallation 'shortcuts/editor.lnk'
+$shortcutBytes = [byte[]]@(76, 0, 0, 0, 1, 20, 2, 0, 0, 0, 0, 0, 192, 0, 0, 0, 0, 0, 0, 70) + [Text.Encoding]::Unicode.GetBytes('C:\Windows\notepad.exe')
+[IO.File]::WriteAllBytes($shortcutPath, $shortcutBytes)
+$iconPath = Join-Path $oldInstallation 'icons/editor.png'
+$iconBytes = [Convert]::FromBase64String('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a8e0AAAAASUVORK5CYII=')
+[IO.File]::WriteAllBytes($iconPath, $iconBytes)
+foreach ($name in @('WinDock.exe', 'WinDock.component.dll')) {
+    [IO.File]::WriteAllText((Join-Path $oldInstallation $name), ('old ' + $name))
+    [IO.File]::WriteAllText((Join-Path $newPackage $name), ('new ' + $name))
+}
+[IO.File]::WriteAllText((Join-Path $oldInstallation 'user-note.txt'), 'keep this installed file')
+$installedSnapshot = Get-UpdateInstalledResources $oldInstallation
+$packageEntries = @(foreach ($name in @('WinDock.exe', 'WinDock.component.dll')) {
+    [pscustomobject]@{ Relative = $name; Source = Join-Path $newPackage $name; Target = Join-Path $oldInstallation $name
+        Hash = (Get-FileHash -LiteralPath (Join-Path $newPackage $name) -Algorithm SHA256).Hash }
+})
+Assert-UpdatePackageResourceBoundaries $packageEntries $oldInstallation
+$copied = [Collections.Generic.List[object]]::new()
+Copy-UpdatePackageFiles $packageEntries $copied
+Assert-UpdateInstalledResourcesPreserved $installedSnapshot
+Assert-True ($copied.Count -eq 2) 'The new product files were not installed.'
+Assert-True ([IO.File]::ReadAllText((Join-Path $oldInstallation 'WinDock.exe')) -ceq 'new WinDock.exe') 'The old executable was restored over the update.'
+Assert-True ([IO.File]::ReadAllText((Join-Path $oldInstallation 'WinDock.component.dll')) -ceq 'new WinDock.component.dll') 'The old DLL was restored over the update.'
+Assert-True ([IO.File]::ReadAllText((Join-Path $oldInstallation 'user-note.txt')) -ceq 'keep this installed file') 'An unlisted installed file was removed.'
+Assert-True ($installedSnapshot.Files.Count -eq 2) 'The shortcut and icon were not tracked.'
+$results.Add('A real file overlay replaces old program files and preserves shortcut, icon and unlisted user bytes')
+
+foreach ($relative in @('shortcuts/editor.lnk', 'icons/editor.png', 'SHORTCUTS/other.dll', 'nested/../shortcuts/editor.lnk', '../outside.exe')) {
+    $entry = [pscustomobject]@{ Relative = $relative; Target = [IO.Path]::GetFullPath((Join-Path $oldInstallation $relative)) }
+    Assert-Throws { Assert-UpdatePackageResourceBoundaries @($entry) $oldInstallation } ('A package could overwrite or escape user resources: ' + $relative)
+}
+$results.Add('Packages cannot overwrite shortcuts/icons or escape the installation boundary')
+
+[IO.File]::WriteAllText($iconPath, 'unexpected image change')
+Assert-Throws { Assert-UpdateInstalledResourcesPreserved $installedSnapshot } 'A changed installed icon was accepted.'
+[IO.File]::WriteAllBytes($iconPath, $iconBytes)
+$recoveryInstallation = Join-Path $fixtureRootFull 'recovered-shortcuts-only'
+New-Item -ItemType Directory -Path (Join-Path $recoveryInstallation 'shortcuts') -Force | Out-Null
+[IO.File]::WriteAllBytes((Join-Path $recoveryInstallation 'shortcuts/editor.lnk'), $shortcutBytes)
+$recoveredSnapshot = Get-UpdateInstalledResources $recoveryInstallation
+$recoveryEntries = @($packageEntries | ForEach-Object {
+    [pscustomobject]@{ Relative = $_.Relative; Source = $_.Source; Target = Join-Path $recoveryInstallation $_.Relative; Hash = $_.Hash }
+})
+Assert-UpdatePackageResourceBoundaries $recoveryEntries $recoveryInstallation
+Copy-UpdatePackageFiles $recoveryEntries ([Collections.Generic.List[object]]::new())
+Assert-UpdateInstalledResourcesPreserved $recoveredSnapshot
+Assert-True (Test-Path -LiteralPath (Join-Path $recoveryInstallation 'WinDock.exe')) 'An installation with only recovered shortcuts could not be completed.'
+$missingInstallation = Join-Path $fixtureRootFull 'previously-missing-installation'
+$missingSnapshot = Get-UpdateInstalledResources $missingInstallation
+$missingEntries = @($packageEntries | ForEach-Object {
+    [pscustomobject]@{ Relative = $_.Relative; Source = $_.Source; Target = Join-Path $missingInstallation $_.Relative; Hash = $_.Hash }
+})
+Assert-UpdatePackageResourceBoundaries $missingEntries $missingInstallation
+Copy-UpdatePackageFiles $missingEntries ([Collections.Generic.List[object]]::new())
+Assert-UpdateInstalledResourcesPreserved $missingSnapshot
+Assert-True (Test-Path -LiteralPath (Join-Path $missingInstallation 'WinDock.exe')) 'A missing fixed installation directory could not be recreated.'
+$results.Add('Recovered shortcuts survive reinstallation and a missing fixed directory is recreated')
+
 $installedExe = 'D:\WinDock\WinDock.exe'
 $currentCommand = '"D:\WinDock\WinDock.exe" --tray'
 $oldCommand = '"C:\Downloads\WinDock-preview\WinDock.exe" --tray'
@@ -197,6 +258,7 @@ $installer = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'Install-LocalBuild
 $wrapper = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'Update-InstalledBuild.ps1'))
 Assert-True ($installer.Contains("[string]`$DestinationPath = 'D:\WinDock'")) 'The default installation directory is not fixed.'
 Assert-True ($wrapper.Contains("`$destination = 'D:\WinDock'")) 'The update entry does not target the existing installation.'
+Assert-True (-not $wrapper.Contains('Test-Path')) 'The update entry rejects a missing executable before recovery installation can run.'
 Assert-True (-not $installer.Contains('Save-SettingsWithNativeTaskbar') -and -not $installer.Contains('[switch]$EnableAnimationStartup = $true')) 'A forced settings or animation default returned.'
 Assert-True ($installer.IndexOf('Assert-UpdateUserDataUnchanged $userData') -lt $installer.IndexOf('$launched = Start-Process')) 'User data must be checked before the updated executable starts.'
 Assert-True ($installer.Contains('Assert-UpdateUserDataPreserved $userData')) 'The running application settings are not checked.'
