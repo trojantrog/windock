@@ -92,13 +92,19 @@ public static class ShellLinks
             var link = (IShellLinkW)new ShellLinkCoClass();
             ((IPersistFile)link).Load(lnkPath, 0);
             const int capacity = 520;
-            const int maxPath = 260;
             var sb = new StringBuilder(capacity);
             link.GetPath(sb, capacity, IntPtr.Zero, 0);
-            complete = sb.Length > 0 && sb.Length < Math.Min(capacity, maxPath) - 1;
-            return sb.Length > 0 ? sb.ToString() : null;
+            var target = sb.Length > 0 ? sb.ToString() : null;
+            complete = IsTargetComplete(target, capacity);
+            return target;
         }
         catch (Exception e) when (e is COMException or IOException or UnauthorizedAccessException) { return null; }
+    }
+
+    public static bool IsTargetComplete(string? target, int capacity)
+    {
+        const int maxPath = 260;
+        return target is { Length: > 0 } && target.Length < Math.Min(capacity, maxPath) - 1;
     }
 
     public static string? ReadArguments(string lnkPath)

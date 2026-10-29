@@ -8,6 +8,27 @@ public class PinIdentityTests
     const string ChromeProxy = @"C:\Program Files\Google\Chrome\Application\chrome_proxy.exe";
     const string Explorer = @"C:\Windows\explorer.exe";
 
+    [Theory]
+    [InlineData(258, 520, true)]
+    [InlineData(259, 520, false)]
+    [InlineData(519, 520, false)]
+    [InlineData(30, 32, true)]
+    [InlineData(31, 32, false)]
+    public void Target_read_completeness_rejects_MAX_PATH_and_buffer_boundaries(int length, int capacity, bool expected)
+    {
+        var target = @"C:\Apps\".PadRight(length - 4, 'x') + ".exe";
+
+        Assert.Equal(expected, ShellLinks.IsTargetComplete(target, capacity));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    public void Missing_target_reads_are_unconfirmed(string? target)
+    {
+        Assert.False(ShellLinks.IsTargetComplete(target, 520));
+    }
+
     [Fact]
     public void Reload_keeps_both_Chrome_web_apps_sharing_chrome_proxy()
     {
