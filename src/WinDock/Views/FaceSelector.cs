@@ -8,6 +8,7 @@ namespace WinDock.Views;
 public sealed class FaceSelector : DataTemplateSelector
 {
     public DataTemplate? Compact { get; set; }
+    public DataTemplate? Readable { get; set; }
     public DataTemplate? MusicPause { get; set; }
     public DataTemplate? MusicFull { get; set; }
     public DataTemplate? MusicBackdrop { get; set; }
@@ -21,5 +22,5 @@ public sealed class FaceSelector : DataTemplateSelector
             WidgetSpec.BackdropSize => MusicBackdrop,
             _ => MusicPause
         }
-        : null;
+        : item is WidgetTile ? Readable : null;
 }
