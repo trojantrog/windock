@@ -12,6 +12,18 @@ function Read-UpdateSettings([string]$Path) {
     finally { $document.Dispose() }
 }
 
+function Get-UpdateNumberIdentity([string]$Text) {
+    $number = [regex]::Match($Text, '^(-?)([0-9]+)(?:\.([0-9]+))?(?:[eE]([+-]?[0-9]+))?$')
+    if (-not $number.Success) { throw 'A saved number could not be read.' }
+    $digits = ($number.Groups[2].Value + $number.Groups[3].Value).TrimStart('0')
+    if (-not $digits) { return '0' }
+    $significand = $digits.TrimEnd('0')
+    $exponent = [Numerics.BigInteger]::Zero
+    if ($number.Groups[4].Success) { $exponent = [Numerics.BigInteger]::Parse($number.Groups[4].Value, [Globalization.CultureInfo]::InvariantCulture) }
+    $exponent = $exponent - $number.Groups[3].Value.Length + $digits.Length - $significand.Length
+    return $number.Groups[1].Value + $significand + 'e' + $exponent.ToString([Globalization.CultureInfo]::InvariantCulture)
+}
+
 function Assert-UpdateSettingsPreserved([Text.Json.JsonElement]$Before, [Text.Json.JsonElement]$After, [string]$Path = 'settings') {
     if ($Before.ValueKind -ne $After.ValueKind) { throw ('A saved setting changed type: ' + $Path) }
     switch ($Before.ValueKind) {
@@ -29,12 +41,9 @@ function Assert-UpdateSettingsPreserved([Text.Json.JsonElement]$Before, [Text.Js
             }
         }
         Number {
-            $oldNumber = [decimal]0
-            $newNumber = [decimal]0
-            $same = if ($Before.TryGetDecimal([ref]$oldNumber) -and $After.TryGetDecimal([ref]$newNumber)) {
-                $oldNumber -eq $newNumber
-            } else { $Before.GetDouble() -eq $After.GetDouble() }
-            if (-not $same) { throw ('A saved number changed: ' + $Path) }
+            if ((Get-UpdateNumberIdentity $Before.GetRawText()) -cne (Get-UpdateNumberIdentity $After.GetRawText())) {
+                throw ('A saved number changed: ' + $Path)
+            }
         }
         String {
             if ($Before.GetString() -cne $After.GetString()) { throw ('A saved value changed: ' + $Path) }

@@ -110,6 +110,40 @@ $normalized = ($source | ConvertFrom-Json | ConvertTo-Json -Depth 20 -Compress).
 Assert-UpdateSettingsPreserved $unchanged (Read-UpdateSettings (Join-Path $fixtureRootFull 'normalized.json'))
 $results.Add('Formatting and equivalent numeric JSON do not trigger a reset report')
 
+foreach ($pair in @(
+    @('79228162514264337593543950336', '79228162514264337593543950337'),
+    @('0.1234567890123456789012345678901', '0.1234567890123456789012345678902'),
+    @('1.00000000000000000000000000001', '1'),
+    @('1e-100', '2e-100'),
+    @('1e1000', '2e1000'),
+    @('1e1000000000000000000000000000000', '2e1000000000000000000000000000000'),
+    @('-1', '1')
+)) {
+    $beforePath = Join-Path $fixtureRootFull 'number-before.json'
+    $afterPath = Join-Path $fixtureRootFull 'number-after.json'
+    [IO.File]::WriteAllText($beforePath, ('{"unknownNumber":' + $pair[0] + '}'))
+    [IO.File]::WriteAllText($afterPath, ('{"unknownNumber":' + $pair[1] + '}'))
+    Assert-Throws { Assert-UpdateSettingsPreserved (Read-UpdateSettings $beforePath) (Read-UpdateSettings $afterPath) } ('Distinct JSON numbers were treated as equal: ' + $pair[0] + ' and ' + $pair[1])
+}
+$results.Add('Adjacent large integers and high-precision decimals remain distinct without rounding or underflow')
+
+foreach ($pair in @(
+    @('57', '57.0'),
+    @('1.230000e4', '12300'),
+    @('79228162514264337593543950336', '79228162514264337593543950336.0'),
+    @('0.1234567890123456789012345678901', '0.12345678901234567890123456789010'),
+    @('1e-1000', '10e-1001'),
+    @('1e1000000000000000000000000000000', '10e999999999999999999999999999999'),
+    @('-0e999999999999999999999999999999', '0')
+)) {
+    $beforePath = Join-Path $fixtureRootFull 'number-before.json'
+    $afterPath = Join-Path $fixtureRootFull 'number-after.json'
+    [IO.File]::WriteAllText($beforePath, ('{"unknownNumber":' + $pair[0] + '}'))
+    [IO.File]::WriteAllText($afterPath, ('{"unknownNumber":' + $pair[1] + '}'))
+    Assert-UpdateSettingsPreserved (Read-UpdateSettings $beforePath) (Read-UpdateSettings $afterPath)
+}
+$results.Add('Equivalent numeric text, trailing zeros and exponents compare exactly at arbitrary precision')
+
 [IO.File]::WriteAllText($settingsFile, $flagsReversed)
 Assert-Throws { Assert-UpdateUserDataUnchanged $snapshot } 'A settings write before launch was accepted.'
 Assert-Throws { Assert-UpdateUserDataPreserved $snapshot } 'A settings reset after launch was accepted.'
