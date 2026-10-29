@@ -365,6 +365,237 @@ $results.Add('Registry value types remain intact; unreadable and concurrent stat
 
 $installer = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'Install-LocalBuild.ps1'))
 $wrapper = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'Update-InstalledBuild.ps1'))
+$helperDirectory = Join-Path $fixtureRootFull 'runtime-helper'
+New-Item -ItemType Directory -Path $helperDirectory | Out-Null
+$helperSource = Join-Path $helperDirectory 'UpdateFixture.cs'
+$helperExe = Join-Path $helperDirectory 'UpdateFixture.exe'
+[IO.File]::WriteAllText($helperSource, @'
+using System;
+using System.Diagnostics;
+using System.IO;
+using System.Threading;
+using System.Windows.Forms;
+class UpdateFixture {
+    [STAThread] static void Main(string[] args) {
+        if (args[0] == "watchdog") {
+            File.WriteAllText(Path.Combine(args[2], "watchdog.pid"), Process.GetCurrentProcess().Id.ToString());
+            try { using (var owner = Process.GetProcessById(int.Parse(args[1]))) owner.WaitForExit(); }
+            catch (ArgumentException) { }
+            Thread.Sleep(int.Parse(args[3]));
+            File.WriteAllText(Path.Combine(args[2], "watchdog-exited"), "done");
+            return;
+        }
+        var directory = args[2];
+        using (var signal = EventWaitHandle.OpenExisting(args[1])) {
+            Thread.Sleep(int.Parse(args[3]));
+            var ready = Path.Combine(directory, "ready");
+            File.WriteAllText(ready, "ready");
+            var timer = new System.Windows.Forms.Timer();
+            var elapsed = Stopwatch.StartNew();
+            var context = new ApplicationContext();
+            timer.Interval = 25;
+            timer.Tick += delegate {
+                if (elapsed.ElapsedMilliseconds >= 150 && elapsed.ElapsedMilliseconds < 450) {
+                    if (File.Exists(ready)) File.Delete(ready);
+                } else if (!File.Exists(ready)) File.WriteAllText(ready, "ready");
+                if (signal.WaitOne(0) || elapsed.ElapsedMilliseconds > 15000) {
+                    var child = new ProcessStartInfo(Application.ExecutablePath,
+                        "watchdog " + Process.GetCurrentProcess().Id + " \"" + directory + "\" " + args[4]);
+                    child.UseShellExecute = false; child.CreateNoWindow = true;
+                    using (var watchdog = Process.Start(child)) { }
+                    context.ExitThread();
+                }
+            };
+            timer.Start(); Application.Run(context); timer.Dispose();
+        }
+    }
+}
+'@)
+$compiler = Join-Path $env:WINDIR 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
+& $compiler /nologo /target:winexe /reference:System.Windows.Forms.dll ('/out:' + $helperExe) $helperSource
+Assert-True ($LASTEXITCODE -eq 0) 'The isolated runtime helper could not be compiled.'
+Add-Type -TypeDefinition @'
+using System;
+using System.Diagnostics;
+using System.IO;
+public static class WinDockDeploymentProbe {
+    public static string ReadyFile;
+    public static string PathFor(int pid) {
+        try { using (var process = Process.GetProcessById(pid)) return process.MainModule.FileName; }
+        catch (ArgumentException) { return null; }
+        catch (InvalidOperationException) { return null; }
+        catch (System.ComponentModel.Win32Exception) { return null; }
+    }
+    public static IntPtr FindWindow(string cls, string title) { return new IntPtr(1); }
+    public static bool IsWindowVisible(IntPtr window) { return !File.Exists(ReadyFile); }
+}
+'@
+$startupStart = $installer.IndexOf('    $launched = Start-Process')
+$startupEndText = '    $deploymentVerified = $true'
+$startupEnd = $installer.IndexOf($startupEndText, $startupStart)
+Assert-True ($startupStart -ge 0 -and $startupEnd -gt $startupStart) 'The real installer startup block was not found.'
+$startupBlock = [scriptblock]::Create($installer.Substring($startupStart, $startupEnd + $startupEndText.Length - $startupStart))
+$runtimeDirectory = Join-Path $fixtureRootFull 'delayed-runtime'
+New-Item -ItemType Directory -Path $runtimeDirectory | Out-Null
+$eventName = 'WinDock.UpdateFixture.' + [Guid]::NewGuid().ToString('N')
+$fixtureSignal = [Threading.EventWaitHandle]::new($false, [Threading.EventResetMode]::AutoReset, $eventName)
+$helperArguments = @('main', $eventName, ('"' + $runtimeDirectory + '"'), '2500', '900')
+$installedExe = $helperExe
+$userData = $snapshot
+$installedResources = Get-UpdateInstalledResources $runtimeDirectory
+[WinDockDeploymentProbe]::ReadyFile = Join-Path $runtimeDirectory 'ready'
+$helperProcess = $null
+try {
+    $startupTimer = [Diagnostics.Stopwatch]::StartNew()
+    $startupResult = & {
+        function Start-Process {
+            param($FilePath, $ArgumentList, $WorkingDirectory, $WindowStyle, [switch]$PassThru)
+            $script:helperProcess = Microsoft.PowerShell.Management\Start-Process -FilePath $FilePath -ArgumentList $helperArguments -WorkingDirectory $helperDirectory -WindowStyle Hidden -PassThru
+            return $script:helperProcess
+        }
+        . $startupBlock
+        [pscustomobject]@{ Verified = $deploymentVerified; State = $startupState }
+    }
+    Assert-True ($startupResult.Verified -and $startupTimer.ElapsedMilliseconds -ge 3900) 'Startup accepted a transient taskbar state or did not wait for delayed readiness.'
+    Assert-UpdateUserDataUnchanged $snapshot
+    $results.Add('The real installer startup block waits for a delayed message loop and a stable taskbar state')
+    $session = [Diagnostics.Process]::GetCurrentProcess().SessionId
+    $readProcessPath = { param($processId) [WinDockDeploymentProbe]::PathFor($processId) }
+    Assert-True (@(Get-UpdateProcesses $helperExe ($session + 1) $readProcessPath).Count -eq 0) 'A different Windows session was included in the update.'
+    Assert-True (@(Get-UpdateProcesses (Join-Path $runtimeDirectory 'UpdateFixture.exe') $session $readProcessPath).Count -eq 0) 'A same-name executable at another path was included in the update.'
+    Assert-Throws { Get-UpdateProcesses $helperExe $session { param($processId) $null } } 'An unreadable live process path was ignored.'
+    $exitTimer = [Diagnostics.Stopwatch]::StartNew()
+    Wait-UpdateProcessesExit $helperExe $session $readProcessPath { [void]$fixtureSignal.Set() }
+    Assert-True ($exitTimer.ElapsedMilliseconds -ge 900 -and (Test-Path -LiteralPath (Join-Path $runtimeDirectory 'watchdog-exited'))) 'Normal shutdown finished before the late watchdog exited.'
+    Assert-True (@(Get-UpdateProcesses $helperExe $session $readProcessPath).Count -eq 0) 'The helper installation still has a running process.'
+    $results.Add('Normal shutdown discovers a late watchdog and waits for it; other paths and sessions are excluded')
+}
+finally {
+    [void]$fixtureSignal.Set()
+    if ($helperProcess) { [void]$helperProcess.WaitForExit(18000) }
+    $watchdogPidFile = Join-Path $runtimeDirectory 'watchdog.pid'
+    if (Test-Path -LiteralPath $watchdogPidFile) {
+        $watchdog = Get-Process -Id ([int][IO.File]::ReadAllText($watchdogPidFile)) -ErrorAction SilentlyContinue
+        if ($watchdog) { [void]$watchdog.WaitForExit(3000) }
+    }
+    $fixtureSignal.Dispose()
+}
+$timeoutTimer = [Diagnostics.Stopwatch]::StartNew()
+Assert-Throws {
+    Wait-UpdateStableState -TimeoutMilliseconds 350 -StableMilliseconds 100 -Probe {
+        [pscustomobject]@{ Ready = $false; Reason = 'The Windows taskbar visibility does not match the saved Dock setting.' }
+    }
+} 'A taskbar mismatch was accepted after the readiness timeout.'
+Assert-True ($timeoutTimer.ElapsedMilliseconds -lt 2000) 'A readiness timeout was not bounded.'
+$transientTimer = [Diagnostics.Stopwatch]::StartNew()
+Assert-Throws {
+    Wait-UpdateStableState -TimeoutMilliseconds 450 -StableMilliseconds 200 -PollMilliseconds 25 -Probe {
+        [pscustomobject]@{ Ready = $transientTimer.ElapsedMilliseconds -lt 100; Reason = 'The taskbar became mismatched again.' }
+    }
+} 'A short-lived matching taskbar state was accepted.'
+$results.Add('Persistent and transient taskbar mismatches fail within the configured deadline')
+
+$parseTokens = $null
+$parseErrors = $null
+$installerAst = [Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'Install-LocalBuild.ps1'), [ref]$parseTokens, [ref]$parseErrors)
+$rollbackAst = $installerAst.Find({ param($node)
+    $node -is [Management.Automation.Language.CatchClauseAst] -and $node.Body.Extent.Text.Contains('Installation incomplete. Backup: ')
+}, $true)
+Assert-True ($null -ne $rollbackAst) 'The real installer rollback block was not found.'
+$rollbackText = $rollbackAst.Body.Extent.Text
+$rollbackBlock = [scriptblock]::Create($rollbackText.Substring(1, $rollbackText.Length - 2))
+$waitExitImplementation = (Get-Command Wait-UpdateProcessesExit).ScriptBlock
+foreach ($timeout in @($false, $true)) {
+    & {
+        $rollbackRoot = Join-Path $fixtureRootFull ('rollback-' + $timeout)
+        $destination = Join-Path $rollbackRoot 'installed'
+        $package = Join-Path $rollbackRoot 'package'
+        $backup = Join-Path $rollbackRoot 'backup'
+        $installedBefore = Join-Path $backup 'installed'
+        New-Item -ItemType Directory -Path $destination, $package -Force | Out-Null
+        $entries = @(foreach ($relative in @('WinDock.component.dll', 'WinDock.added.dll')) {
+            $path = Join-Path $package $relative
+            [IO.File]::WriteAllText($path, ('new ' + $relative))
+            [pscustomobject]@{ Relative = $relative; Source = $path; Target = Join-Path $destination $relative
+                Hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash }
+        })
+        [IO.File]::WriteAllText($entries[0].Target, 'original product bytes')
+        $resources = Get-UpdateInstalledResources $destination
+        $null = Backup-UpdateInstalledFiles $entries $destination $installedBefore $resources
+        $copied = [Collections.Generic.List[object]]::new()
+        Copy-UpdatePackageFiles $entries $copied
+        $startupBefore = '"C:\Previous\WinDock.exe" --tray'
+        $beforeStartup = New-StartupFixture $startupBefore $true 'disabled'
+        $startupPlan = Get-UpdateStartupPlan $beforeStartup $helperExe
+        $currentStartup = New-StartupFixture $startupPlan.Command $true 'disabled'
+        $startupWrites = [Collections.Generic.List[string]]::new()
+        function Get-OrdinaryStartupState([string]$Executable) { return $currentStartup }
+        function New-ItemProperty {
+            param($LiteralPath, $Name, $Value, $PropertyType, [switch]$Force)
+            Assert-True (Test-Path -LiteralPath (Join-Path $destination 'watchdog-exited')) 'Startup restoration ran before watchdog shutdown.'
+            $startupWrites.Add($Value)
+            $currentStartup.runValue = $Value
+            $currentStartup.runKind = $PropertyType
+        }
+        function Wait-UpdateProcessesExit {
+            param($Executable, $Session, $ReadPath, $RequestExit)
+            & $waitExitImplementation $Executable $Session $ReadPath $RequestExit 3000
+        }
+        $runKey = 'fixture-only:Run'
+        $installedExe = $helperExe
+        $session = [Diagnostics.Process]::GetCurrentProcess().SessionId
+        $fixtureEventName = 'WinDock.UpdateFixture.' + [Guid]::NewGuid().ToString('N')
+        $rollbackSignal = [Threading.EventWaitHandle]::new($false, [Threading.EventResetMode]::AutoReset, $fixtureEventName)
+        $launched = Microsoft.PowerShell.Management\Start-Process -FilePath $helperExe -ArgumentList @('main', $fixtureEventName, ('"' + $destination + '"'), '0', '1100') -WindowStyle Hidden -PassThru
+        $deploymentVerified = $false
+        $stopped = $true
+        $startupChanged = $true
+        $previousExe = $null
+        $requestNormalExit = if ($timeout) { { } } else { { [void]$rollbackSignal.Set() } }
+        $readProcessPath = {
+            param($processId)
+            Assert-True ([IO.File]::ReadAllText($entries[0].Target) -ceq 'new WinDock.component.dll') 'Program restoration ran while a same-image process was alive.'
+            [WinDockDeploymentProbe]::PathFor($processId)
+        }
+        $settingsAfterSave = $source.Replace('"iconSize": 57', '"iconSize": 59')
+        [IO.File]::WriteAllText($settingsFile, $settingsAfterSave)
+        $savedHash = (Get-FileHash -LiteralPath $settingsFile -Algorithm SHA256).Hash
+        try {
+            if (-not $timeout) {
+                [void]$rollbackSignal.Set()
+                Assert-True ($launched.WaitForExit(3000)) 'The rollback helper main process did not exit.'
+            }
+            $reportedFailure = $null
+            try { throw 'Injected installation failure.' }
+            catch {
+                try { . $rollbackBlock }
+                catch { $reportedFailure = $_.Exception.Message }
+            }
+            Assert-True ($reportedFailure -like '*Injected installation failure.*') 'Rollback lost the original installation failure.'
+            Assert-True ((Get-FileHash -LiteralPath $settingsFile -Algorithm SHA256).Hash -ceq $savedHash) 'Rollback overwrote settings saved after the backup.'
+            if ($timeout) {
+                Assert-True ([IO.File]::ReadAllText($entries[0].Target) -ceq 'new WinDock.component.dll') 'An exit timeout restored files under a live process.'
+                Assert-True ((Test-Path -LiteralPath $entries[1].Target) -and $startupWrites.Count -eq 0) 'An exit timeout changed files or startup state.'
+                Assert-True ($currentStartup.runValue -ceq $startupPlan.Command) 'An exit timeout changed the startup command.'
+            }
+            else {
+                Assert-True ([IO.File]::ReadAllText($entries[0].Target) -ceq 'original product bytes') 'Rollback did not restore the old product bytes.'
+                Assert-True (-not (Test-Path -LiteralPath $entries[1].Target)) 'Rollback left a new product file behind.'
+                Assert-True ($startupWrites.Count -eq 1) 'Rollback did not restore the startup path exactly once.'
+                Assert-UpdateStartupUnchanged $beforeStartup $currentStartup
+            }
+        }
+        finally {
+            [void]$rollbackSignal.Set()
+            [void]$launched.WaitForExit(18000)
+            & $waitExitImplementation $helperExe $session { param($processId) [WinDockDeploymentProbe]::PathFor($processId) } { [void]$rollbackSignal.Set() } 5000
+            $rollbackSignal.Dispose()
+            [IO.File]::WriteAllText($settingsFile, $source, [Text.UTF8Encoding]::new($true))
+        }
+    }
+}
+$results.Add('The real rollback block waits for the remaining watchdog, restores files and disabled startup, and preserves newly saved settings')
+$results.Add('A normal-exit timeout leaves program files and startup state untouched with the original failure reported')
 Assert-True ($installer.Contains("[string]`$DestinationPath = 'D:\Projects\windock'")) 'The default installation directory is not fixed.'
 Assert-True ($wrapper.Contains("`$destination = 'D:\Projects\windock'")) 'The update entry does not target the existing installation.'
 Assert-True (-not $wrapper.Contains('Test-Path')) 'The update entry rejects a missing executable before recovery installation can run.'
@@ -376,4 +607,6 @@ Assert-True (-not $installer.Contains('Copy-Item -LiteralPath $destination -Dest
 $results.Add('The installer uses the fixed destination and settings checks without forced preferences')
 
 [ordered]@{ passed = $results.Count; checks = $results; fixtureRoot = $fixtureRootFull
-    registryWrites = $false; liveProcessesStopped = $false; nativeProbesExecuted = $false } | ConvertTo-Json -Depth 5
+    registryWrites = $false; liveProcessesStopped = $false; nativeProbesExecuted = $false
+    isolatedRuntimeHelpers = $true; helperMessageLoopProbed = $true; taskbarProbe = 'isolated fixture state'
+    forceTerminationUsed = $false } | ConvertTo-Json -Depth 5

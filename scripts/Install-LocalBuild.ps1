@@ -79,6 +79,11 @@ public static class WinDockDeploymentProbe {
 }
 '@
 $session = [Diagnostics.Process]::GetCurrentProcess().SessionId
+$readProcessPath = { param($processId) [WinDockDeploymentProbe]::PathFor($processId) }
+$requestNormalExit = {
+    $signal = [Threading.EventWaitHandle]::OpenExisting('WinDock.Exit')
+    try { [void]$signal.Set() } finally { $signal.Dispose() }
+}
 $running = @(Get-Process -Name WinDock -ErrorAction SilentlyContinue | Where-Object SessionId -eq $session)
 $previousPaths = @($running | ForEach-Object { [WinDockDeploymentProbe]::PathFor($_.Id) } | Select-Object -Unique)
 if ($running.Count -gt 0 -and ($previousPaths.Count -ne 1 -or -not $previousPaths[0])) {
@@ -234,14 +239,7 @@ try {
         ordinaryStartup = $ordinaryStartupBefore; startupAction = $startupPlan.Action } |
         ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $backup 'before.json') -Encoding utf8
     if ($running.Count) {
-        $signal = [Threading.EventWaitHandle]::OpenExisting('WinDock.Exit')
-        try { [void]$signal.Set() } finally { $signal.Dispose() }
-        $deadline = [DateTime]::UtcNow.AddSeconds(20)
-        do {
-            $remaining = @($running | Where-Object { -not $_.HasExited })
-            if ($remaining.Count) { Start-Sleep -Milliseconds 200 }
-        } while ($remaining.Count -and [DateTime]::UtcNow -lt $deadline)
-        if ($remaining.Count) { throw 'WinDock did not exit normally; installed files were not changed.' }
+        Wait-UpdateProcessesExit $previousExe $session $readProcessPath $requestNormalExit
     }
     $stopped = $true
     $userData = Backup-UpdateUserData $userDirectory (Join-Path $backup 'user-data')
@@ -263,20 +261,29 @@ try {
     Assert-UpdateUserDataUnchanged $userData
     Assert-UpdateInstalledResourcesPreserved $installedResources
     $launched = Start-Process -FilePath $installedExe -ArgumentList '--tray' -WorkingDirectory $destination -WindowStyle Hidden -PassThru
-    Start-Sleep -Seconds 2
-    if ($launched.HasExited -or [WinDockDeploymentProbe]::PathFor($launched.Id) -ine $installedExe) {
-        throw 'Updated WinDock did not remain running from the installation directory.'
+    $savedSettings = $userData.Settings.GetRawText() | ConvertFrom-Json
+    $expectedNativeTaskbarVisible = -not ($savedSettings.dock.enabled -ne $false -and $savedSettings.dock.replaceTaskbar -eq $true)
+    $startupState = Wait-UpdateStableState -Probe {
+        $launched.Refresh()
+        if ($launched.HasExited -or [WinDockDeploymentProbe]::PathFor($launched.Id) -ine $installedExe) {
+            throw 'Updated WinDock did not remain running from the installation directory.'
+        }
+        $inputIdle = $false
+        try { $inputIdle = $launched.WaitForInputIdle(0) } catch { }
+        $taskbar = [WinDockDeploymentProbe]::FindWindow('Shell_TrayWnd', $null)
+        $nativeTaskbarVisible = $taskbar -ne [IntPtr]::Zero -and [WinDockDeploymentProbe]::IsWindowVisible($taskbar)
+        $reason = if (-not $inputIdle) { 'The application message loop is not ready.' }
+            elseif ($taskbar -eq [IntPtr]::Zero) { 'The Windows taskbar window could not be found.' }
+            elseif ($nativeTaskbarVisible -ne $expectedNativeTaskbarVisible) { 'The Windows taskbar visibility does not match the saved Dock setting.' }
+            else { '' }
+        [pscustomobject]@{ Ready = $reason -eq ''; Reason = $reason; NativeTaskbarVisible = $nativeTaskbarVisible }
     }
     Assert-UpdateUserDataPreserved $userData
     Assert-UpdateInstalledResourcesPreserved $installedResources
     try { $settingsAfter = Get-Content -LiteralPath $settingsFile -Raw | ConvertFrom-Json }
     catch { $settingsAfter = Get-Content -LiteralPath ($settingsFile + '.bak') -Raw | ConvertFrom-Json }
     $pinsPreserved = $true
-    $taskbar = [WinDockDeploymentProbe]::FindWindow('Shell_TrayWnd', $null)
-    if ($taskbar -eq [IntPtr]::Zero) { throw 'The Windows taskbar window could not be found.' }
-    $nativeTaskbarVisible = [WinDockDeploymentProbe]::IsWindowVisible($taskbar)
-    $expectedNativeTaskbarVisible = -not ($settingsAfter.dock.enabled -ne $false -and $settingsAfter.dock.replaceTaskbar -eq $true)
-    if ($nativeTaskbarVisible -ne $expectedNativeTaskbarVisible) { throw 'The Windows taskbar visibility does not match the saved Dock setting.' }
+    $nativeTaskbarVisible = $startupState.NativeTaskbarVisible
     $deploymentVerified = $true
 
     # Finish normal installation before requesting Windows administrator consent.
@@ -369,19 +376,17 @@ catch {
     # A later report failure must not roll back the verified application after
     # Windows has already accepted its new protected login task.
     if ($deploymentVerified) { throw $failure }
-    if ($launched -and -not $launched.HasExited -and
-        [WinDockDeploymentProbe]::PathFor($launched.Id) -ieq $installedExe) {
+    $rollbackReady = $false
+    if ($stopped) {
         try {
-            $signal = [Threading.EventWaitHandle]::OpenExisting('WinDock.Exit')
-            try { [void]$signal.Set() } finally { $signal.Dispose() }
-            [void]$launched.WaitForExit(20000)
+            Wait-UpdateProcessesExit $installedExe $session $readProcessPath $requestNormalExit
+            $rollbackReady = $true
         }
-        catch { Write-Warning 'The updated instance could not be asked to exit normally.' }
+        catch { Write-Warning $_.Exception.Message }
     }
     # A live process can hold native modules. Leave verified backups intact;
     # do not force-kill it or risk a partial rollback under that process.
-    $stillRunning = @(Get-Process -Name WinDock -ErrorAction SilentlyContinue | Where-Object SessionId -eq $session)
-    if ($stopped -and -not $stillRunning.Count) {
+    if ($stopped -and $rollbackReady) {
         $restoreErrors = [Collections.Generic.List[string]]::new()
         foreach ($entry in $copied) {
             $original = Join-Path $installedBefore $entry.Relative

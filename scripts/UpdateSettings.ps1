@@ -284,3 +284,54 @@ function Assert-UpdateStartupPreserved($Plan, $After) {
         throw 'The sign-in startup command was not preserved.'
     }
 }
+
+function Wait-UpdateStableState([scriptblock]$Probe, [int]$TimeoutMilliseconds = 20000,
+    [int]$StableMilliseconds = 1000, [int]$PollMilliseconds = 100,
+    [string]$FailureMessage = 'Updated WinDock did not reach a stable startup state.') {
+    if ($TimeoutMilliseconds -le 0 -or $StableMilliseconds -lt 0 -or
+        $StableMilliseconds -ge $TimeoutMilliseconds -or $PollMilliseconds -le 0) {
+        throw 'Invalid update wait limits.'
+    }
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+    $stableSince = $null
+    $state = $null
+    do {
+        $state = & $Probe
+        if ($timer.ElapsedMilliseconds -ge $TimeoutMilliseconds) { break }
+        if ($state.Ready -eq $true) {
+            if ($null -eq $stableSince) { $stableSince = $timer.ElapsedMilliseconds }
+            if ($timer.ElapsedMilliseconds - $stableSince -ge $StableMilliseconds) { return $state }
+        }
+        else { $stableSince = $null }
+        $remaining = $TimeoutMilliseconds - $timer.ElapsedMilliseconds
+        if ($remaining -le 0) { break }
+        Start-Sleep -Milliseconds ([Math]::Min($PollMilliseconds, $remaining))
+    } while ($timer.ElapsedMilliseconds -lt $TimeoutMilliseconds)
+    throw ($FailureMessage + ' ' + $state.Reason)
+}
+
+function Get-UpdateProcesses([string]$Executable, [int]$Session, [scriptblock]$ReadPath) {
+    $name = [IO.Path]::GetFileNameWithoutExtension($Executable)
+    foreach ($process in @(Get-Process -Name $name -ErrorAction SilentlyContinue)) {
+        if ($process.HasExited -or $process.SessionId -ne $Session) { continue }
+        $path = & $ReadPath $process.Id
+        if (-not $path) {
+            $process.Refresh()
+            if ($process.HasExited) { continue }
+            throw ('Cannot identify a running update process: PID ' + $process.Id)
+        }
+        if ($path -ieq $Executable) { $process }
+    }
+}
+
+function Wait-UpdateProcessesExit([string]$Executable, [int]$Session, [scriptblock]$ReadPath,
+    [scriptblock]$RequestExit, [int]$TimeoutMilliseconds = 20000) {
+    $null = Wait-UpdateStableState -TimeoutMilliseconds $TimeoutMilliseconds -StableMilliseconds 500 -Probe {
+        $remaining = @(Get-UpdateProcesses $Executable $Session $ReadPath)
+        if ($remaining.Count) {
+            try { [void](& $RequestExit) } catch { }
+        }
+        [pscustomobject]@{ Ready = $remaining.Count -eq 0
+            Reason = 'Remaining process IDs: ' + ($remaining.Id -join ', ') }
+    } -FailureMessage 'WinDock did not exit normally; installation files were not changed or restored.'
+}
