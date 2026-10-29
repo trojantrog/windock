@@ -160,11 +160,12 @@ public sealed class LensPanel : Panel
             var scale = i == hovered ? 1 + Math.Min(Magnification - 1, ScaleCap) * amplitude : layout.Scale[i];
             var slot = Mode == LensMode.Magnify ? w * layout.Scale[i] : w;
             var left = x0 + layout.Left[i];
-            child.Arrange(new Rect(x0 + baseLeft, bottom - h, w, h));
+            var childBottom = bottom - (tileHeight - h) / 2;
+            child.Arrange(new Rect(x0 + baseLeft, childBottom - h, w, h));
             Transform(child, scale, layout.Left[i] - baseLeft + (slot - w) / 2);
 
             var kind = GetIndicator(child);
-            if (kind > 0) indicators.Add((new Point(left + slot / 2, final.Height - inset.Bottom / 2), kind));
+            if (kind > 0) indicators.Add((new Point(left + slot / 2, childBottom + inset.Bottom / 2), kind));
             baseLeft += w + Gap;
         }
 
