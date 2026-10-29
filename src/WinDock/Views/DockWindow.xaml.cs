@@ -129,7 +129,7 @@ public partial class DockWindow : Window
     Thickness Inset => new(Math.Round((vm.Options.PlatePadding + 4) * fit), Math.Round(vm.Options.PlatePadding * fit),
         Math.Round((vm.Options.PlatePadding + 4) * fit), Math.Round(Math.Max(vm.Options.PlatePadding,
             vm.Options.IndicatorStyle == "none" ? 0 : vm.Options.IndicatorSize + 4) * fit));
-    double BarHeight => IconSize + Inset.Top + Inset.Bottom;
+    double BarHeight => WidgetPresentation.ContentHeight(vm.Tiles.OfType<WidgetTile>(), IconSize, vm.Options.CompactWidgets) + Inset.Top + Inset.Bottom;
 
     protected override void OnSourceInitialized(EventArgs e)
     {
@@ -157,6 +157,7 @@ public partial class DockWindow : Window
         Resources["IconSize"] = IconSize;
         Resources["WideSize"] = IconSize * 2 + Gap;
         Resources["WiderSize"] = IconSize * 3 + Gap * 2;
+        Resources["WidgetHeight"] = WidgetPresentation.Height(IconSize);
         Strip.Margin = new Thickness(0, 0, 0, BottomGap);
         panel.Gap = Gap;
         panel.Inset = Inset;
@@ -210,6 +211,8 @@ public partial class DockWindow : Window
         Resources["TileFace"] = Brush(theme.TileFace);
         Resources["DockInk"] = Brush(theme.Ink);
         Resources["DockMuted"] = Brush(theme.Muted);
+        Resources["WidgetSurface"] = Brush(dark ? "#EB252934" : "#EBF6F7FA");
+        Resources["WidgetBorder"] = Brush(dark ? "#40FFFFFF" : "#26000000");
         NameTag.Background = Brush(dark ? "#EB1E2029" : "#F5FFFFFF");
         NameTag.BorderBrush = Brush(dark ? "#26FFFFFF" : "#1F000000");
         NameText.Foreground = Brush(dark ? "#F4EFE7" : "#1B1D24");

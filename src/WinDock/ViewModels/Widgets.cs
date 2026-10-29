@@ -25,12 +25,17 @@ public sealed record CompactFace(string Value, string Caption = "", string? Glyp
 public abstract partial class WidgetTile(string key, WidgetSpec spec) : DockTile
 {
     [ObservableProperty] CompactFace? face;
+    [ObservableProperty] WidgetPresentation? presentation;
 
     protected abstract CompactFace Compact();
 
-    public void RefreshFace() => Face = Compact();
+    public void RefreshFace()
+    {
+        Face = Compact();
+        Presentation = WidgetPresentation.From(this, Face);
+    }
 
-    public bool Square(bool byDefault) => Spec.Size is { } size ? size == WidgetSpec.SquareSize : byDefault && this is not NoteWidget;
+    public bool Square(bool byDefault) => Spec.Size is { } size ? size == WidgetSpec.SquareSize : byDefault && this is not NoteWidget && Kind != "token-speed";
 
     string? applied = spec.Size;
 
@@ -757,7 +762,8 @@ public sealed partial class MicWidget : WidgetTile
 
 public sealed partial class NetworkWidget(string key, WidgetSpec spec) : WidgetTile(key, spec)
 {
-    protected override CompactFace Compact() => new(Down, $"\u2191 {Up}", Tip: $"\u2193 {Down} \u00B7 \u2191 {Up}");
+    protected override CompactFace Compact() => new(Down, Up,
+        Tip: $"{WidgetPresentation.NetworkLabel(false)} {Down} · {WidgetPresentation.NetworkLabel(true)} {Up}");
 
     readonly NetworkMeter meter = new();
     DateTime last;
