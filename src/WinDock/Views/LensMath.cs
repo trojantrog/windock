@@ -44,15 +44,46 @@ public static class LensMath
     static double Magnified(double pointer, IReadOnlyList<double> widths, double[] scale, double[] baseLeft, double[] left,
         double baseTotal, double total)
     {
-        if (pointer <= 0) return pointer;
-        if (pointer >= baseTotal) return total + (pointer - baseTotal);
+        // Continue the edge derivative outside the strip before returning to unit scale.
+        // A hard switch here, or in a gap, makes all icons change velocity together.
+        var edge = Math.Min(4, widths[0] / 4);
+        if (pointer <= 0) return pointer + GapCurve(pointer + edge, edge, 0, scale[0] - 1);
+        edge = Math.Min(4, widths[^1] / 4);
+        if (pointer >= baseTotal) return total + (pointer - baseTotal)
+            + GapCurve(pointer - baseTotal, edge, scale[^1] - 1, 0);
+
+        // Touching tiles with different scales cannot share a linear anchor derivative.
+        // Blend only a narrow band, keeping the centers and the rest of each tile exact.
+        for (var k = 0; k + 1 < widths.Count; k++)
+        {
+            var boundary = baseLeft[k + 1];
+            if (boundary != baseLeft[k] + widths[k]) continue;
+            edge = Math.Min(4, Math.Min(widths[k], widths[k + 1]) / 4);
+            if (edge <= 0 || pointer < boundary - edge || pointer > boundary + edge) continue;
+            return Hermite((pointer - boundary + edge) / (2 * edge), 2 * edge,
+                left[k] + (widths[k] - edge) * scale[k], left[k + 1] + edge * scale[k + 1], scale[k], scale[k + 1]);
+        }
+
         var i = baseLeft.Length - 1;
         while (i > 0 && baseLeft[i] > pointer) i--;
         var inside = pointer - baseLeft[i];
         return inside <= widths[i]
             ? left[i] + inside * scale[i]
-            : left[i] + widths[i] * scale[i] + (inside - widths[i]);
+            : left[i] + widths[i] * scale[i] + (inside - widths[i])
+                + GapCurve(inside - widths[i], baseLeft[i + 1] - baseLeft[i] - widths[i], scale[i] - 1, scale[i + 1] - 1);
     }
+
+    static double GapCurve(double inside, double width, double incoming, double outgoing)
+    {
+        if (width <= 0 || inside <= 0 || inside >= width) return 0;
+        var t = inside / width;
+        // Both endpoints have zero extra displacement; their slopes match the tiles.
+        return width * t * (t - 1) * (incoming * (t - 1) + outgoing * t);
+    }
+
+    static double Hermite(double t, double width, double start, double end, double incoming, double outgoing) =>
+        (2 * t * t * t - 3 * t * t + 1) * start + (t * t * t - 2 * t * t + t) * width * incoming
+        + (-2 * t * t * t + 3 * t * t) * end + (t * t * t - t * t) * width * outgoing;
 
     public static double Allowance(double magnification, double radius, double tile) =>
         Math.Max(0, magnification - 1) * (radius + tile);

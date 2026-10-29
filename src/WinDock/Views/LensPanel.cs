@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
@@ -46,34 +47,32 @@ public sealed class LensPanel : Panel
 
     readonly Dictionary<UIElement, (ScaleTransform Scale, TranslateTransform Offset)> transforms = [];
     readonly List<(Point Center, int Kind)> indicators = [];
-    PointerSpring pointerMotion = new(double.NaN);
-    TimeSpan? lastFrame;
+    readonly LensMotion pointerMotion = new();
+    readonly Stopwatch pointerClock = Stopwatch.StartNew();
     bool tracking;
 
-    public LensPanel() => Unloaded += (_, _) => StopTracking();
+    public LensPanel() => Unloaded += (_, _) => { pointerMotion.Reset(Pointer); StopTracking(); };
 
     void TrackPointer()
     {
-        if (!double.IsFinite(Pointer) || !SystemParameters.ClientAreaAnimation || Amplitude < 0.001 || !double.IsFinite(pointerMotion.Position))
-        { pointerMotion = new(Pointer); StopTracking(); return; }
+        pointerMotion.Track(Pointer, pointerClock.Elapsed, SystemParameters.ClientAreaAnimation && Amplitude >= 0.001);
+        if (!pointerMotion.IsTracking) { StopTracking(); return; }
         if (tracking) return;
-        tracking = true; lastFrame = null; CompositionTarget.Rendering += StepPointer;
+        tracking = true; CompositionTarget.Rendering += StepPointer;
     }
 
     void StepPointer(object? sender, EventArgs e)
     {
         if (e is not RenderingEventArgs frame) return;
-        var seconds = lastFrame is { } previous ? (frame.RenderingTime - previous).TotalSeconds : 0;
-        lastFrame = frame.RenderingTime;
-        pointerMotion = pointerMotion.Step(Pointer, seconds);
-        if (pointerMotion.Settled(Pointer)) { pointerMotion = new(Pointer); StopTracking(); }
-        InvalidateArrange();
+        var changed = pointerMotion.Advance(pointerClock.Elapsed, frame.RenderingTime);
+        if (!pointerMotion.IsTracking) StopTracking();
+        if (changed) InvalidateArrange();
     }
 
     void StopTracking()
     {
         if (tracking) CompositionTarget.Rendering -= StepPointer;
-        tracking = false; lastFrame = null;
+        tracking = false;
     }
 
     public double Pointer { get => (double)GetValue(PointerProperty); set => SetValue(PointerProperty, value); }
