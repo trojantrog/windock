@@ -10,6 +10,8 @@ public static class ShellLinks
     const uint AppUserModelId = 5;
     static readonly Guid LinkFormat = new("B9B4B3FC-2B51-4A42-B5D8-324146AFCF25");
     const uint LinkTargetParsingPath = 2;
+    static readonly Guid LinkArgumentsFormat = new("436F2667-14E2-4FEB-B30A-146C53B5B674");
+    const uint LinkArgumentsId = 100;
 
     [ComImport, Guid("00021401-0000-0000-C000-000000000046")]
     class ShellLinkCoClass;
@@ -37,12 +39,29 @@ public static class ShellLinks
         void SetPath([MarshalAs(UnmanagedType.LPWStr)] string path);
     }
 
+    [ComImport, Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IArgumentPropertyStore
+    {
+        [PreserveSig] int GetCount(out uint count);
+        [PreserveSig] int GetAt(uint index, out PropertyKey key);
+        [PreserveSig] int GetValue(ref PropertyKey key, IntPtr value);
+        [PreserveSig] int SetValue(ref PropertyKey key, IntPtr value);
+        [PreserveSig] int Commit();
+    }
+
     [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = false)]
     static extern void SHGetPropertyStoreFromParsingName(string path, IntPtr bindContext, int flags, ref Guid iid,
         [MarshalAs(UnmanagedType.Interface)] out IPropertyStore store);
 
+    [DllImport("shell32.dll", EntryPoint = "SHGetPropertyStoreFromParsingName", CharSet = CharSet.Unicode, ExactSpelling = true, PreserveSig = false)]
+    static extern void SHGetArgumentPropertyStore(string path, IntPtr bindContext, int flags, ref Guid iid,
+        [MarshalAs(UnmanagedType.Interface)] out IArgumentPropertyStore store);
+
     [DllImport("shell32.dll")]
     static extern int SHGetPropertyStoreForWindow(IntPtr hwnd, ref Guid iid, [MarshalAs(UnmanagedType.Interface)] out IPropertyStore store);
+
+    [DllImport("ole32.dll")]
+    static extern int PropVariantClear(IntPtr value);
 
     public static byte[] CreateLauncher(string target, string args, string? iconPath, string appId)
     {
@@ -77,17 +96,29 @@ public static class ShellLinks
         finally { File.Delete(temp); }
     }
 
-    public static string? ReadTarget(string lnkPath)
+    public static string? ReadTarget(string lnkPath) => ReadTarget(lnkPath, out _);
+
+    public static string? ReadTarget(string lnkPath, out bool complete)
     {
+        complete = false;
         try
         {
             var link = (IShellLinkW)new ShellLinkCoClass();
             ((IPersistFile)link).Load(lnkPath, 0);
-            var sb = new StringBuilder(520);
-            link.GetPath(sb, sb.Capacity, IntPtr.Zero, 0);
-            return sb.Length > 0 ? sb.ToString() : null;
+            const int capacity = 520;
+            var sb = new StringBuilder(capacity);
+            link.GetPath(sb, capacity, IntPtr.Zero, 0);
+            var target = sb.Length > 0 ? sb.ToString() : null;
+            complete = IsTargetComplete(target, capacity);
+            return target;
         }
-        catch (Exception e) when (e is COMException or IOException) { return null; }
+        catch (Exception e) when (e is COMException or IOException or UnauthorizedAccessException) { return null; }
+    }
+
+    public static bool IsTargetComplete(string? target, int capacity)
+    {
+        const int maxPath = 260;
+        return target is { Length: > 0 } && target.Length < Math.Min(capacity, maxPath) - 1;
     }
 
     public static string? ReadArguments(string lnkPath)
@@ -101,6 +132,46 @@ public static class ShellLinks
             return sb.Length > 0 ? sb.ToString() : null;
         }
         catch (Exception e) when (e is COMException or IOException) { return null; }
+    }
+
+    public static bool TryReadArguments(string lnkPath, out string arguments)
+    {
+        arguments = "";
+        try
+        {
+            var iid = PropertyStores.Iid;
+            SHGetArgumentPropertyStore(lnkPath, IntPtr.Zero, 0, ref iid, out var store);
+            try { return TryReadArguments(store, out arguments); }
+            finally { Marshal.FinalReleaseComObject(store); }
+        }
+        catch (Exception e) when (e is COMException or IOException or UnauthorizedAccessException) { return false; }
+    }
+
+    public static bool IsArgumentReadComplete(int result) => result == 0;
+
+    static bool TryReadArguments(IArgumentPropertyStore store, out string arguments)
+    {
+        arguments = "";
+        const int variantSize = 24;
+        var value = Marshal.AllocCoTaskMem(variantSize);
+        for (var i = 0; i < variantSize; i++) Marshal.WriteByte(value, i, 0);
+        try
+        {
+            var key = new PropertyKey { Format = LinkArgumentsFormat, Id = LinkArgumentsId };
+            var result = store.GetValue(ref key, value);
+            if (!IsArgumentReadComplete(result)) return false;
+            var type = (VarEnum)Marshal.ReadInt16(value);
+            if (type == VarEnum.VT_EMPTY) return true;
+            if (type != VarEnum.VT_LPWSTR || Marshal.PtrToStringUni(Marshal.ReadIntPtr(value, 8)) is not { } text)
+                return false;
+            arguments = text;
+            return true;
+        }
+        finally
+        {
+            PropVariantClear(value);
+            Marshal.FreeCoTaskMem(value);
+        }
     }
 
     public static string? ReadAppId(string path)
