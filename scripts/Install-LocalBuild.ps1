@@ -1,10 +1,11 @@
 param(
     [Parameter(Mandatory = $true)][string]$PackagePath,
-    [Parameter(Mandatory = $true)][string]$DestinationPath,
-    [switch]$EnableAnimationStartup = $true,
-    [string]$BackupRoot = (Join-Path (Split-Path -Parent $PSScriptRoot) 'publish\backups')
+    [string]$DestinationPath = 'D:\Projects\windock',
+    [switch]$EnableAnimationStartup,
+    [string]$BackupRoot = (Join-Path $env:LOCALAPPDATA 'WinDock\Backups')
 )
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'UpdateSettings.ps1')
 
 # Update the installed copy and its login entry together. Never stop Explorer,
 # DWM, or another application to replace a locked component.
@@ -53,6 +54,7 @@ if (@($entries | Select-Object -ExpandProperty Relative -Unique).Count -ne $entr
 if ($entries.Relative -contains 'SHA256SUMS.txt') { throw 'The checksum manifest cannot include itself.' }
 $entries += [pscustomobject]@{ Relative = 'SHA256SUMS.txt'; Source = $manifest
     Target = (Join-Path $destination 'SHA256SUMS.txt'); Hash = (Get-FileHash -LiteralPath $manifest -Algorithm SHA256).Hash }
+Assert-UpdatePackageResourceBoundaries $entries $destination
 $version = (Get-Item -LiteralPath (Join-Path $package 'WinDock.exe')).VersionInfo.ProductVersion
 $buildInfo = Get-Content -LiteralPath (Join-Path $package 'build-info.json') -Raw | ConvertFrom-Json
 if ($version -ne $buildInfo.productVersion) { throw 'Package version does not match its build record.' }
@@ -84,20 +86,11 @@ if ($running.Count -gt 0 -and ($previousPaths.Count -ne 1 -or -not $previousPath
 }
 $previousExe = if ($previousPaths.Count) { $previousPaths[0] } else { $null }
 $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
-$startupBefore = (Get-ItemProperty -LiteralPath $runKey -Name WinDock -ErrorAction SilentlyContinue).WinDock
+$startupBefore = $null
+$startupPlan = $null
 $backup = Join-Path $backupBase ('install-' + (Get-Date -Format 'yyyyMMdd-HHmmss-fff'))
 New-Item -ItemType Directory -Path $backup -Force | Out-Null
 $installedBefore = Join-Path $backup 'installed'
-if (Test-Path -LiteralPath $destination) {
-    Copy-Item -LiteralPath $destination -Destination $installedBefore -Recurse
-    foreach ($original in Get-ChildItem -LiteralPath $destination -File -Recurse -Force) {
-        $saved = Join-Path $installedBefore ([IO.Path]::GetRelativePath($destination, $original.FullName))
-        if ((Get-FileHash -LiteralPath $original.FullName -Algorithm SHA256).Hash -ne
-            (Get-FileHash -LiteralPath $saved -Algorithm SHA256).Hash) { throw 'Installation backup checksum mismatch.' }
-    }
-}
-[ordered]@{ previousExecutable = $previousExe; startupCommand = $startupBefore; destination = $destination } |
-    ConvertTo-Json | Set-Content -LiteralPath (Join-Path $backup 'before.json') -Encoding utf8
 $backupIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
 try {
     $previousTaskName = 'WinDock.NativeMotion.' + $backupIdentity.User.Value
@@ -108,49 +101,25 @@ try {
     }
 }
 finally { $backupIdentity.Dispose() }
-$settingsFile = Join-Path $env:APPDATA 'WinDock\settings.json'
+$userDirectory = Join-Path $env:APPDATA 'WinDock'
+$settingsFile = Join-Path $userDirectory 'settings.json'
 $copied = [Collections.Generic.List[object]]::new()
 $stopped = $false
 $startupChanged = $false
 $deploymentVerified = $false
 $launched = $null
-$settingsRaw = $null
-function Save-SettingsWithNativeTaskbar([string]$Raw, [bool]$EnableNativeAnimations = $false) {
-    $pattern = '"replaceTaskbar"\s*:\s*(true|false)'
-    if ([regex]::Matches($Raw, $pattern).Count -ne 1) { throw 'Cannot safely preserve the native taskbar setting.' }
-    $updated = [regex]::Replace($Raw, $pattern, '"replaceTaskbar": false')
-    if ($EnableNativeAnimations) {
-        $animationPattern = '"nativeWindowAnimations"\s*:\s*(true|false)'
-        if ([regex]::Matches($updated, $animationPattern).Count -ne 1) { throw 'Cannot safely enable native animations.' }
-        $updated = [regex]::Replace($updated, $animationPattern, '"nativeWindowAnimations": true')
-    }
-    $temporary = $settingsFile + '.' + [Guid]::NewGuid().ToString('N') + '.tmp'
-    $previous = $temporary + '.previous'
-    $replaced = $false
-    try {
-        [IO.File]::WriteAllText($temporary, $updated, [Text.UTF8Encoding]::new($false))
-        $parsed = Get-Content -LiteralPath $temporary -Raw | ConvertFrom-Json
-        if ($parsed.dock.replaceTaskbar -ne $false -or [IO.File]::ReadAllText($temporary) -cne $updated) {
-            throw 'Temporary settings readback failed.'
-        }
-        if (Test-Path -LiteralPath $settingsFile) { [IO.File]::Replace($temporary, $settingsFile, $previous) }
-        else { [IO.File]::Move($temporary, $settingsFile) }
-        $replaced = $true
-    }
-    finally {
-        if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary }
-        if ($replaced -and (Test-Path -LiteralPath $previous)) { Remove-Item -LiteralPath $previous }
-    }
-}
+$userData = $null
 function Read-StartupValue([Microsoft.Win32.RegistryKey]$Root, [string]$Path, [string]$Name) {
     $key = $null
     try {
         $key = $Root.OpenSubKey($Path)
         $value = $null
+        $kind = $null
         if ($key) { $value = $key.GetValue($Name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) }
-        return [pscustomobject]@{ readable = $true; present = $null -ne $value; value = $value }
+        if ($null -ne $value) { $kind = [string]$key.GetValueKind($Name) }
+        return [pscustomobject]@{ readable = $true; present = $null -ne $value; value = $value; kind = $kind }
     }
-    catch { return [pscustomobject]@{ readable = $false; present = $null; value = $null } }
+    catch { return [pscustomobject]@{ readable = $false; present = $null; value = $null; kind = $null } }
     finally { if ($key) { $key.Dispose() } }
 }
 function Get-StartupPolicyState([Microsoft.Win32.RegistryKey]$Root, [string]$Name) {
@@ -182,6 +151,8 @@ function Get-OrdinaryStartupState([string]$Executable) {
     $command = if ($run.value -is [string]) { $run.value } else { $null }
     $matches = $null -ne $command -and $command.Equals(('"' + $Executable + '" --tray'), [StringComparison]::OrdinalIgnoreCase)
     return [pscustomobject]@{
+        readable = $run.readable; runValue = $run.value; runKind = $run.kind
+        approvalReadable = $approval.readable; approvalPresent = $approval.present; approvalRecord = $approval.value
         registered = $run.present; matchesInstalledExecutable = $matches; command = $command
         windowsApproval = $approvalState; runPolicy = $policy; windowsAllowsStartup = $allowed
         ready = $run.readable -and $matches -and $allowed -eq $true
@@ -255,6 +226,13 @@ function Get-AnimationLoginState([string]$UserSid) {
     catch { return [pscustomobject]$result }
 }
 try {
+    $installedExe = Join-Path $destination 'WinDock.exe'
+    $ordinaryStartupBefore = Get-OrdinaryStartupState $installedExe
+    $startupBefore = $ordinaryStartupBefore.runValue
+    $startupPlan = Get-UpdateStartupPlan $ordinaryStartupBefore $installedExe
+    [ordered]@{ previousExecutable = $previousExe; startupCommand = $startupBefore; destination = $destination
+        ordinaryStartup = $ordinaryStartupBefore; startupAction = $startupPlan.Action } |
+        ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $backup 'before.json') -Encoding utf8
     if ($running.Count) {
         $signal = [Threading.EventWaitHandle]::OpenExisting('WinDock.Exit')
         try { [void]$signal.Set() } finally { $signal.Dispose() }
@@ -266,42 +244,39 @@ try {
         if ($remaining.Count) { throw 'WinDock did not exit normally; installed files were not changed.' }
     }
     $stopped = $true
-    $settingsRaw = [IO.File]::ReadAllText($settingsFile)
-    $settingsBefore = $settingsRaw | ConvertFrom-Json
-    Copy-Item -LiteralPath $settingsFile -Destination (Join-Path $backup 'settings.json')
-    if ((Get-FileHash -LiteralPath $settingsFile).Hash -ne
-        (Get-FileHash -LiteralPath (Join-Path $backup 'settings.json')).Hash) { throw 'Settings backup checksum mismatch.' }
-    Save-SettingsWithNativeTaskbar $settingsRaw ([bool]$EnableAnimationStartup)
+    $userData = Backup-UpdateUserData $userDirectory (Join-Path $backup 'user-data')
+    $userData.Files | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $backup 'user-data-sha256.json') -Encoding utf8
+    $installedResources = Get-UpdateInstalledResources $destination
+    $installedResources.Files | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $backup 'installed-user-resources-sha256.json') -Encoding utf8
+    $installedFilesBefore = @(Backup-UpdateInstalledFiles $entries $destination $installedBefore $installedResources)
+    $installedFilesBefore | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $backup 'installed-files-sha256.json') -Encoding utf8
     New-Item -ItemType Directory -Path $destination -Force | Out-Null
-    foreach ($entry in $entries) {
-        $parent = Split-Path -Parent $entry.Target
-        New-Item -ItemType Directory -Path $parent -Force | Out-Null
-        if ((Test-Path -LiteralPath $entry.Target) -and
-            (Get-FileHash -LiteralPath $entry.Target -Algorithm SHA256).Hash -eq $entry.Hash) { continue }
-        $copied.Add($entry)
-        Copy-Item -LiteralPath $entry.Source -Destination $entry.Target -Force
-        if ((Get-FileHash -LiteralPath $entry.Target -Algorithm SHA256).Hash -ne $entry.Hash) {
-            throw ('Installed file checksum mismatch: ' + $entry.Relative)
-        }
+    Copy-UpdatePackageFiles $entries $copied
+    $startupCommand = $startupPlan.Command
+    Assert-UpdateStartupUnchanged $ordinaryStartupBefore (Get-OrdinaryStartupState $installedExe)
+    if ($startupPlan.Write) { $startupChanged = $true }
+    Invoke-UpdateStartupPlan $startupPlan {
+        param($command, $kind)
+        New-ItemProperty -LiteralPath $runKey -Name WinDock -Value $command -PropertyType $kind -Force | Out-Null
     }
-    $installedExe = Join-Path $destination 'WinDock.exe'
-    $startupCommand = '"' + $installedExe + '" --tray'
-    if (-not (Test-Path -LiteralPath $runKey)) { New-Item -Path $runKey -Force | Out-Null }
-    New-ItemProperty -LiteralPath $runKey -Name WinDock -Value $startupCommand -PropertyType String -Force | Out-Null
-    $startupChanged = $true
-    if ((Get-ItemProperty -LiteralPath $runKey -Name WinDock).WinDock -cne $startupCommand) { throw 'Login entry readback failed.' }
+    Assert-UpdateStartupPreserved $startupPlan (Get-OrdinaryStartupState $installedExe)
+    Assert-UpdateUserDataUnchanged $userData
+    Assert-UpdateInstalledResourcesPreserved $installedResources
     $launched = Start-Process -FilePath $installedExe -ArgumentList '--tray' -WorkingDirectory $destination -WindowStyle Hidden -PassThru
     Start-Sleep -Seconds 2
     if ($launched.HasExited -or [WinDockDeploymentProbe]::PathFor($launched.Id) -ine $installedExe) {
         throw 'Updated WinDock did not remain running from the installation directory.'
     }
-    $settingsAfter = Get-Content -LiteralPath $settingsFile -Raw | ConvertFrom-Json
-    $pinsPreserved = ($settingsBefore.alwaysPinned | ConvertTo-Json -Depth 20 -Compress) -ceq
-                     ($settingsAfter.alwaysPinned | ConvertTo-Json -Depth 20 -Compress)
-    if (-not $pinsPreserved -or $settingsAfter.dock.replaceTaskbar) { throw 'Settings readback failed.' }
+    Assert-UpdateUserDataPreserved $userData
+    Assert-UpdateInstalledResourcesPreserved $installedResources
+    try { $settingsAfter = Get-Content -LiteralPath $settingsFile -Raw | ConvertFrom-Json }
+    catch { $settingsAfter = Get-Content -LiteralPath ($settingsFile + '.bak') -Raw | ConvertFrom-Json }
+    $pinsPreserved = $true
     $taskbar = [WinDockDeploymentProbe]::FindWindow('Shell_TrayWnd', $null)
+    if ($taskbar -eq [IntPtr]::Zero) { throw 'The Windows taskbar window could not be found.' }
     $nativeTaskbarVisible = [WinDockDeploymentProbe]::IsWindowVisible($taskbar)
-    if (-not $nativeTaskbarVisible) { throw 'The native taskbar is not visible after installation.' }
+    $expectedNativeTaskbarVisible = -not ($settingsAfter.dock.enabled -ne $false -and $settingsAfter.dock.replaceTaskbar -eq $true)
+    if ($nativeTaskbarVisible -ne $expectedNativeTaskbarVisible) { throw 'The Windows taskbar visibility does not match the saved Dock setting.' }
     $deploymentVerified = $true
 
     # Finish normal installation before requesting Windows administrator consent.
@@ -309,12 +284,19 @@ try {
     # are written after launch, so changes made during that wait stay intact.
     $animationLogin = [ordered]@{ requested = [bool]$EnableAnimationStartup; registered = $false; reused = $false
         attempted = $false; result = 'notRequested'; exitCode = $null; before = $null; after = $null; differentComponentMayRun = $null }
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    try { $userSid = $identity.User.Value } finally { $identity.Dispose() }
+    $animationLogin.before = Get-AnimationLoginState $userSid
+    if ($animationLogin.before.ready) {
+        $animationLogin.registered = $true
+        $animationLogin.reused = $true
+        $animationLogin.result = 'reused'
+        $animationLogin.exitCode = 0
+    }
+    elseif (-not $EnableAnimationStartup) { $animationLogin.result = 'preserved-' + $animationLogin.before.state }
     if ($EnableAnimationStartup) {
         # Windows presents its normal administrator consent prompt. This entry
         # only registers the protected login helper; it never starts an animation.
-        $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-        try { $userSid = $identity.User.Value } finally { $identity.Dispose() }
-        $animationLogin.before = Get-AnimationLoginState $userSid
         if ($animationLogin.before.ready) {
             $animationLogin.registered = $true
             $animationLogin.reused = $true
@@ -345,33 +327,42 @@ try {
                 $animationLogin.result = if ($animationLogin.exitCode -eq 1223) { 'registrationCanceled' } else { 'registrationFailed' }
             }
         }
-        $animationLogin.after = Get-AnimationLoginState $userSid
-        if ($animationLogin.registered -and -not $animationLogin.after.ready) { $animationLogin.result = 'verificationFailed' }
-        $animationLogin.registered = $animationLogin.registered -and $animationLogin.after.ready
-        $animationLogin.differentComponentMayRun = if ($animationLogin.after.exists -eq $false -or $animationLogin.after.enabled -eq $false -or
-            $animationLogin.after.triggerEnabled -eq $false -or $animationLogin.after.matchesCurrentComponent -eq $true) { $false }
-            elseif ($animationLogin.after.enabled -eq $true -and $animationLogin.after.triggerEnabled -eq $true -and
-                $animationLogin.after.matchesCurrentComponent -eq $false -and $animationLogin.after.state -in @('differentComponent', 'restricted')) { $true }
-            else { $null }
     }
+    $animationLogin.after = Get-AnimationLoginState $userSid
+    if ($animationLogin.registered -and -not $animationLogin.after.ready) { $animationLogin.result = 'verificationFailed' }
+    $animationLogin.registered = $animationLogin.registered -and $animationLogin.after.ready
+    $animationLogin.differentComponentMayRun = if ($animationLogin.after.exists -eq $false -or $animationLogin.after.enabled -eq $false -or
+        $animationLogin.after.triggerEnabled -eq $false -or $animationLogin.after.matchesCurrentComponent -eq $true) { $false }
+        elseif ($animationLogin.after.enabled -eq $true -and $animationLogin.after.triggerEnabled -eq $true -and
+            $animationLogin.after.matchesCurrentComponent -eq $false -and $animationLogin.after.state -in @('differentComponent', 'restricted')) { $true }
+        else { $null }
     $ordinaryStartup = Get-OrdinaryStartupState $installedExe
-    $startupReady = $ordinaryStartup.ready -and (-not $EnableAnimationStartup -or $animationLogin.registered)
+    Assert-UpdateStartupPreserved $startupPlan $ordinaryStartup
+    $animationStartupRequired = $EnableAnimationStartup -or $settingsAfter.dock.nativeWindowAnimations -ne $false
+    $startupReady = $ordinaryStartup.ready -and (-not $animationStartupRequired -or $animationLogin.registered)
+    $requestedStartupIncomplete = $EnableAnimationStartup -and -not $animationLogin.registered
     $report = [ordered]@{
-        outcome = if ($startupReady) { 'installed' } else { 'installedStartupIncomplete' }
+        outcome = if ($requestedStartupIncomplete) { 'installedStartupIncomplete' } else { 'installed' }
         installedAt = [DateTimeOffset]::Now.ToString('o'); version = $version
         installedExecutable = $installedExe; runningExecutable = [WinDockDeploymentProbe]::PathFor($launched.Id)
         processId = $launched.Id; startupCommand = $startupCommand; backup = $backup
+        startupChoicePreserved = $true; startupAction = $startupPlan.Action; settingsPreserved = $true
+        userDataBackup = $userData.BackupDirectory; userDataFilesVerifiedBeforeLaunch = $userData.Files.Count
+        installedUserResourcesPreserved = $true; installedUserResourceFilesVerified = $installedResources.Files.Count
+        installedFilesBackedUp = $installedFilesBefore.Count
         ordinaryStartup = $ordinaryStartup; animationLogin = $animationLogin; startupReady = $startupReady
         verifiedFiles = $entries.Count; pinsPreserved = $pinsPreserved; replaceTaskbar = $settingsAfter.dock.replaceTaskbar
         nativeTaskbarWindowVisible = $nativeTaskbarVisible
+        nativeTaskbarExpectedVisible = $expectedNativeTaskbarVisible
         desktopInteractionTested = $false; loginCycleTested = $false
     }
     $report | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $backup 'install-report.json') -Encoding utf8
     $report | ConvertTo-Json -Depth 5
-    if (-not $startupReady) {
+    if ($requestedStartupIncomplete) {
         Write-Warning ('WinDock was installed, but sign-in startup is incomplete or unconfirmed. Report: ' + (Join-Path $backup 'install-report.json'))
         exit 2
     }
+    exit 0
 }
 catch {
     $failure = $_
@@ -407,14 +398,13 @@ catch {
         }
         if ($startupChanged) {
             try {
-                if ($null -ne $startupBefore) { Set-ItemProperty -LiteralPath $runKey -Name WinDock -Value $startupBefore }
-                else { Remove-ItemProperty -LiteralPath $runKey -Name WinDock -ErrorAction SilentlyContinue }
+                $startupCurrent = Get-OrdinaryStartupState $installedExe
+                if ($startupCurrent.runValue -cne $startupPlan.Command -or $startupCurrent.runKind -cne $startupPlan.Kind) {
+                    throw 'The startup command changed after installation; its current value was preserved.'
+                }
+                New-ItemProperty -LiteralPath $runKey -Name WinDock -Value $startupBefore -PropertyType $startupPlan.Kind -Force | Out-Null
             }
             catch { $restoreErrors.Add('Startup: ' + $_.Exception.Message) }
-        }
-        if ($settingsRaw) {
-            try { Save-SettingsWithNativeTaskbar $settingsRaw }
-            catch { $restoreErrors.Add('Settings: ' + $_.Exception.Message) }
         }
         if ($restoreErrors.Count) { Write-Warning ('Restoration incomplete: ' + ($restoreErrors -join '; ')) }
         elseif ($previousExe) {
