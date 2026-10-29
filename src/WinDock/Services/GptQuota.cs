@@ -18,7 +18,12 @@ public sealed record GptQuotaLimits(GptQuotaWindow? FiveHour, GptQuotaWindow? Se
             && map.TryGetProperty("codex", out var codex) && codex.ValueKind == JsonValueKind.Object)
             bucket = codex;
         else if (result.TryGetProperty("rateLimits", out var legacy) && legacy.ValueKind == JsonValueKind.Object)
+        {
+            if (map.ValueKind == JsonValueKind.Object && map.EnumerateObject().Any(entry => entry.Name != "codex")
+                && (!legacy.TryGetProperty("limitId", out var legacyId) || legacyId.ValueKind != JsonValueKind.String
+                    || legacyId.GetString() != "codex")) return null;
             bucket = legacy;
+        }
         else return null;
         if (bucket.TryGetProperty("limitId", out var id) && id.ValueKind == JsonValueKind.String && id.GetString() != "codex") return null;
         var windows = new[] { Window(bucket, "primary"), Window(bucket, "secondary") }.OfType<GptQuotaWindow>().ToArray();

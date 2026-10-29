@@ -49,6 +49,29 @@ public class GptUsageTests
     }
 
     [Fact]
+    public async Task Untagged_legacy_must_not_inherit_another_named_bucket()
+    {
+        const string input = """
+            {"rateLimits":{"primary":{"usedPercent":42,"windowDurationMins":10080,"resetsAt":1793784675}},
+             "rateLimitsByLimitId":{"codex_other":{"limitId":"codex_other","primary":{"usedPercent":42,"windowDurationMins":10080,"resetsAt":1793784675}}}}
+            """;
+        Assert.Null(Parse(input));
+        var result = await GptQuotaReader.ReadProtocolAsync(new StringReader(Transcript("{\"type\":\"chatgpt\"}",
+            "{\"id\":3,\"result\":" + input.ReplaceLineEndings("") + "}")), new StringWriter(), Now, TimeSpan.FromSeconds(1));
+        Assert.Equal(GptQuotaStatus.Unsupported, result.Status);
+        Assert.Null(result.Limits);
+    }
+
+    [Fact]
+    public void Explicit_codex_legacy_and_untagged_legacy_without_other_buckets_remain_compatible()
+    {
+        var untagged = SevenDay.Replace("\"limitId\":\"codex\",", "");
+        foreach (var map in new[] { "null", "{}" })
+            Assert.Equal(80, Parse("{\"rateLimits\":" + untagged + ",\"rateLimitsByLimitId\":" + map + "}")!.SevenDay!.UsedPercent);
+        Assert.Equal(80, Parse("{\"rateLimits\":" + SevenDay + ",\"rateLimitsByLimitId\":{\"codex_other\":{\"limitId\":\"codex_other\"}}}")!.SevenDay!.UsedPercent);
+    }
+
+    [Fact]
     public void Swapped_primary_and_secondary_windows_are_presented_in_their_actual_duration_order()
     {
         var limits = Limits(Both);
