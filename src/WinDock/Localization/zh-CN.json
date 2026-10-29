@@ -524,5 +524,22 @@
   "nativeMotionAutoWaiting": "登录启动已配置，等待自动连接",
   "nativeMotionAutoIncomplete": "自动连接尚未成功，登录启动设置已保留",
   "nativeMotionAutoUnconfirmed": "登录启动已配置，当前组件状态尚未确认",
-  "nativeMotionSignOutAutomatic": "当前仍是旧组件，已配置下次登录自动启用"
+  "nativeMotionSignOutAutomatic": "当前仍是旧组件，已配置下次登录自动启用",
+  "widget_token-speed": "Token 速度",
+  "tokenSpeedUnit": "Token/s · 最近",
+  "tokenSpeedWaiting": "等待新输出",
+  "tokenSpeedNoSamples": "暂无有效样本",
+  "tokenSpeedMissing": "未找到词脉",
+  "tokenSpeedBusy": "统计数据繁忙",
+  "tokenSpeedTimedOut": "读取超时",
+  "tokenSpeedInvalidData": "统计数据异常",
+  "tokenSpeedUnsupported": "格式不兼容",
+  "tokenSpeedUnavailable": "无法读取统计",
+  "tokenSpeedLoading": "正在读取统计",
+  "tokenSpeedEstimate": "最近已完成输出速度 · 估算值",
+  "tokenSpeedUnknownModel": "未知模型",
+  "tokenSpeedSample": "{0} · 完成于 {1}（{4} 秒前）\n输出 {2} Token / 用时 {3} 秒",
+  "tokenSpeedAverage": "同模型近30分：{0} Token/s · {1} 条有效输出（按耗时加权）",
+  "tokenSpeedLimited": "已达到读取上限，均速基于已读取的记录。",
+  "tokenSpeedMethod": "输出 Token 数除以本次输出耗时。每 2 秒读取词脉已有记录，数据可能延迟。60 秒没有新有效输出后清空数值。"
 }
