@@ -44,16 +44,12 @@ public static class LensMath
     static double Magnified(double pointer, IReadOnlyList<double> widths, double[] scale, double[] baseLeft, double[] left,
         double baseTotal, double total)
     {
-        // Continue the edge derivative outside the strip before returning to unit scale.
-        // A hard switch here, or in a gap, makes all icons change velocity together.
         var edge = Math.Min(4, widths[0] / 4);
         if (pointer <= 0) return pointer + GapCurve(pointer + edge, edge, 0, scale[0] - 1);
         edge = Math.Min(4, widths[^1] / 4);
         if (pointer >= baseTotal) return total + (pointer - baseTotal)
             + GapCurve(pointer - baseTotal, edge, scale[^1] - 1, 0);
 
-        // Touching tiles with different scales cannot share a linear anchor derivative.
-        // Blend only a narrow band, keeping the centers and the rest of each tile exact.
         for (var k = 0; k + 1 < widths.Count; k++)
         {
             var boundary = baseLeft[k + 1];
@@ -77,7 +73,6 @@ public static class LensMath
     {
         if (width <= 0 || inside <= 0 || inside >= width) return 0;
         var t = inside / width;
-        // Both endpoints have zero extra displacement; their slopes match the tiles.
         return width * t * (t - 1) * (incoming * (t - 1) + outgoing * t);
     }
 

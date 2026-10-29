@@ -1,6 +1,5 @@
 namespace WinDock.Views;
 
-/// <summary>Pointer animation state; the caller supplies monotonic input and render times.</summary>
 public sealed class LensMotion
 {
     PointerSpring pointer = new(double.NaN);
@@ -19,8 +18,6 @@ public sealed class LensMotion
         if (IsTracking) return;
         if (pointer.Settled(value)) { Reset(value); return; }
         IsTracking = true;
-        // Restart from the input time, so a new movement has no zero-time frame
-        // and never consumes the time spent idle.
         lastStep = now;
     }
 

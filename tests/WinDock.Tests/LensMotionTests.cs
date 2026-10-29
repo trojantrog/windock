@@ -58,7 +58,6 @@ public class LensMotionTests(ITestOutputHelper output)
         foreach (var ticks in new[] { 5_000, 71_000, 120_000, 20_000, 330_000, 1_000, 80_000 })
         {
             var step = TimeSpan.FromTicks(ticks);
-            // Input callbacks may repeat the same target between render frames.
             motion.Track(100, elapsed + step / 2, true);
             elapsed += step;
             motion.Advance(elapsed, elapsed);
@@ -192,8 +191,6 @@ public class LensMotionTests(ITestOutputHelper output)
 
     static double[] BarAndStatus(LensLayout frame, double[] widths)
     {
-        // LensPanel.ArrangeOverride: fixed origin, plate inset, and the last
-        // unscaled item's render position all use the same Layout.Left values.
         const double origin = 200, inset = 3 + 4;
         var left = origin + frame.Left[0] - inset;
         var right = origin + frame.Left[^1] + widths[^1] * frame.Scale[^1] + inset;
@@ -281,8 +278,6 @@ public class LensMotionTests(ITestOutputHelper output)
             for (var i = 0; i < widths.Length; i++)
             {
                 double Center(LensLayout layout) => layout.Left[i] + widths[i] * layout.Scale[i] / 2;
-                // Second-order one-sided derivatives separate a true kink from the
-                // large but finite curvature of a very short gap.
                 var incoming = (3 * Center(frame) - 4 * Center(before) + Center(beforeTwice)) / (2 * step);
                 var outgoing = (-3 * Center(frame) + 4 * Center(after) - Center(afterTwice)) / (2 * step);
                 Assert.True(Math.Abs(outgoing - incoming) < 0.001,
